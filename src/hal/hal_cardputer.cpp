@@ -150,6 +150,21 @@ void voice(uint8_t channel, uint16_t freqHz, uint16_t ms, uint8_t wave, uint8_t 
                            kWave[wave], sizeof(kSquare), false);
 }
 
+bool sample(uint8_t channel, const int8_t* pcm, size_t n, uint32_t rateHz,
+            uint8_t vol) {
+  if (channel > 7) channel = 7;
+  M5Cardputer.Speaker.setChannelVolume(channel, vol);
+  // stop_current_sound is true here where voice() passes false, and the
+  // difference matters: the per-channel request queue is two slots deep, and
+  // these are whole sounds rather than 20 ms steps. Queued, a cue that outranks
+  // the one playing would wait out most of a second behind an explosion and
+  // arrive after the thing it was announcing. sfx.cpp has already decided this
+  // cue wins the channel; the speaker should not second-guess it.
+  return M5Cardputer.Speaker.playRaw(pcm, n, rateHz, false, 1, (int)channel, true);
+}
+
+void silence() { M5Cardputer.Speaker.stop(); }
+
 }  // namespace hal
 
 #endif  // BOARD_CARDPUTER

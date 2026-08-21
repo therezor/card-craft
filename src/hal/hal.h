@@ -81,4 +81,21 @@ void beep(uint16_t freqHz, uint16_t ms);
 // not lose the sound. See sfx.h for what is built on top.
 void voice(uint8_t channel, uint16_t freqHz, uint16_t ms, uint8_t wave, uint8_t vol);
 
+// Plays a block of 8-bit signed PCM on a mixing channel, cutting whatever that
+// channel was doing. Returns false where the board has no PCM path at all, so
+// the caller can fall back to voice() rather than go silent.
+//
+// This is what the game's sounds actually are: voice() can only hold a pitch at
+// a volume, and an envelope, a noise burst and a pitch sweep are all outside
+// what that can express. The waveforms are rendered offline instead — see
+// tools/make-sfx.py — and this hands one to the speaker.
+//
+// The data is not copied. It has to outlive the sound, which is why the bank
+// lives in flash as const arrays.
+bool sample(uint8_t channel, const int8_t* pcm, size_t n, uint32_t rateHz, uint8_t vol);
+
+// Stops every channel now. The sound toggle uses this, so switching sound off
+// during a fuse does not leave the fuse running.
+void silence();
+
 }  // namespace hal

@@ -16,6 +16,7 @@
 // =============================================================================
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 namespace sfx {
@@ -43,10 +44,25 @@ struct Step {
 };
 
 struct Cue {
-  const Step* step;
-  uint8_t     n;
-  uint8_t     ch;
-  uint8_t     prio;   // a louder cue on the same channel interrupts a quieter one
+  // What the sound actually is: a waveform rendered offline by
+  // tools/make-sfx.py and played back whole. See sfxdata.h.
+  const int8_t* pcm;
+  uint16_t      pcmLen;
+  uint16_t      pcmMs;   // precomputed, so play() can tell a busy channel from
+                         // a free one without asking the speaker
+  uint8_t       vol;
+  // Jitters the playback rate a few percent per play. Only worth it on the
+  // sounds that repeat quickly: eight identical mining ticks a second is a
+  // machine gun, and the ear notices the sameness long before the sound.
+  bool          varies;
+
+  // The fallback, for a board whose speaker cannot take PCM. Less sound, not no
+  // sound — the same bargain hal.h makes for every other optional capability.
+  const Step*   step;
+  uint8_t       n;
+
+  uint8_t       ch;
+  uint8_t       prio;   // a louder cue on the same channel interrupts a quieter one
 };
 
 // The cues the game plays. Named rather than numbered so main.cpp reads as a
@@ -54,6 +70,7 @@ struct Cue {
 extern const Cue kMineTick, kBlockBroke, kPlace, kNoBlocks;
 extern const Cue kSwing, kWhiff, kMobHit, kMobDied;
 extern const Cue kHurt, kDied, kTelegraph, kHiss, kExplode;
+extern const Cue kArrowFire, kArrowHit;
 extern const Cue kDusk, kDawn, kMenuMove, kBuy, kCraft, kCraftFail;
 
 // Starts a cue. Cheap enough to call unconditionally: a cue that loses to a
@@ -62,5 +79,12 @@ void play(const Cue& c);
 
 // Advances every channel. Call once a frame with a millisecond clock.
 void update(uint32_t nowMs);
+
+// The sound setting, off the pause card. This is the one gate — every sound the
+// game makes goes through play(), so there is nowhere else for one to leak out.
+// Switching off also stops whatever is in flight, so a fuse does not outlive
+// the decision to silence it.
+void setEnabled(bool on);
+bool enabled();
 
 }  // namespace sfx

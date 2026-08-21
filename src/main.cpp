@@ -41,9 +41,15 @@ game::State      s_game;
 Preferences      s_prefs;
 uint32_t         s_best = 0;
 bool             s_record = false;
+bool             s_sound = true;                  // the pause-card setting, kept in NVS
 ui::Menu         s_menu;
-ui::MenuItem     s_items[game::R_COUNT > 3 ? game::R_COUNT : 3];
+// Four is the pause card, which is the longest list here: the craft menu has
+// R_COUNT rows and the dawn card has three. Spelled as a floor rather than left
+// to happen to be R_COUNT, so removing a recipe cannot quietly shrink it under
+// what openPauseMenu() writes.
+ui::MenuItem     s_items[game::R_COUNT > 4 ? game::R_COUNT : 4];
 char             s_title[28];                     // menu heading, rebuilt per open
+char             s_soundRow[16];                  // "SOUND: ON", rebuilt on toggle
 char             s_detail[game::R_COUNT][26];     // recipe cost lines
 uint32_t         s_tickAccum = 0;
 uint32_t         s_lastUs = 0;
@@ -73,6 +79,8 @@ void playEvents(uint32_t ev) {
   if (ev & game::EV_MOB_HIT)     sfx::play(sfx::kMobHit);
   else if (ev & game::EV_SWING)  sfx::play(sfx::kSwing);
   else if (ev & game::EV_WHIFF)  sfx::play(sfx::kWhiff);
+  if (ev & game::EV_ARROW_FIRE)  sfx::play(sfx::kArrowFire);
+  if (ev & game::EV_ARROW_HIT)   sfx::play(sfx::kArrowHit);
   if (ev & game::EV_PLACE)       sfx::play(sfx::kPlace);
   if (ev & game::EV_NO_BLOCKS)   sfx::play(sfx::kNoBlocks);
   if (ev & game::EV_MINE_STEP) {
@@ -165,12 +173,16 @@ void openCraftMenu() {
   s_menu.open(s_title, s_items, game::R_COUNT);
 }
 
+// Four rows is what the card can hold: Menu::draw sizes itself to its contents
+// and four comes to 127 px of the 135 the panel has. A fifth would not fit.
 void openPauseMenu() {
-  s_items[0] = ui::MenuItem{ "RESUME",   nullptr, 0, true };
-  s_items[1] = ui::MenuItem{ "NEW WORLD", "start over",  0, true };
-  s_items[2] = ui::MenuItem{ "QUIT",      "back to title", 0, true };
+  snprintf(s_soundRow, sizeof(s_soundRow), "SOUND: %s", s_sound ? "ON" : "OFF");
+  s_items[0] = ui::MenuItem{ "RESUME",    nullptr,         0, true };
+  s_items[1] = ui::MenuItem{ s_soundRow,  nullptr,         0, true };
+  s_items[2] = ui::MenuItem{ "NEW WORLD", "start over",    0, true };
+  s_items[3] = ui::MenuItem{ "QUIT",      "back to title", 0, true };
   snprintf(s_title, sizeof(s_title), "PAUSED  NIGHT %u", (unsigned)s_game.night);
-  s_menu.open(s_title, s_items, 3);
+  s_menu.open(s_title, s_items, 4);
 }
 
 void startRun() {
@@ -280,6 +292,9 @@ void setup() {
     }
   }
 
+  s_sound = s_prefs.getBool("sound", true);
+  sfx::setEnabled(s_sound);
+
   s_lastUs = micros();
 }
 
@@ -383,8 +398,8 @@ void loop() {
       drawScene();
       s_menu.draw("\x18\x19 PICK   E TAKE");
       if (!s_lockout) {
-        if (b.fwdEdge  || b.leftEdge)  s_menu.move(-1);
-        if (b.backEdge || b.rightEdge) s_menu.move(1);
+        if (b.fwdEdge  || b.leftEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
+        if (b.backEdge || b.rightEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
         if (b.actEdge) {
           game::chooseUpgrade(s_game, s_game.offer[s_menu.index()]);
           sfx::play(sfx::kBuy);
@@ -402,8 +417,8 @@ void loop() {
                hal::caps().kAct, hal::caps().kCraft);
       s_menu.draw(foot);
       if (!s_lockout) {
-        if (b.fwdEdge)  s_menu.move(-1);
-        if (b.backEdge) s_menu.move(1);
+        if (b.fwdEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
+        if (b.backEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
         if (b.craftEdge || b.pauseEdge) resume();
         else if (b.actEdge) {
           if (game::craft(s_game, (uint8_t)s_menu.index())) {
@@ -426,13 +441,25 @@ void loop() {
       ui::hud(s_game);
       s_menu.draw("\x18\x19 PICK   E OK");
       if (!s_lockout) {
-        if (b.fwdEdge)  s_menu.move(-1);
-        if (b.backEdge) s_menu.move(1);
+        if (b.fwdEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
+        if (b.backEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
         if (b.pauseEdge) resume();
         else if (b.actEdge) {
+          // Spelled out rather than leaning on default:, because the row that
+          // falls through is whichever one was added last, and that is not a
+          // thing the next person to add a row should have to notice.
           switch (s_menu.index()) {
             case 0: resume(); break;
-            case 1: startRun(); break;
+            case 1:
+              s_sound = !s_sound;
+              s_prefs.putBool("sound", s_sound);
+              sfx::setEnabled(s_sound);
+              // Turning it on says so out loud. Turning it off cannot, which is
+              // the confirmation for that direction.
+              if (s_sound) sfx::play(sfx::kBuy);
+              openPauseMenu();          // relabel the row; the cursor survives
+              break;
+            case 2: startRun(); break;
             default:
               s_scr = SCR_TITLE;
               s_lockout = LOCKOUT_FRAMES;

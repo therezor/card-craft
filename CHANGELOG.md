@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.4.0 — sounds, and a switch to turn them off
+
+### The beeps were a format problem, not a tuning problem
+
+Every sound was a short table of `{freq, ms, wave, vol}` steps handed to
+`Speaker.tone()`, which loops a sixteen-sample wavetable at a frequency. Three
+things that format cannot express, and every sound worth having needs at least
+one of them:
+
+- **an envelope.** Nothing decayed. Every impact ended by being cut off, which
+  is what made them read as beeps more than any pitch choice did.
+- **noise.** The `kNoise[16]` table was a sixteen-sample cycle played *at a
+  pitch* — at 300 Hz that is a 300 Hz buzz, not noise. The explosion, the hit
+  and the mining tick all depended on it and none of them got it.
+- **a sweep.** An explosion is a continuous fall. This one was five tones.
+
+Retuning the frequency tables cannot fix any of that, and adding envelopes as
+micro-steps is not open either: M5Unified's per-channel request queue is two
+slots deep, so a thirty-step envelope has nowhere to go.
+
+So the waveforms are rendered offline now, by `tools/make-sfx.py`, and the device
+plays them back through `Speaker.playRaw()`. An explosion is noise through a
+two-pole filter sweeping 3 kHz to 200 Hz over 800 ms with a 120 to 45 Hz sub
+falling underneath it and a second thump behind it. A hit is a 10 ms crack on an
+80 ms thump. A mining tick is 75 ms of band-limited noise around 400 Hz.
+
+| | before | after |
+|---|---|---|
+| Sound source | 16-sample wavetable at a pitch | rendered PCM, 16 kHz |
+| Flash | 616 KB | 707 KB (of 3342 KB) |
+| RAM | 103724 bytes | 103724 bytes |
+
+Zero RAM because the bank lives in flash and the speaker task reads it in place,
+which is the only reason this is affordable at all — the two 64.8 KB DMA
+framebuffers are already the tightest allocation in the program.
+
+The old step tables are still in `sfx.cpp`. They are the fallback for a board
+whose `hal::sample()` returns false, which is the same bargain `hal.h` makes for
+every other optional capability: less sound, never none.
+
+### Repeats stopped machine-gunning
+
+Mining fires a tick about eight times a second, and eight *identical* ticks a
+second is a machine gun — the ear catches the sameness long before it catches
+the sound. Mining, hits, swings and block breaks now jitter their playback rate
+±8% per play, off a seeded LCG so a run is still reproducible.
+
+### Two events that made no sound at all
+
+`EV_ARROW_FIRE` and `EV_ARROW_HIT` had been raised by `game.cpp` since
+projectiles went in and had no case in `playEvents()`: skeletons shot at you in
+silence. The bow sits on the mob channel rather than the tool channel, because on
+the tool channel it would lose to the player's own swings — which is exactly the
+moment an incoming arrow has to be heard.
+
+Menu cursor movement was also silent on every card. `kMenuMove` existed but was
+wired only to the block-cycle key.
+
+### SOUND: ON/OFF
+
+On the pause card, saved to NVS. Switching it off stops whatever is in flight
+rather than letting a fuse outlive the decision to silence it, and every sound
+the game makes goes through `sfx::play()`, so there is one gate and nothing can
+leak past it.
+
+The pause card's `switch` used to reach QUIT through `default:`. Inserting a row
+would have silently changed what QUIT meant, so it is spelled out now.
+
 ## 1.3.0 — the polish pass
 
 Rendering, art, combat feel, particles and sound. And, found along the way, the
