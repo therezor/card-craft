@@ -42,6 +42,7 @@ static Mob& poseMob(State& s, int slot, uint8_t kind, float dist) {
   m.hp = 40;
   m.x = s.cam.px + s.cam.dx * dist;
   m.y = s.cam.py + s.cam.dy * dist;
+  m.z = world::groundAt(m.x, m.y);
   m.bestDist = 99.0f;
   return m;
 }
@@ -564,7 +565,7 @@ static Mob& lone(State& s, uint8_t kind, float x, float y) {
   for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
   Mob& m = s.mobs[0];
   m.alive = true; m.kind = kind; m.hp = 99;
-  m.x = x; m.y = y;
+  m.x = x; m.y = y; m.z = world::groundAt(x, y);
   m.timer = 0; m.windup = 0; m.burn = 0; m.los = true; m.flowHold = 99; m.side = 0;
   m.idle = 0; m.bestDist = 1e9f;
   return m;
@@ -641,8 +642,18 @@ static void test_blast_falls_off_with_height(void) {
 static void test_lava_burns_mobs_too(void) {
   State s = fresh();
   survivable(s);
-  const int lx = (int)s.cam.px + 6, ly = (int)s.cam.py;
-  TEST_ASSERT_TRUE(world::place(lx, ly, world::B_LAVA));
+  // A cell near the player that will actually take a block. A fixed offset used
+  // to do, but the generator now hangs tree canopies and roof eaves over a good
+  // deal of the map, and place() refuses to build a floor up into one — so the
+  // spot has to be found rather than assumed, or this fails on the terrain
+  // rather than on anything to do with lava.
+  int lx = -1, ly = -1;
+  for (int r = 4; r <= 10 && lx < 0; ++r)
+    for (int d = -r; d <= r && lx < 0; ++d) {
+      const int tx = (int)s.cam.px + r, ty = (int)s.cam.py + d;
+      if (world::place(tx, ty, world::B_LAVA)) { lx = tx; ly = ty; }
+    }
+  TEST_ASSERT_TRUE(lx > 0);
 
   Mob& m = lone(s, MOB_ZOMBIE, (float)lx + 0.5f, (float)ly + 0.5f);
   m.hp = 99;
@@ -790,7 +801,7 @@ static void test_a_swing_at_nothing_still_swings(void) {
       while (world::height(x, y) < world::GROUND)
         world::place(x, y, world::B_DIRT);
     }
-  s.pitch = (float)(raycast::HORIZON + raycast::PITCH_RANGE);
+  s.pitch = (float)(raycast::HORIZON + raycast::PITCH_UP);
 
   Input act; act.act = true;
   act.lookUp = true;                       // hold the view up, past the terrain
@@ -805,6 +816,42 @@ static void test_a_swing_at_nothing_still_swings(void) {
   // Once per swing, not once per tick. Sixty a second is a buzz, not a swing.
   TEST_ASSERT_TRUE(whiffs >= 3);
   TEST_ASSERT_TRUE(whiffs <= 20);
+}
+
+// The view stays where it is put.
+//
+// It used to drift back to the resting tilt the moment neither look key was
+// held, which meant the camera pushed back against the player: you could look
+// up at a canopy but not keep looking at it. Pitch is a held position now, the
+// same as the facing angle.
+static void test_pitch_holds_where_it_is_left(void) {
+  State s = fresh();
+  const float rest = s.pitch;
+
+  Input up; up.lookUp = true;
+  run(s, up, 20);
+  const float raised = s.pitch;
+  TEST_ASSERT_TRUE(raised > rest + 20.0f);        // it actually moved
+
+  run(s, Input{}, 120);                            // two seconds of nothing
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, raised, s.pitch);
+
+  // ...and the deliberate recentre still works, which is the only thing that
+  // should bring it home.
+  Input both; both.lookUp = true; both.lookDown = true;
+  run(s, both, 2);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, rest, s.pitch);
+}
+
+// Looking down has to reach as far as looking up. The old range stopped at
+// twelve degrees below level, on the theory that down is where the frame time
+// is; it is not, because a steep down ray meets the floor within a cell.
+static void test_looking_down_reaches_the_full_stop(void) {
+  State s = fresh();
+  Input down; down.lookDown = true;
+  run(s, down, 200);                               // hold it to the stop
+  TEST_ASSERT_FLOAT_WITHIN(0.51f,
+      (float)(raycast::HORIZON - raycast::PITCH_DOWN), s.pitch);
 }
 
 // ...and missing must not lock the player out of connecting. A whiff that set
@@ -973,11 +1020,15 @@ static void test_the_spark_ring_never_overflows(void) {
 // Particles are cosmetic and must never reach into the simulation's own random
 // stream — every other test in this file depends on a run being reproducible.
 static void test_effects_do_not_disturb_the_simulation(void) {
-  State a = fresh(9191);
-  State b = fresh(9191);
+  // One run at a time. The world is a single set of statics, so ticking two
+  // States in the same loop has them mining the same columns out from under
+  // each other — and on terrain with real relief in it that feeds straight
+  // back into where the player ends up, which is the thing being compared.
   Input act; act.act = true; act.fwd = true;
+  State a = fresh(9191);
+  for (int i = 0; i < 900; ++i) tick(a, act);
+  State b = fresh(9191);
   for (int i = 0; i < 900; ++i) {
-    tick(a, act);
     tick(b, act);
     b.sparkN = 0;              // one drains its effects, the other never does
   }
@@ -985,6 +1036,230 @@ static void test_effects_do_not_disturb_the_simulation(void) {
   TEST_ASSERT_EQUAL_INT16(a.hp, b.hp);
   TEST_ASSERT_FLOAT_WITHIN(0.001f, a.cam.px, b.cam.px);
   TEST_ASSERT_FLOAT_WITHIN(0.001f, a.cam.py, b.cam.py);
+}
+
+
+// ---- building against a face ------------------------------------------------
+
+// The bug this locks down: placing used to grow whatever column the crosshair
+// landed on, so aiming at the SIDE of a wall stacked another block on its top
+// instead of putting one beside it. There was no way to build outward, which
+// means there was no way to build a floor.
+static void test_placing_against_a_side_face_builds_outward_not_upward(void) {
+  State s = fresh();
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
+  s.inv[world::B_BRICK] = 40;
+
+  // A wall ahead, tall enough that the resting aim meets its side rather than
+  // sailing over its top.
+  const int wx = (int)s.cam.px + 3, wy = (int)s.cam.py;
+  for (int i = 0; i < 5; ++i) world::place(wx, wy, world::B_STONE);
+  const uint8_t wallH = world::height(wx, wy);
+  const uint8_t nearH = world::height(wx - 1, wy);
+
+  // The crosshair must actually be on the wall's side, or this test is not
+  // testing what it says it is.
+  Input idle; tick(s, idle);
+  TEST_ASSERT_TRUE(s.aimValid);
+  TEST_ASSERT_EQUAL_INT(wx, s.aimX);
+  TEST_ASSERT_EQUAL_INT(wy, s.aimY);
+  TEST_ASSERT_EQUAL_INT(-1, s.aimNX);          // approached from the west
+  TEST_ASSERT_EQUAL_INT(0,  s.aimNZ);          // a side face, not the top
+
+  Input build; build.build = true;
+  run(s, build, 40);
+
+  // The wall did not grow: that is the old behaviour, and it is the bug.
+  TEST_ASSERT_EQUAL_UINT8(wallH, world::height(wx, wy));
+  // The block went into the cell the face points at instead.
+  TEST_ASSERT_TRUE(world::height(wx - 1, wy) > nearH);
+}
+
+// A block may not be put where the player is standing. The old rule refused
+// only the player's own cell, which ignored the block over their head — and
+// what it was really guarding was pillaring straight up out of a wave.
+static void test_you_cannot_place_a_block_inside_yourself(void) {
+  State s = fresh();
+  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
+  s.inv[world::B_BRICK] = 20;
+  const uint16_t before = s.inv[world::B_BRICK];
+
+  // Look as far down as the camera goes, so the crosshair lands underfoot.
+  Input down; down.lookDown = true;
+  run(s, down, 60);
+
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  const uint8_t hBefore = world::height(px, py);
+
+  Input build; build.build = true; build.lookDown = true;
+  run(s, build, 120);
+
+  // The column the player stands in never grew under them.
+  TEST_ASSERT_EQUAL_UINT8(hBefore, world::height(px, py));
+  // And nothing was spent failing to do it.
+  TEST_ASSERT_TRUE(s.inv[world::B_BRICK] <= before);
+}
+
+// Refusing has to be free. A refused placement that still burned a block would
+// drain the inventory of a player who simply aimed badly.
+static void test_a_refused_placement_costs_nothing(void) {
+  State s = fresh();
+  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
+  s.inv[world::B_BRICK] = 7;
+
+  Input down; down.lookDown = true;
+  run(s, down, 60);
+  const uint16_t before = s.inv[world::B_BRICK];
+
+  Input build; build.build = true; build.lookDown = true;
+  uint32_t ev = 0;
+  int placed = 0;
+  for (int i = 0; i < 200; ++i) {
+    ev = tick(s, build);
+    if (ev & EV_PLACE) ++placed;
+  }
+  TEST_ASSERT_EQUAL_UINT16(before - placed, s.inv[world::B_BRICK]);
+}
+
+
+// Walking up something you built, end to end through the simulation rather
+// than through world:: alone. The eye has to follow the feet, and the feet have
+// to end up on top of the stair rather than inside it.
+static void test_the_player_walks_up_a_staircase_they_built(void) {
+  State s = fresh();
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  const int g = (int)world::height(px, py);
+  for (int i = 1; i <= 5; ++i)
+    for (int k = 0; k < i; ++k) world::place(px + i, py, world::B_PLANK);
+
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  Input fwd; fwd.fwd = true;
+  int peak = s.feetZ;
+  for (int t = 0; t < 200; ++t) {
+    run(s, fwd, 1);
+    if (s.feetZ > peak) peak = s.feetZ;
+    // The eye never falls far behind the feet, or the view is inside the floor.
+    TEST_ASSERT_TRUE(s.cam.z > (float)s.feetZ - 0.5f);
+  }
+  TEST_ASSERT_EQUAL_INT(g + 5, peak);
+}
+
+// ...and does not walk up a wall.
+static void test_the_player_is_stopped_by_a_two_high_wall(void) {
+  State s = fresh();
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int k = 0; k < 2; ++k) world::place(wx, wy, world::B_STONE);
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+
+  Input fwd; fwd.fwd = true;
+  run(s, fwd, 200);
+  TEST_ASSERT_TRUE(s.cam.px < (float)wx);
+  TEST_ASSERT_EQUAL_UINT8(world::height((int)s.cam.px, (int)s.cam.py), s.feetZ);
+}
+
+
+// ---- mobs on built geometry -------------------------------------------------
+
+// The game's core loop is walling yourself in at night, and giving mobs a
+// surface graph to path over is the change most likely to break it. STEP_UP is
+// still one, and the flow field checks the step in BOTH directions, so two high
+// is still two high.
+static void test_walling_yourself_in_still_works(void) {
+  State s = fresh();
+  survivable(s);
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  for (int dy = -2; dy <= 2; ++dy)
+    for (int dx = -2; dx <= 2; ++dx) {
+      if (dx > -2 && dx < 2 && dy > -2 && dy < 2) continue;
+      for (int k = 0; k < 2; ++k) world::place(px + dx, py + dy, world::B_STONE);
+    }
+  // Nothing can step over it from inside or out.
+  TEST_ASSERT_EQUAL_UINT8(world::NO_SURFACE,
+                          world::surfaceUnder(px + 2, py, (int)s.feetZ));
+
+  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 6;
+  Input idle;
+  float closest = 99.0f;
+  // Inside one night: past dawn the wave is gone, and sealedTicks decays
+  // because "nothing can reach you" stops being interesting with nothing alive.
+  for (int t = 0; t < 30 * TICK_HZ; ++t) {
+    run(s, idle, 1);
+    for (int i = 0; i < MAX_MOBS; ++i) {
+      const Mob& m = s.mobs[i];
+      if (!m.alive) continue;
+      const float dx = m.x - s.cam.px, dy = m.y - s.cam.py;
+      const float d = sqrtf(dx * dx + dy * dy);
+      if (d < closest) closest = d;
+    }
+  }
+  TEST_ASSERT_TRUE(closest > 1.5f);        // nothing reached the player
+  // And the game noticed, so turtling still summons the siege rather than
+  // being a free win.
+  // SEALED_TRIGGER is private to game.cpp; it is 2 seconds. Well past it.
+  TEST_ASSERT_TRUE(s.sealedTicks > 2 * TICK_HZ);
+}
+
+// The other half: a staircase IS climbable, which is what makes mobs pathing
+// over built geometry worth having at all. A mob that cannot follow you up
+// your own stairs is a mob that ignores everything you build.
+static void test_a_mob_climbs_a_staircase_the_player_built(void) {
+  State s = fresh();
+  survivable(s);
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  const int g = (int)world::height(px, py);
+
+  // A flat run east, then four steps up to a platform.
+  for (int i = 1; i <= 8; ++i)
+    while ((int)world::height(px + i, py) > g) {
+      uint8_t m, b, o;
+      world::mine(px + i, py, world::height(px + i, py) - 1, 100000, m, b, o);
+    }
+  for (int i = 1; i <= 4; ++i)
+    for (int k = 0; k < i; ++k) world::place(px + i, py, world::B_PLANK);
+  // A landing, not a post. One cell at the top is the cell the player occupies,
+  // and a mob has no reason to walk into that — it stops beside it and swings.
+  for (int i = 5; i <= 7; ++i)
+    while ((int)world::height(px + i, py) < g + 4)
+      world::place(px + i, py, world::B_PLANK);
+
+  // The player stands along the landing rather than on the top step, so the
+  // mob has to finish the climb to reach them instead of stopping a step short
+  // and swinging up.
+  s.cam.px = (float)(px + 6) + 0.5f; s.cam.py = (float)py + 0.5f;
+  s.feetZ = (uint8_t)(g + 4);
+  s.cam.z = (float)s.feetZ + raycast::EYE; s.eyeZ = s.cam.z;
+  Mob& m = lone(s, MOB_ZOMBIE, (float)(px - 1) + 0.5f, (float)py + 0.5f);
+  m.z = (uint8_t)world::groundAt(m.x, m.y);
+  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 0;
+
+  Input idle;
+  int peak = m.z;
+  for (int t = 0; t < 60 * TICK_HZ && peak < g + 4; ++t) {
+    run(s, idle, 1);
+    if (!s.mobs[0].alive) break;
+    if (s.mobs[0].z > peak) peak = s.mobs[0].z;
+  }
+  TEST_ASSERT_EQUAL_INT(g + 4, peak);      // it walked all the way up
+}
+
+// A mob spawns on the terrain, never on top of what the player has built —
+// otherwise a roof is not shelter, it is a landing pad.
+static void test_mobs_spawn_on_the_ground_not_on_your_roof(void) {
+  State s = fresh();
+  survivable(s);
+  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 12;
+  Input idle;
+  run(s, idle, 30 * TICK_HZ);
+  int checked = 0;
+  for (int i = 0; i < MAX_MOBS; ++i) {
+    const Mob& m = s.mobs[i];
+    if (!m.alive) continue;
+    ++checked;
+    // Its feet are on the ground column of its cell, not on a run over it.
+    TEST_ASSERT_TRUE(m.z <= world::height((int)m.x, (int)m.y) + 1);
+  }
+  TEST_ASSERT_TRUE(checked > 0);
 }
 
 int main(int, char**) {
@@ -997,6 +1272,11 @@ int main(int, char**) {
   RUN_TEST(test_walls_stop_the_player_but_steps_do_not);
   RUN_TEST(test_eye_follows_the_ground);
   RUN_TEST(test_stepping_up_is_eased_not_teleported);
+  RUN_TEST(test_the_player_walks_up_a_staircase_they_built);
+  RUN_TEST(test_the_player_is_stopped_by_a_two_high_wall);
+  RUN_TEST(test_walling_yourself_in_still_works);
+  RUN_TEST(test_a_mob_climbs_a_staircase_the_player_built);
+  RUN_TEST(test_mobs_spawn_on_the_ground_not_on_your_roof);
   RUN_TEST(test_cannot_build_under_yourself);
   RUN_TEST(test_building_empty_handed_reports_it);
   RUN_TEST(test_mining_yields_and_upgrades_speed_it_up);
@@ -1011,6 +1291,9 @@ int main(int, char**) {
   RUN_TEST(test_mining_files_drops_by_material);
   RUN_TEST(test_hotbar_cycles_and_wraps);
   RUN_TEST(test_building_places_the_held_block);
+  RUN_TEST(test_placing_against_a_side_face_builds_outward_not_upward);
+  RUN_TEST(test_you_cannot_place_a_block_inside_yourself);
+  RUN_TEST(test_a_refused_placement_costs_nothing);
   RUN_TEST(test_crafting_consumes_and_produces);
   RUN_TEST(test_patch_heals_without_overhealing);
   RUN_TEST(test_torches_keep_the_ground_clear);
@@ -1024,6 +1307,8 @@ int main(int, char**) {
   RUN_TEST(test_slab_blocks_line_of_sight);
   RUN_TEST(test_score_rewards_survival_most);
   RUN_TEST(test_a_swing_at_nothing_still_swings);
+  RUN_TEST(test_pitch_holds_where_it_is_left);
+  RUN_TEST(test_looking_down_reaches_the_full_stop);
   RUN_TEST(test_a_whiff_does_not_lock_out_a_real_swing);
   RUN_TEST(test_invulnerability_swallows_a_second_blow);
   RUN_TEST(test_invulnerability_does_not_shield_lava);

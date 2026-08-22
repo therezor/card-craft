@@ -18,6 +18,7 @@
 // =============================================================================
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 
 #include "game.h"
 #include "hal/hal.h"
@@ -41,7 +42,7 @@ game::State      s_game;
 Preferences      s_prefs;
 uint32_t         s_best = 0;
 bool             s_record = false;
-bool             s_sound = true;                  // the pause-card setting, kept in NVS
+bool             s_sound = false;                 // the pause-card setting, kept in NVS
 ui::Menu         s_menu;
 // Four is the pause card, which is the longest list here: the craft menu has
 // R_COUNT rows and the dawn card has three. Spelled as a floor rather than left
@@ -114,11 +115,24 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
   int mobs = 0;
   for (int i = 0; i < game::MAX_MOBS; ++i) if (s_game.mobs[i].alive) ++mobs;
   Serial.printf("fps=%u avg_cpu_us=%u max_cpu_us=%u mobs=%d "
-                "world_us=%u mobs_us=%u sky_us=%u sel_us=%u shade_us=%u\n",
+                "world_us=%u mobs_us=%u sky_us=%u sel_us=%u shade_us=%u "
+                // What is left after the framebuffers are up. Reported rather
+                // than reasoned about: the build's own figures are static bytes
+                // against a total the framebuffers are not counted in, so the
+                // two cannot be subtracted to get this. Every new static array
+                // is spent against this number.
+                "heap=%u heapmax=%u "
+                "fspans=%u ftall=%u fpix=%u fseg=%u\n",
                 fps, (unsigned)avgCpu, (unsigned)s_cpuMax, mobs,
                 (unsigned)render::g_usWorld, (unsigned)render::g_usMobs,
                 (unsigned)render::g_usSky, (unsigned)render::g_usSel,
-                (unsigned)render::g_usShade);
+                (unsigned)render::g_usShade,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)render::g_floorSpans, (unsigned)render::g_floorTall,
+                (unsigned)render::g_floorPix, (unsigned)render::g_floorSeg);
+  render::g_floorSpans = render::g_floorTall = 0;
+  render::g_floorPix = render::g_floorSeg = 0;
 #endif
   s_fpsSum = s_cpuSum = s_cpuMax = 0;
   s_fpsN = 0;
@@ -133,8 +147,19 @@ void fpsDraw() { render::text(3, 14, s_fpsLine, render::pack(120, 220, 140), 1);
 // forward + turn + mine sweeps the camera over the whole island and keeps the
 // mining path hot; left running it walks into dusk and meets a real wave,
 // which is the case the 30 fps target actually has to survive.
+// The world every benchmark run measures. Any value would do; what matters is
+// that it never changes, so two runs are comparable.
+constexpr uint32_t BENCH_SEED = 0xCA2DC4A7u;
 bool     s_bench = false;
 uint32_t s_benchFrames = 0;
+
+// Holds a look key down: -1 down, 0 neither, +1 up. Pitch is the one control
+// that cannot be exercised over a serial link, and it is the control that says
+// whether a canopy or a bridge deck is in frame at all — the same reason the
+// 't' command exists. It drives the real Input flags rather than writing the
+// horizon, so what gets measured is the clamp and the drift as the game runs
+// them, not a value poked past both.
+int8_t   s_look = 0;
 #endif
 
 // ---- helpers ----------------------------------------------------------------
@@ -238,7 +263,8 @@ void drawScene() {
   render::shadeFor(game::daylight(s_game), cam.horizon);
   render::drawWorld(cam,
                     s_game.aimValid ? s_game.aimX : -1,
-                    s_game.aimValid ? s_game.aimY : -1);
+                    s_game.aimValid ? s_game.aimY : -1,
+                    s_game.aimValid ? s_game.aimZ : -1);
   render::drawSky(cam, game::daylight(s_game));
   render::drawMobs(s_game, cam);
   render::drawParticles(cam);
@@ -292,7 +318,13 @@ void setup() {
     }
   }
 
-  s_sound = s_prefs.getBool("sound", true);
+  // Key "snd2", not "sound". Flipping the default alone would have silenced
+  // only the boards that had never touched the toggle: the old key is written
+  // on every toggle, so anyone who had ever switched sound on carried a stored
+  // true past the new default. Renaming the key retires those values in one
+  // step and starts every board silent, which is what the setting is for right
+  // now. The toggle still persists, under the new name.
+  s_sound = s_prefs.getBool("snd2", false);
   sfx::setEnabled(s_sound);
 
   s_lastUs = micros();
@@ -358,10 +390,37 @@ void loop() {
         in.right = ((s_benchFrames / 240) & 1) != 0;
         in.left  = !in.right;
       }
+      // After the bench block, which clears the whole Input: a benchmark run at
+      // full pitch is the measurement worth having now that the world carries
+      // four times the overhangs it used to.
+      if (s_look > 0)      in.lookUp   = true;
+      else if (s_look < 0) in.lookDown = true;
 #endif
 
       int steps = 0;
       uint32_t ev = 0;
+#ifdef DEV_SERIAL
+      if (s_bench) {
+        // Exactly one tick a frame, and the wall clock ignored.
+        //
+        // The benchmark is otherwise not comparable between two builds, which
+        // is the only thing it exists for. Catch-up ticks are driven by elapsed
+        // time, so a build that renders more slowly takes MORE ticks per frame,
+        // walks further per frame, and by a few seconds in is standing
+        // somewhere else entirely looking at a different scene. That is a
+        // feedback loop, not noise: measured over forty windows it put two runs
+        // of the SAME build 12% apart on frame rate and 33% apart on CPU.
+        //
+        // Pinned at one tick per frame the walk is frame-indexed, so window N
+        // covers the same simulated moment in every build and the question the
+        // benchmark answers becomes "what did this frame cost". The game runs
+        // slower than real time while benching, which does not matter — nothing
+        // here is measuring how the game feels.
+        s_tickAccum = 0;
+        ev |= game::tick(s_game, in);
+        steps = 1;
+      } else
+#endif
       while (s_tickAccum >= TICK_US && steps < MAX_CATCHUP) {
         s_tickAccum -= TICK_US;
         ev |= game::tick(s_game, in);
@@ -452,7 +511,7 @@ void loop() {
             case 0: resume(); break;
             case 1:
               s_sound = !s_sound;
-              s_prefs.putBool("sound", s_sound);
+              s_prefs.putBool("snd2", s_sound);
               sfx::setEnabled(s_sound);
               // Turning it on says so out loud. Turning it off cannot, which is
               // the confirmation for that direction.
@@ -574,11 +633,82 @@ void loop() {
       // openable from the keyboard.
       if (s_scr == SCR_PLAY) { openPauseMenu(); s_scr = SCR_PAUSE; }
       else if (s_scr == SCR_PAUSE) { resume(); }
+    } else if (cmd == 'g') {
+      // Stand the player in front of something worth looking at, and face it.
+      // A house is two or three cells on a 64x64 map and a tree not much more;
+      // steering to one over a serial link is not a thing worth doing twice,
+      // which is the same reason 't' exists. Cycles house, then tree.
+      static int which = 0;
+      const bool house = ((which++ & 1) == 0);
+      const uint8_t want = house ? world::B_WOOD : world::B_LEAVES;
+      // Nearest the middle of the map, not the first one scanned: the first is
+      // always the one hard against the bedrock ring, and a photograph of a
+      // tree with the border wall behind it is a photograph of the border wall.
+      int bx = -1, by = -1, best = 1 << 30;
+      for (int y = 3; y < world::H - 3; ++y)
+        for (int x = 3; x < world::W - 3; ++x) {
+          if (world::topMat(x, y) != want
+              || world::height(x, y) < world::GROUND + 3) continue;
+          const int dx = x - world::W / 2, dy = y - world::H / 2;
+          if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; bx = x; by = y; }
+        }
+      if (bx < 0) { Serial.printf("go: nothing found\n"); }
+      else {
+        // A spot to stand: far enough back to get the whole thing in frame,
+        // and somewhere a body could actually be.
+        int sx = -1, sy = -1;
+        for (int r = 10; r >= 6 && sx < 0; --r)
+          for (int a = 0; a < 24 && sx < 0; ++a) {
+            const float th = (float)a * 0.2618f;
+            const int tx = bx + (int)(cosf(th) * (float)r);
+            const int ty = by + (int)(sinf(th) * (float)r);
+            // Clear where it stands and clear all round it, or the shot is of
+            // whatever happens to be a cell in front of the lens.
+            bool clear = true;
+            for (int dy = -1; dy <= 1 && clear; ++dy)
+              for (int dx = -1; dx <= 1 && clear; ++dx)
+                clear = !world::isBorder(tx + dx, ty + dy)
+                        && world::height(tx + dx, ty + dy) <= world::GROUND
+                        && !world::hasSlab(tx + dx, ty + dy);
+            if (!clear) continue;
+            sx = tx; sy = ty;
+          }
+        if (sx < 0) { sx = bx + 6; sy = by; }
+        s_game.cam.px = (float)sx + 0.5f;
+        s_game.cam.py = (float)sy + 0.5f;
+        s_game.cam.z  = (float)world::groundAt(s_game.cam.px, s_game.cam.py)
+                      + raycast::EYE;
+        s_game.eyeZ   = s_game.cam.z;
+        s_game.angle  = atan2f((float)by + 0.5f - s_game.cam.py,
+                               (float)bx + 0.5f - s_game.cam.px);
+        raycast::setAngle(s_game.cam, s_game.angle);
+        Serial.printf("go: %s at (%d,%d), standing (%d,%d)\n",
+                      house ? "house" : "tree", bx, by, sx, sy);
+      }
+    } else if (cmd == 'l') {
+      // Up, then down, then let it drift home.
+      s_look = (s_look == 0) ? 1 : (s_look == 1 ? -1 : 0);
+      Serial.printf("look=%d horizon=%d rest=%d up=%d down=%d\n",
+                    (int)s_look, (int)s_game.cam.horizon, raycast::HORIZON,
+                    raycast::HORIZON + raycast::PITCH_UP,
+                    raycast::HORIZON - raycast::PITCH_DOWN);
     } else if (cmd == 'b') {
       s_bench = !s_bench;
       s_benchFrames = 0;
       if (s_bench) {
-        if (s_scr != SCR_PLAY) startRun();
+        // A fixed seed, and always a fresh world — not startRun()'s random one,
+        // and not whatever the player happened to be standing in.
+        //
+        // The benchmark used to measure a different island every time it ran,
+        // which makes it useless for the only thing a benchmark is for: telling
+        // whether a change made things slower. Two runs of the SAME build came
+        // back at 37 fps and 75 fps purely because one of them was looking at a
+        // house and the other at open ground.
+        game::begin(s_game, BENCH_SEED);
+        s_scr = SCR_PLAY;
+        s_lockout = LOCKOUT_FRAMES;
+        s_tickAccum = 0;
+        s_lastUs = micros();
         // Jump straight to a late-night wave. A benchmark that measures night
         // one measures five mobs; the frame rate that has to hold is the one
         // with a full field of twenty-four, and waiting ten real minutes to

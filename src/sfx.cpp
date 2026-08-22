@@ -144,7 +144,7 @@ struct Voice {
 };
 Voice s_voice[CH_COUNT];
 
-bool     s_on    = true;
+bool     s_on    = false;
 uint32_t s_nowMs = 0;
 
 // Deliberately not esp_random(): the pitch jitter has to be reproducible for

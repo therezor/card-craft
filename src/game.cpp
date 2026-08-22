@@ -22,12 +22,18 @@ constexpr float PLAYER_RADIUS = 0.26f;
 constexpr float MOB_RADIUS    = 0.30f;
 constexpr float MOVE_SPEED    = 3.1f;    // cells/second
 
-// Looking up and down, in horizon pixels per second, and how fast the view
-// drifts back to the resting tilt when neither key is held. The drift is slow
-// on purpose: fast enough that you never have to think about recentring,
-// slow enough that it does not fight you while you are lining up a shot.
-constexpr float PITCH_SPEED  = 90.0f;
-constexpr float PITCH_RETURN = 26.0f;
+// Looking up and down, in horizon pixels per second.
+//
+// Scaled with the range: the sweep is 560 pixels end to end now rather than
+// 150, and at the old 130 a full look from floor to sky took four seconds. A
+// look control you have to wait out is one you stop using.
+//
+// There is no return speed any more. The view used to drift back to the
+// resting tilt whenever neither key was held, which meant the camera pushed
+// back against the player the moment they stopped asking — you could not look
+// up at a canopy and keep looking at it. Pitch is a held position now, exactly
+// like the facing angle next to it, and holding both keys recentres it.
+constexpr float PITCH_SPEED  = 320.0f;
 
 // How hard the eye is pulled toward the height of the ground under it, and how
 // much of its speed survives each tick. Critically damped would settle without
@@ -39,7 +45,18 @@ constexpr float EYE_DAMP     = 0.55f;
 constexpr float EYE_SNAP     = 0.004f;   // below this, stop integrating
 constexpr float STRAFE_SCALE  = 0.55f;   // walking backwards is deliberately slow
 constexpr float TURN_SPEED    = 2.7f;    // radians/second
-constexpr float MINE_REACH    = 6.0f;   // past where the aim ray meets flat ground
+// How far the player can reach to mine or to place, as a distance from the eye
+// to the block face — the same number for both, as Minecraft uses.
+//
+// The floor under this is not taste, it is geometry. At the resting tilt the
+// aim ray leaves the eye at EYE = 1.2 above the ground and descends
+// TILT / PROJ = 0.2375 per cell, so the crosshair meets flat ground at
+// 1.2 / 0.2375 = 5.05 cells out, which is 5.19 away from the eye. A board with
+// no pitch keys never leaves that tilt (see hal.h), so a reach below 5.19 would
+// make open ground unmineable on it — Minecraft's own 4.5 is not available to
+// us. 5.5 is the tightest round number that clears it, and the 0.31 of margin
+// it leaves is what would break first if TILT or EYE were ever retuned.
+constexpr float REACH         = 5.5f;
 constexpr float MELEE_REACH   = 1.9f;
 constexpr float MELEE_DOT     = 0.55f;   // roughly a 110 degree swing arc
 constexpr int   SWING_TICKS   = 18;
@@ -155,26 +172,57 @@ bool craft(State& s, uint8_t recipe) {
 // 255 means unreachable. Rebuilt from the player's cell; mobs simply walk
 // downhill. The queue is a plain ring of cell indices — 8 KB of static, which
 // is cheaper than the branchy alternatives and never allocates mid-frame.
-static uint8_t  g_flow[world::W * world::H];
-static uint16_t g_queue[world::W * world::H];
-static int      s_flowAge = 0;
+// The pathing field. One entry per cell: the high byte is the step distance
+// from the player (255 = never reached), the low byte is the surface height
+// that distance was measured at.
+//
+// One surface per cell, not one per run. The surface a cell is FIRST reached at
+// is by construction the one on the shortest route, so a second slot could only
+// ever describe a longer way to the same place. What that gives up is a cell
+// where a ground-level route and a bridge-deck route are both useful — and
+// there the mobs take the ground and mill about, which is what they did before
+// any of this. What it buys is fitting in memory: four surfaces a cell with an
+// exactly-sized queue is 108 KB, and this board has none of that spare.
+static uint16_t g_flow[world::W * world::H];
 
-static void rebuildFlow(int sx, int sy) {
+// A ring, not one slot per cell. A breadth-first sweep of a 96x96 grid never
+// has more than a couple of frontier rings pending at once — a few hundred
+// cells — so an exactly-sized queue was eighteen kilobytes standing idle.
+// Overflow drops the cell, which reads as unreachable: the pathing degrades
+// rather than corrupting, and the field is rebuilt three times a second
+// anyway. Shrink this first if RAM runs short.
+constexpr int FLOW_QUEUE = 2048;
+static uint16_t g_queue[FLOW_QUEUE];
+
+constexpr uint16_t FLOW_NONE = 0xFFFF;
+static inline uint16_t flowPack(int d, int z) {
+  return (uint16_t)(((d & 0xFF) << 8) | (z & 0xFF));
+}
+static inline uint8_t flowDist(uint16_t v) { return (uint8_t)(v >> 8); }
+static inline uint8_t flowSurf(uint16_t v) { return (uint8_t)(v & 0xFF); }
+
+static void rebuildFlow(int sx, int sy, int sz) {
   memset(g_flow, 0xFF, sizeof(g_flow));
   if ((unsigned)sx >= (unsigned)world::W || (unsigned)sy >= (unsigned)world::H) return;
 
-  int head = 0, tail = 0;
+  int head = 0, count = 0;
   const uint16_t start = (uint16_t)(sy * world::W + sx);
-  g_flow[start] = 0;
-  g_queue[tail++] = start;
+  g_flow[start] = flowPack(0, sz);
+  g_queue[count++] = start;
 
   // The source cell is seeded whatever its height — a creeper can leave the
   // player standing in a crater, and the mobs should still converge on them.
-  while (head < tail) {
-    const uint16_t idx = g_queue[head++];
-    const int x = idx & (world::W - 1);
-    const int y = idx >> 6;                 // world::W is 64
-    const uint8_t d = g_flow[idx];
+  while (count > 0) {
+    const uint16_t idx = g_queue[head];
+    head = (head + 1) % FLOW_QUEUE;
+    --count;
+    // Divide, not shift: world::W is 96 and not a power of two. It is a
+    // constant, so the compiler turns both of these into a multiply and a
+    // shift anyway.
+    const int x = idx % world::W;
+    const int y = idx / world::W;
+    const uint8_t d = flowDist(g_flow[idx]);
+    const int     z = (int)flowSurf(g_flow[idx]);
     if (d >= 254) continue;
 
     static const int kDx[4] = { 1, -1, 0, 0 };
@@ -183,20 +231,45 @@ static void rebuildFlow(int sx, int sy) {
       const int nx = x + kDx[i], ny = y + kDy[i];
       if ((unsigned)nx >= (unsigned)world::W || (unsigned)ny >= (unsigned)world::H) continue;
       const uint16_t n = (uint16_t)(ny * world::W + nx);
-      if (g_flow[n] != 0xFF) continue;
-      // The BFS runs outward from the player, but a mob travels the other way
-      // along it — from n into this cell — so the step-up limit is tested in
-      // that direction. Get it backwards and mobs happily walk up cliffs.
-      if (!world::canEnter((int)world::height(nx, ny), x, y)) continue;
-      g_flow[n] = (uint8_t)(d + 1);
-      g_queue[tail++] = n;
+      if (g_flow[n] != FLOW_NONE) continue;
+
+      // Where a body standing here would come to rest over there.
+      const uint8_t nz = world::surfaceUnder(nx, ny, z);
+      if (nz == world::NO_SURFACE) continue;
+
+      // The sweep runs outward from the player, but a mob travels the other
+      // way along it — from n back into this cell — so the step has to be
+      // legal in that direction too. Get this backwards and mobs walk up
+      // cliffs. Asking it as "and could it get back?" is also what keeps a
+      // two-high wall unclimbable from both sides, which is what the whole
+      // wall-yourself-in loop rests on.
+      if (world::surfaceUnder(x, y, (int)nz) != (uint8_t)z) continue;
+
+      g_flow[n] = flowPack(d + 1, nz);
+      if (count < FLOW_QUEUE) {
+        g_queue[(head + count) % FLOW_QUEUE] = n;
+        ++count;
+      }
     }
   }
 }
 
 static inline uint8_t flowAt(int x, int y) {
   if ((unsigned)x >= (unsigned)world::W || (unsigned)y >= (unsigned)world::H) return 0xFF;
-  return g_flow[y * world::W + x];
+  return flowDist(g_flow[y * world::W + x]);
+}
+
+// The height the field expects a body to be at in this cell, so a mob that
+// steps into it lands where the route was measured.
+// Ticks since the field was last rebuilt. FLOW_PERIOD apart, except when an
+// edit to the world forces it early.
+static int s_flowAge = 0;
+
+static inline uint8_t flowZAt(int x, int y) {
+  if ((unsigned)x >= (unsigned)world::W || (unsigned)y >= (unsigned)world::H)
+    return world::NO_SURFACE;
+  const uint16_t v = g_flow[y * world::W + x];
+  return v == FLOW_NONE ? world::NO_SURFACE : flowSurf(v);
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -216,11 +289,14 @@ static bool lineOfSight(float x0, float y0, float z0, float x1, float y1, float 
     const float t = (float)i / (float)steps;
     const int cx = (int)floorf(x0 + dx * t), cy = (int)floorf(y0 + dy * t);
     const float z = z0 + dz * t;
+    // Solid anywhere the line passes through, ground or overhead alike --
+    // without the second part a skeleton shoots clean through a bridge deck it
+    // is standing under. One bit test now says both.
+    if (z < 0.0f) return false;
     const world::Cell c = world::cellAt(cx, cy);
-    if ((float)c.h > z) return false;
-    // And the slab overhead, if the line passes through it. Without this a
-    // skeleton shoots clean through a bridge deck it is standing under.
-    if (c.slabTop && z >= (float)c.slabBase && z < (float)c.slabTop) return false;
+    const int zi = (int)z;
+    if (zi >= world::MAX_H) continue;
+    if ((c.solid >> zi) & 1u) return false;
   }
   return true;
 }
@@ -256,7 +332,8 @@ void begin(State& s, uint32_t seed) {
 
   s.cam.px = (float)(world::W / 2) + 0.5f;
   s.cam.py = (float)(world::H / 2) + 0.5f;
-  s.cam.z  = (float)world::groundAt(s.cam.px, s.cam.py) + raycast::EYE;
+  s.feetZ  = world::groundAt(s.cam.px, s.cam.py);
+  s.cam.z  = (float)s.feetZ + raycast::EYE;
   s.eyeZ   = s.cam.z;              // start settled, not falling into the world
   s.eyeVel = 0.0f;
   s.angle  = 0.0f;
@@ -264,7 +341,7 @@ void begin(State& s, uint32_t seed) {
   s.pitch  = (float)raycast::HORIZON;
   raycast::setPitch(s.cam, raycast::HORIZON);
 
-  rebuildFlow((int)s.cam.px, (int)s.cam.py);
+  rebuildFlow((int)s.cam.px, (int)s.cam.py, (int)s.feetZ);
   s_flowAge = 0;
 }
 
@@ -357,6 +434,9 @@ static void spawnMob(State& s) {
     m.kind  = pickKind(s);
     m.hp    = kMob[m.kind].hp;
     m.x = fx; m.y = fy;
+    // Spawned onto the terrain, never onto a player's roof. A wave that can
+    // appear on top of what you built is not a wave you can wall out.
+    m.z = world::groundAt(fx, fy);
     m.timer = 0;
     m.windup = 0;
     m.burn = 0;
@@ -385,7 +465,7 @@ static void spawnMob(State& s) {
 // toward the ground rather than pinned to it, so subtracting EYE from it would
 // make reach wobble by a fraction of a block for a few ticks after every step.
 static inline float feetDz(const State& s, const Mob& m) {
-  return (float)world::groundAt(s.cam.px, s.cam.py) - (float)world::groundAt(m.x, m.y);
+  return (float)s.feetZ - (float)m.z;
 }
 static inline float reachOf(const State& s, const Mob& m, float flat) {
   const float dz = feetDz(s, m);
@@ -432,7 +512,7 @@ static uint32_t burnPlayer(State& s, int16_t amount) {
 static uint32_t detonate(State& s, Mob& m) {
   world::explode((int)m.x, (int)m.y, CREEPER_BLAST);
   uint32_t ev = EV_EXPLODE;
-  spark(s, SP_BLAST, m.x, m.y, (float)world::groundAt(m.x, m.y) + 0.6f, 0, 255);
+  spark(s, SP_BLAST, m.x, m.y, (float)m.z + 0.6f, 0, 255);
   kick(s, 22);
   const float dx = s.cam.px - m.x, dy = s.cam.py - m.y;
   // Three-dimensional, so standing on top of a pillar is real cover from a
@@ -478,7 +558,7 @@ static uint32_t fireArrow(State& s, const Mob& m) {
     if (!s.arrows[i].alive) { slot = i; break; }
   if (slot < 0) return 0;
 
-  const float mz = (float)world::groundAt(m.x, m.y) + 1.0f;
+  const float mz = (float)m.z + 1.0f;
   float dx = s.cam.px - m.x, dy = s.cam.py - m.y, dz = s.cam.z - mz;
   const float d = sqrtf(dx * dx + dy * dy + dz * dz);
   if (d < 0.001f) return 0;
@@ -515,9 +595,10 @@ static uint32_t updateArrows(State& s) {
 
     const int cx = (int)a.x, cy = (int)a.y;
     const world::Cell c = world::cellAt(cx, cy);
-    const bool inGround = a.z < (float)c.h;
-    const bool inSlab   = c.slabTop && a.z >= (float)c.slabBase && a.z < (float)c.slabTop;
-    if (a.z < 0.0f || inGround || inSlab) {
+    const int az = (int)a.z;
+    const bool hit = a.z < 0.0f
+                  || (az < world::MAX_H && ((c.solid >> az) & 1u));
+    if (hit) {
       a.alive = false;
       spark(s, SP_ARROW, a.x, a.y, a.z, 0, 80);
       ev |= EV_ARROW_HIT;
@@ -553,7 +634,7 @@ static uint32_t updateMob(State& s, int idx) {
   // walk along the segment, and with a full wave that is the one piece of mob
   // work that would actually show up in the frame time.
   if (((s_aiTick + (uint32_t)idx) % LOS_PERIOD) == 0) {
-    const float mz = (float)world::groundAt(m.x, m.y) + 0.9f;
+    const float mz = (float)m.z + 0.9f;
     m.los = lineOfSight(m.x, m.y, mz, s.cam.px, s.cam.py, s.cam.z);
   }
 
@@ -666,7 +747,14 @@ static uint32_t updateMob(State& s, int idx) {
   const float v = speed / (float)TICK_HZ;
 
   const float wasX = m.x, wasY = m.y;
-  slide(m.x, m.y, wantX * v, wantY * v, MOB_RADIUS, (int)world::groundAt(m.x, m.y));
+  slide(m.x, m.y, wantX * v, wantY * v, MOB_RADIUS, (int)m.z);
+  // Where the body ended up standing. A mob can now be somewhere the terrain
+  // alone does not describe — on a bridge, on a roof, on a floor the player
+  // built — so its height is carried rather than recomputed.
+  {
+    const uint8_t sfc = world::surfaceUnder((int)m.x, (int)m.y, (int)m.z);
+    m.z = (sfc == world::NO_SURFACE) ? world::groundAt(m.x, m.y) : sfc;
+  }
   // How far it has actually walked, so its legs match its speed instead of a
   // timer. Kept on the mob rather than in the renderer because slots are
   // recycled, and a respawned mob would otherwise inherit a stale stride.
@@ -702,6 +790,60 @@ static uint32_t updateMob(State& s, int idx) {
 
 // ---- player -----------------------------------------------------------------
 
+// True if a body of radius r centred at (bx, by), standing with its feet at
+// bz, occupies the block (x, y, z). A body is a column HEADROOM tall, so this
+// is the test that stops a player sealing themselves inside their own build.
+static bool bodyOccupies(float bx, float by, int bz, float r,
+                         int x, int y, int z) {
+  if (z < bz || z >= bz + world::HEADROOM) return false;
+  // Nearest point of the cell to the body's centre, which is the cheap way to
+  // ask "does this disc overlap this square" without a per-corner test.
+  const float cx = bx < (float)x ? (float)x : (bx > (float)x + 1.0f ? (float)x + 1.0f : bx);
+  const float cy = by < (float)y ? (float)y : (by > (float)y + 1.0f ? (float)y + 1.0f : by);
+  const float dx = bx - cx, dy = by - cy;
+  return dx * dx + dy * dy < r * r;
+}
+
+// Puts a block against the face the crosshair is on.
+//
+// The target is always hit + normal, so a placed block always touches
+// something solid by construction — which is why place-against-face is the
+// primitive here and place-at-cell is not. It is also why there is no separate
+// "is it supported" rule to get wrong.
+static uint32_t placeAgainstFace(State& s, uint8_t held) {
+  const int tx = (int)s.aimX + s.aimNX;
+  const int ty = (int)s.aimY + s.aimNY;
+  const int tz = (int)s.aimZ + s.aimNZ;
+
+  if (tz < 0 || tz >= world::MAX_H)      return EV_CANT_PLACE;
+  if (world::isBorder(tx, ty))           return EV_CANT_PLACE;
+
+  // Not inside the player, and not inside anything alive. This replaces an
+  // older test that refused only the cell the player was standing in — which
+  // was both too weak (it ignored the block over their head) and aimed at the
+  // wrong thing: what it was really guarding against was pillaring straight up
+  // out of a wave, and a body-sized volume guards that properly.
+  if (bodyOccupies(s.cam.px, s.cam.py, (int)s.feetZ, PLAYER_RADIUS, tx, ty, tz))
+    return EV_CANT_PLACE;
+  for (int i = 0; i < MAX_MOBS; ++i) {
+    const Mob& m = s.mobs[i];
+    if (!m.alive) continue;
+    if (bodyOccupies(m.x, m.y, (int)m.z, MOB_RADIUS, tx, ty, tz))
+      return EV_CANT_PLACE;
+  }
+
+  switch (world::place(tx, ty, tz, held)) {
+    case world::PLACE_OK:      break;
+    case world::PLACE_NO_ROOM: return EV_NO_ROOM;
+    default:                   return EV_CANT_PLACE;
+  }
+
+  --s.inv[held];
+  s.swingCooldown = BUILD_TICKS;
+  s_flowAge = FLOW_PERIOD;      // the map changed; repath next tick
+  return EV_PLACE;
+}
+
 static uint32_t playerAct(State& s) {
   uint32_t ev = 0;
 
@@ -728,7 +870,7 @@ static uint32_t playerAct(State& s) {
       m.hp -= (int16_t)(1 + s.damageLevel);
       m.hitFlash = HIT_FLASH;
       kick(s, 5);
-      spark(s, SP_HIT, m.x, m.y, (float)world::groundAt(m.x, m.y) + 0.95f, 0, 120);
+      spark(s, SP_HIT, m.x, m.y, (float)m.z + 0.95f, 0, 120);
       ev |= EV_SWING | EV_MOB_HIT;
 
       // Shove it back along the swing. Without this a hit has no consequence
@@ -739,7 +881,7 @@ static uint32_t playerAct(State& s) {
       const float kl = sqrtf(kx * kx + ky * ky);
       if (kl > 0.001f) {
         slide(m.x, m.y, kx / kl * KNOCKBACK, ky / kl * KNOCKBACK,
-              MOB_RADIUS, (int)world::groundAt(m.x, m.y));
+              MOB_RADIUS, (int)m.z);
         m.windup = 0;              // interrupted mid-swing
       }
       if (m.hp <= 0) {
@@ -748,7 +890,7 @@ static uint32_t playerAct(State& s) {
         if (m.kind == MOB_CREEPER && m.timer) ev |= detonate(s, m);
         else {
           m.alive = false;
-          spark(s, SP_DEATH, m.x, m.y, (float)world::groundAt(m.x, m.y) + 0.8f, 0, 200);
+          spark(s, SP_DEATH, m.x, m.y, (float)m.z + 0.8f, 0, 200);
           ev |= EV_MOB_DIED;
         }
       }
@@ -773,16 +915,23 @@ static uint32_t playerAct(State& s) {
 
   uint8_t dropM = 0, dropB = 0, dropO = 0;
   const int effort = world::EFFORT_PER_TICK + s.miningLevel * 8;
-  if (world::mine(s.aimX, s.aimY, effort, dropM, dropB, dropO)) {
-    s.inv[dropM] = (uint16_t)(s.inv[dropM] + dropB);
-    s.ore        = (uint16_t)(s.ore + dropO);
-    // Shards take the colour of what came off, so digging coal out of a stone
-    // face looks different from digging the face itself.
-    spark(s, SP_BREAK, (float)s.aimX + 0.5f, (float)s.aimY + 0.5f,
-          (float)world::height(s.aimX, s.aimY) + 0.5f, dropM, 200);
-    ev |= EV_BLOCK_BROKE;
-  } else {
-    ev |= EV_MINE_STEP;
+  // The block the crosshair is on, not the top of the column it belongs to.
+  // Those used to be different things, and aiming at the foot of a six-high
+  // wall took the block off its top.
+  switch (world::mine(s.aimX, s.aimY, s.aimZ, effort, dropM, dropB, dropO)) {
+    case world::MINE_BROKE:
+      s.inv[dropM] = (uint16_t)(s.inv[dropM] + dropB);
+      s.ore        = (uint16_t)(s.ore + dropO);
+      // Shards take the colour of what came off, so digging coal out of a
+      // stone face looks different from digging the face itself.
+      spark(s, SP_BREAK, (float)s.aimX + 0.5f, (float)s.aimY + 0.5f,
+            (float)s.aimZ + 0.5f, dropM, 200);
+      s_flowAge = FLOW_PERIOD;      // the map changed; repath next tick
+      ev |= EV_BLOCK_BROKE;
+      break;
+    default:
+      ev |= EV_MINE_STEP;
+      break;
   }
   return ev;
 }
@@ -818,18 +967,10 @@ uint32_t tick(State& s, const Input& in) {
       h += step;
     } else if (in.lookDown) {
       h -= step;
-    } else {
-      // Drift home. Everything about aiming and mining reach is tuned at the
-      // resting tilt, so that is where the view belongs when nobody is asking
-      // for anything else.
-      const float back = PITCH_RETURN / (float)TICK_HZ;
-      const float d = (float)raycast::HORIZON - h;
-      if (d > back)       h += back;
-      else if (d < -back) h -= back;
-      else                h = (float)raycast::HORIZON;
     }
-    const float lo = (float)(raycast::HORIZON - raycast::PITCH_RANGE);
-    const float hi = (float)(raycast::HORIZON + raycast::PITCH_RANGE);
+    // ...and otherwise it stays where it was put. See PITCH_SPEED.
+    const float lo = (float)(raycast::HORIZON - raycast::PITCH_DOWN);
+    const float hi = (float)(raycast::HORIZON + raycast::PITCH_UP);
     s.pitch = h < lo ? lo : (h > hi ? hi : h);
     raycast::setPitch(s.cam, (int)(s.pitch + 0.5f));
   }
@@ -840,7 +981,7 @@ uint32_t tick(State& s, const Input& in) {
   if (fwd != 0.0f) {
     const float v = fwd * MOVE_SPEED / (float)TICK_HZ;
     slide(s.cam.px, s.cam.py, s.cam.dx * v, s.cam.dy * v, PLAYER_RADIUS,
-          (int)world::groundAt(s.cam.px, s.cam.py));
+          (int)s.feetZ);
   }
 
   // The eye chases the ground under it instead of being pinned to it. A step up
@@ -850,7 +991,20 @@ uint32_t tick(State& s, const Input& in) {
   // cut, not a step. The spring below is that same automatic step with the
   // motion put back into it.
   {
-    const float target = (float)world::groundAt(s.cam.px, s.cam.py) + raycast::EYE;
+    // Where the feet are is a fact about the world and is resolved first; the
+    // eye then chases it. Keeping the two separate is what lets a bridge deck
+    // be walked onto — the surface can jump a block while the view does not.
+    const uint8_t sfc = world::surfaceUnder((int)s.cam.px, (int)s.cam.py,
+                                            (int)s.feetZ);
+    // Nothing within a step means the world moved rather than the body: a
+    // column grew under the player, or a blast dropped the floor away. Snapping
+    // to the terrain is what un-wedges them — left at a stale height they stand
+    // inside the pillar that just rose around them, and every later step-up
+    // test is measured from a height they are not at.
+    s.feetZ = (sfc == world::NO_SURFACE)
+                ? world::groundAt(s.cam.px, s.cam.py)
+                : sfc;
+    const float target = (float)s.feetZ + raycast::EYE;
     const float d = target - s.eyeZ;
     if (d * d < EYE_SNAP * EYE_SNAP && s.eyeVel * s.eyeVel < EYE_SNAP * EYE_SNAP) {
       s.eyeZ = target;
@@ -863,40 +1017,37 @@ uint32_t tick(State& s, const Input& in) {
   }
 
   // -- what the crosshair is on
-  int hx, hy;
-  bool onTop = false;
-  const bool hit = raycast::pick(s.cam, MINE_REACH, hx, hy, onTop);
-  if (hit && !world::isBorder(hx, hy)) {
-    if (s.aimValid && (hx != s.aimX || hy != s.aimY)) world::resetDamage(s.aimX, s.aimY);
-    s.aimValid = true; s.aimOnTop = onTop;
-    s.aimX = (int16_t)hx; s.aimY = (int16_t)hy;
+  raycast::Hit hit;
+  const bool got = raycast::pick(s.cam, REACH, hit);
+  if (got && !world::isBorder(hit.x, hit.y)) {
+    if (s.aimValid && (hit.x != s.aimX || hit.y != s.aimY || hit.z != s.aimZ))
+      world::resetDamage(s.aimX, s.aimY, s.aimZ);
+    s.aimValid = true;
+    s.aimX = hit.x; s.aimY = hit.y; s.aimZ = hit.z;
+    s.aimNX = hit.nx; s.aimNY = hit.ny; s.aimNZ = hit.nz;
+    s.aimOnTop = (hit.face == raycast::F_TOP);
   } else {
-    if (s.aimValid) world::resetDamage(s.aimX, s.aimY);
+    if (s.aimValid) world::resetDamage(s.aimX, s.aimY, s.aimZ);
     s.aimValid = false;
   }
 
   // -- act / build
   if (in.act) ev |= playerAct(s);
-  else if (s.aimValid) world::resetDamage(s.aimX, s.aimY);
+  else if (s.aimValid) world::resetDamage(s.aimX, s.aimY, s.aimZ);
 
   if (s.swingCooldown == 0 && in.build) {
     const uint8_t held = heldBlock(s);
     if (s.inv[held] == 0) {
       ev |= EV_NO_BLOCKS;
     } else if (s.aimValid) {
-      // Never build on the cell the player is standing in: with a heightmap
-      // that would jack them up a block, and repeated it would let them
-      // pillar out of every wave for free.
-      const bool ownCell = ((int)s.cam.px == s.aimX && (int)s.cam.py == s.aimY);
-      if (!ownCell && world::place(s.aimX, s.aimY, held)) {
-        --s.inv[held];
-        s.swingCooldown = BUILD_TICKS;
-        s_flowAge = FLOW_PERIOD;      // the map changed; repath next tick
-        ev |= EV_PLACE;
-      }
+      // The block goes against the face that was hit, not on top of whatever
+      // column the crosshair happened to land on. That is the whole difference
+      // between building and growing a heightmap: aim at the side of a wall and
+      // the block lands beside it, aim at its top and it lands on top.
+      ev |= placeAgainstFace(s, held);
     }
   }
-  s.aimDamage = s.aimValid ? world::damage(s.aimX, s.aimY) : 0;
+  s.aimDamage = s.aimValid ? world::damage(s.aimX, s.aimY, s.aimZ) : 0;
 
   // The pickaxe swings while it is doing something and drops to rest the
   // moment it is not, so the animation reads as work rather than as idle
@@ -920,7 +1071,7 @@ uint32_t tick(State& s, const Input& in) {
   // -- pathing and mobs
   if (++s_flowAge >= FLOW_PERIOD) {
     s_flowAge = 0;
-    rebuildFlow((int)s.cam.px, (int)s.cam.py);
+    rebuildFlow((int)s.cam.px, (int)s.cam.py, (int)s.feetZ);
   }
   // Counted every tick, not once per flow rebuild: the field is only rebuilt
   // three times a second, so counting there would make SEALED_TRIGGER twenty

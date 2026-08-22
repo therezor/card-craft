@@ -5,26 +5,24 @@
 //  arithmetic can be checked on the host (see test/test_world). The renderer
 //  reads this grid; it never writes to it.
 //
-//  The world is a 64x64 heightmap: every cell is a stack of 0..MAX_H unit
+//  The world is a 96x96 heightmap: every cell is a stack of 0..MAX_H unit
 //  cubes sitting on a solid base plane. That is not a flat maze with tall
 //  walls — you walk up a one-block step, you see over a low wall, and a
-//  six-high outcrop actually reads as a cliff.
+//  twenty-high outcrop actually reads as a cliff.
 //
-//  A heightmap rather than a full voxel grid because it is the shape the
-//  renderer can walk in one pass per column, and because the two verbs the
-//  game needs — take the top block off, put one back on — are exactly the two
-//  edits a heightmap supports.
+//  A column is a 32-bit occupancy mask, one bit a block, and MAX_H is exactly
+//  32 so a column is exactly one word. Any block anywhere can be taken out or
+//  put back: a tunnel, an overhang, a bridge, a roof, a cave mouth and a tower
+//  are all just bits, and a column can have as many holes in it as it likes.
 //
-//  On top of that, every cell may carry one *slab*: a second solid run
-//  floating above the ground column with air in between. That is what a plain
-//  heightmap cannot express, and it is what a roof, a bridge, a rock arch and
-//  the mouth of a cave all are. One slab rather than an arbitrary list of runs
-//  because one is enough for all four of those shapes, and because the cost of
-//  the renderer's occlusion tracking grows with how many holes a column can
-//  have in it.
+//  This replaces a heightmap plus a pool of at most three floating "runs" per
+//  cell. That cap was not an implementation detail the player never saw — it
+//  was two refusals in the rules, MINE_NO_ROOM and PLACE_NO_ROOM, and there
+//  were places the world simply would not let you dig.
 //
-//  Slabs are terrain, not material: they cannot be mined or built into. The
-//  player walks under them.
+//  Geometry and material are kept apart, which is the other half of it:
+//  removing a block cannot change what anything is made of, so mining — the
+//  common edit, and the one that used to be refused — allocates nothing.
 //
 //  Materials below the surface are computed, not stored: a column keeps its
 //  height and the material of its top block, and everything under that is a
@@ -49,16 +47,26 @@ enum Block : uint8_t {
   B_SNOW,       // tundra surface
   B_BRICK,      // ruins, and craftable
   B_PLANK,      // craftable, cheap building stock
+  B_MASONRY,    // cut stone: towers, castles. Structural, unlike B_STONE
   B_TORCH,      // emits light and keeps mobs from spawning nearby
   B_LAVA,       // emits light, burns anything standing on it, cannot be mined
   B_BEDROCK,    // map border and the base plane, unbreakable
   B_COUNT
 };
 
-// Three of the surface materials are just a palette on the same terrain: what
-// biome a cell is in changes what it is made of, not what shape it is. That is
-// most of the visual variety for none of the generation complexity.
-enum Biome : uint8_t { BIOME_PLAINS, BIOME_DESERT, BIOME_TUNDRA, BIOME_COUNT };
+// A biome changes the shape of the ground as well as its colour. It used to be
+// only the colour — one noise field with three palettes over it — and the
+// result was a map whose horizon looked the same everywhere you stood, which
+// is the opposite of what a biome is for. Each one now carries its own
+// amplitude and its own roughness, so plains are lowland you get caught in the
+// open on, desert rolls in long smooth dunes, and tundra climbs into jagged
+// peaks with a snow line on them.
+//
+// Forest shares the plains surface and the plains ground: what makes it a
+// forest is that the trees are dense enough to lose a mob in.
+enum Biome : uint8_t {
+  BIOME_PLAINS, BIOME_FOREST, BIOME_DESERT, BIOME_TUNDRA, BIOME_COUNT
+};
 uint8_t biomeAt(int x, int y);
 
 // True for materials that mark a built or grown column rather than natural
@@ -72,14 +80,28 @@ uint8_t emission(uint8_t b);
 // True for materials that hurt whatever is standing on them.
 bool isHazard(uint8_t b);
 
-constexpr int W = 64;    // square and power-of-two, so cell indexing is a shift
-constexpr int H = 64;
+// Square, and no longer a power of two: 96 rather than 64 because objects made
+// of three blocks cannot have a silhouette, and 128 does not fit — six bytes a
+// cell against two 64.8 KB framebuffers leaves 128x128 nineteen kilobytes short
+// of the S3's internal RAM. The only code that assumed a shift was the flow
+// field's cell decode, which now divides; the compiler turns a constant divide
+// into a multiply and the BFS runs three times a second.
+constexpr int W = 96;
+constexpr int H = 96;
 
 // Untouched ground sits at GROUND, not at zero, which is what makes digging
-// down possible: a column can lose blocks as well as gain them. Three layers
-// below and six above, over a base plane of bedrock that cannot be dug out.
-constexpr int GROUND = 3;
-constexpr int MAX_H  = GROUND + 6;
+// down possible: a column can lose blocks as well as gain them. Eight layers
+// below and twenty-four above, over a base plane of bedrock that cannot be dug
+// out.
+//
+// It used to be three and six, and six blocks of headroom is the reason the
+// world read as a handful of large cubes rather than as objects: a house was
+// three blocks, a hill was four, and nothing built out of three blocks has a
+// shape. Height is the one dimension that is free here — a column is one byte
+// whether it counts to nine or to thirty-two — so this costs no memory at all
+// and buys towers, cliffs, tall trees and a mine you can descend.
+constexpr int GROUND = 8;
+constexpr int MAX_H  = GROUND + 24;
 
 // Mining is accumulated in "effort", not seconds, so a pickaxe upgrade is a
 // multiplier on the numerator rather than a special case in the timing code.
@@ -87,17 +109,20 @@ constexpr int EFFORT_PER_TICK = 16;
 
 struct BlockInfo {
   const char* name;
-  uint8_t r, g, b;      // base colour, RGB888 — render.cpp lerps here, then packs
+  // Base colour, RGB888. It is what a block fades to at distance, what fills
+  // its top face, and what its break-particles are made of — and it is entry 0
+  // of the material's texture palette, which tools/make-textures.py checks
+  // against this table so the two cannot drift apart.
+  uint8_t r, g, b;
   uint16_t toughness;   // total effort to break; 0 means unbreakable
   uint8_t  dropBlocks;  // build material yielded
   uint8_t  dropOre;     // upgrade currency yielded
 
-  // How strongly this material breaks up across its own face, 0..255. Not a
-  // texture: one shared noise tile is shaded per material at this amplitude, so
-  // stone reads as grain and snow stays smooth for the cost of one byte. It is
-  // also what finally tells coal and iron apart from the stone they sit in,
-  // which no amount of tuning three flat greys ever managed.
-  uint8_t  speckle;
+  // There used to be a `speckle` byte here: how strongly the material broke up
+  // across its own face, driving the amplitude of one shared noise tile. The
+  // per-material texture in textures.h replaced it — the art says how broken
+  // up a surface is, in colour rather than in amplitude, which is what lets
+  // coal read as black lumps in grey rock instead of as darker grey.
 };
 
 const BlockInfo& info(uint8_t b);
@@ -134,15 +159,45 @@ bool    isBorder(int x, int y);
 // re-check bounds and recompute the index, and none of which the compiler can
 // inline because they live in another translation unit. At ~30 cells a column
 // and 240 columns that was the single largest line item in a frame.
+struct RunView { uint8_t base, top, mat; };   // occupies [base, top)
+
+// Everything the renderer needs about one cell, fetched in a single call.
+//
+// `solid` is the whole column: bit z is set where (x, y, z) is a block. MAX_H
+// is 32, so a column is exactly one word, and the runs a walker wants come out
+// of it with a bit scan rather than a list walk.
+//
+// This used to carry a copied array of up to three runs, and that cap was the
+// reason the game had to refuse a tunnel or a shelf. A mask has no cap: a
+// column can have as many holes in it as it has blocks.
 struct Cell {
-  uint8_t h;          // ground column height
-  uint8_t top;        // material of its top block
-  uint8_t light;      // 0..LIGHT_MAX
-  uint8_t slabBase;   // slab occupies [slabBase, slabTop)
-  uint8_t slabTop;    // 0 = no slab
-  uint8_t slabMat;
+  uint32_t solid;     // bit z = (x, y, z) is solid
+  uint8_t  h;         // blocks in the run resting on the base plane
+  uint8_t  top;       // material of that run's top block
+  uint8_t  light;     // 0..LIGHT_MAX
+  uint8_t  surf;      // the height the generator left this column at
 };
 Cell cellAt(int x, int y);
+
+// Copies this cell's floating runs into `out`, ascending by base, and returns
+// how many. `cap` is the size of `out`: a cell's run count is unbounded now, so
+// the caller states what it can take rather than the world declaring a limit.
+int runsAt(int x, int y, RunView* out, int cap);
+
+// True if (x, y, z) is solid, wherever that solidity comes from.
+bool solidAt(int x, int y, int z);
+
+// Material occupying (x, y, z), or B_BEDROCK where nothing does.
+uint8_t blockAt(int x, int y, int z);
+
+// Material markers still unused. The dev build watches this: a generator that
+// has quietly run out stops making tree crowns, and that should be visible
+// rather than mysterious.
+//
+// Only distinct materials cost one. Mining never allocates -- taking a block
+// out cannot change what anything is made of -- which is why the refusal this
+// replaces is gone.
+int marksFree();
 
 // ---- slabs ------------------------------------------------------------------
 
@@ -183,29 +238,74 @@ void rebuildLight();
 
 constexpr int STEP_UP = 1;    // blocks that can be walked up without stopping
 
-// True if a body standing at height `fromH` can enter this cell: the step up
-// must be no more than STEP_UP. Stepping down is always allowed.
-bool canEnter(int fromH, int x, int y);
+// Returned by surfaceUnder where a body cannot stand at all.
+constexpr uint8_t NO_SURFACE = 255;
+
+// The surface a body currently at `fromZ` would come to rest on in this cell:
+// the highest solid top no more than STEP_UP above it, with HEADROOM of air
+// over it. Stepping down is unbounded; stepping up is not.
+//
+// The top of a run counts, which is what lets a player stand on a floor they
+// built. It is also what keeps a two-high wall unclimbable — its top is two
+// above your feet, and STEP_UP is one — so walling yourself in still works.
+uint8_t surfaceUnder(int x, int y, int fromZ);
+
+// True if a body standing at `fromZ` can enter this cell at all.
+bool canEnter(int fromZ, int x, int y);
 
 // True if a body of radius r centred here clears every cell it overlaps.
-bool fits(int fromH, float px, float py, float r);
+bool fits(int fromZ, float px, float py, float r);
 
-// Height of the surface a body at (px, py) stands on.
+// Height of the surface a body at (px, py) stands on, given where its feet are
+// now. The two-argument form answers for the ground column alone, which is
+// what anything that only ever stands on terrain wants.
+uint8_t groundAt(float px, float py, int fromZ);
 uint8_t groundAt(float px, float py);
 
 // ---- mining -----------------------------------------------------------------
 
-// Adds effort to a column. Returns true on the tick its top block comes off,
-// and only then writes the yields. Effort is discarded when the player looks
-// away (resetDamage), which is what makes a tough block a commitment.
-// dropMat is what came off, so the caller can put it in an inventory rather
-// than adding it to one anonymous pile.
+enum MineResult : uint8_t {
+  MINE_PROGRESS,   // effort banked, the block is still standing
+  MINE_BROKE,      // it came off this tick, and the drops are written
+  MINE_NOTHING,    // air, out of bounds, or unbreakable
+};
+
+// Adds effort to one block. Returns MINE_BROKE on the tick it comes off, and
+// only then writes the yields. Effort is discarded when the player looks away
+// (resetDamage), which is what makes a tough block a commitment. dropMat is
+// what came off, so the caller can put it in an inventory rather than on one
+// anonymous pile.
+//
+// Taking a block out of the middle of a column splits it: the part above goes
+// on standing. That is a tunnel, and it used to be refusable — a cell could
+// only describe three holes, so there were places the world would not let you
+// dig. A column is a bitmask now, so a hole is a cleared bit and there is
+// nothing left to run out of. Mining cannot be refused for want of room.
+MineResult mine(int x, int y, int z, int effort,
+                uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre);
+
+// Takes the top block off a column. Most callers mean this and should not have
+// to work out which z it is.
 bool mine(int x, int y, int effort,
           uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre);
+
+void resetDamage(int x, int y, int z);
 void resetDamage(int x, int y);
 
 // 0..255 progress toward breaking, for the crosshair arc.
+uint8_t damage(int x, int y, int z);
 uint8_t damage(int x, int y);
+
+enum PlaceResult : uint8_t {
+  PLACE_OK,
+  PLACE_OCCUPIED,  // already solid, out of the world, or above MAX_H
+  PLACE_NO_ROOM,   // the material-marker pool is exhausted, world-wide
+  PLACE_REFUSED,   // the border, or on top of a light source
+};
+
+// Puts a block at an exact position, joining it to whatever it touches. This
+// is what lets a player build out into the air: a floor, a roof, a bridge.
+PlaceResult place(int x, int y, int z, uint8_t mat);
 
 // Adds a block on top of a column. False if it is already at MAX_H or is the
 // map border.

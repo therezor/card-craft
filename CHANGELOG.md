@@ -1,5 +1,399 @@
 # Changelog
 
+## 1.6.0 — a column is a bitmask, and the view stays where you put it
+
+### There were places the world would not let you dig
+
+A cell was a ground column plus at most three floating **runs**, drawn from a
+pool of 3,072 nodes. That cap was not an implementation detail the player never
+saw: it was two rules they met. `MINE_NO_ROOM` refused a tunnel when the hole it
+would leave needed a fourth run, and `PLACE_NO_ROOM` refused a shelf for the
+same reason. Digging into the wrong hillside simply did not work.
+
+A column is a `uint32_t` now, one bit a block. `MAX_H` is 32, so the world's full
+height is exactly one word. Any block anywhere can be taken out or put back, a
+column can have as many holes in it as it has blocks, and the walker finds its
+runs with a bit scan instead of chasing a linked list. `MINE_NO_ROOM` is gone
+from the codebase.
+
+**Geometry and material are separate, and that is what makes it work.** Material
+is a list of markers — "from this z upward the material is m", with a `DERIVE`
+step meaning "fall back to the soil profile". Removing a block cannot change what
+anything is made of, so **mining allocates nothing and can never fail**. Only
+placing a *new* material draws from the pool, and only world-wide exhaustion can
+refuse that. The generator's worst case over sixty seeds is 3,629 markers against
+a pool of 4,096.
+
+Two things fell out of it rather than being designed in. `matAt` and `blockAt`
+had been separate functions with separate depth anchors, because a run split off
+a hillside carried its own `surf` field to keep it reading grass-over-dirt; there
+is one column now, so there is one answer, and the field is gone. And a roof laid
+at exactly a wall's top height used to be a column *plus* a slab — two objects at
+the same height — which is why `normaliseCell` existed. A mask has one
+representation of a given solid, so there is nothing to normalise.
+
+### One span per run of like blocks
+
+Every block of every column used to be its own candidate: a loop turn, two
+clamps and a full trip through the clipper, about 30,000 times a frame. A run of
+like blocks is one span now. The pixels are identical, because a face's texture
+coordinate is a function of world height — `v` keeps accumulating and wraps every
+tile, which is once a block, exactly as before.
+
+The bevels between blocks therefore fall *inside* a span. The obvious way to find
+them is to watch `v` wrap, and it was measured at **+726 µs a frame against the
+183 µs the merging saves** — a compare and an unpredictable branch on every wall
+pixel is dearer than the clipper calls it pays for. They are computed
+arithmetically outside the loop instead.
+
+### `-flto` replaced by a unity build
+
+The reason `-flto` does not work here is documented and has nothing to do with
+this code: the plugin must be on the link line to resolve `src/`'s objects, which
+collects the Arduino core, where it drops `app_main()` as unreferenced. Handing
+the compiler one translation unit instead of four gets the same inlining without
+a link line being involved. `src/unity.cpp`, worth about 1.5% of CPU.
+
+### The benchmark was not comparable, and a fixed seed was not the fix
+
+It already used a constant seed. But the simulation advanced by *elapsed time*,
+so a build that rendered more slowly took more catch-up ticks per frame, walked
+further per frame, and within seconds was looking at a different scene. Render
+cost feeds tick rate feeds camera position feeds render cost. Two runs of the
+**same build** came back 12% apart on frame rate and 33% apart on CPU.
+
+The bench loop runs exactly one tick a frame and ignores the clock. Runs now
+agree to within 0.3%. Every figure measured before this was noise.
+
+Also: the `cardputer-dev` and `cardputer-notex` builds did not link at all.
+`render.h` declared four `g_floor*` telemetry counters that nothing defined. They
+are defined now, and counted at the call site rather than inside
+`drawFloorSpan` — that function is `noinline` precisely because it is one
+register short of spilling its inner loop, and four counters live across it would
+put it back over.
+
+### The view pushed back against you
+
+Pitch drifted home to the resting tilt whenever neither look key was held, so you
+could look up at a canopy but not keep looking at it. It is a held position now,
+the same as the facing angle; holding both keys still recentres.
+
+The range went with it. It was about 25° up and 12° down, and the reason given
+for keeping down short was that down fills the screen with near geometry and
+that is where the frame time is. That does not survive contact with the walker:
+looking steeply down, every ray meets the floor within a cell or two and the DDA
+stops almost immediately. The expensive view is the one *across* a landscape,
+which is the resting tilt. Both stops are about 60° now, symmetric about level.
+
+### Grass had stripes on it
+
+The 16x16 grass tile is dirt with a green lip — exactly right for a wall, and
+wrong from above, because the floor sampler indexes the same tile by world XY and
+drew that lip as a green stripe every sixteen texels across open ground.
+
+Materials can carry a second tile for their top face now, and grass is the first
+to. It costs no palette entries: grass's first four entries were already the
+greens the lip is drawn with. Sparse on purpose — stone is stone whichever way
+you look at it, and a second tile for every material would double a texel table
+that has to live in SRAM.
+
+### Measured
+
+Fixed-seed night-10 wave, 40 windows of 30 frames, with the deterministic bench:
+
+| | fps worst | mean | CPU µs | world µs |
+|---|---|---|---|---|
+| before | 32 | 46.9 | 15,553 | 12,487 |
+| after | 32 | 48.5 | 14,912 | 11,919 |
+
+The frame is now CPU-bound rather than panel-bound — 14.9 ms of processor against
+a 12.98 ms transfer — which is the opposite of what the README used to say. The
+textured floors are what moved it.
+
+RAM is the binding constraint, not the frame rate. The two framebuffers need
+129,600 bytes of contiguous internal DMA memory, and if `reserve()` cannot get
+them the panel says NO DMA MEMORY and the board hangs while USB still enumerates
+— which looks like a dead serial link, not an allocation failure. The first
+bitmask build did exactly that. Packing the surface material and the torch light
+into one byte brought it to +16 KB over the old world, with 36 KB of heap left.
+
+## 1.5.0 — a block you can point at, a column with holes in it, and textures
+
+### Mining took the wrong block, and building put it in the wrong place
+
+Both verbs worked on the *column*, not on a block. `mine()` always popped the
+top of the stack, so aiming at the foot of a six-high wall took the block off
+its top — six blocks above where the crosshair was. `place()` only ever grew a
+column by one, so there was no way to put a block against a wall, under an
+overhang, or out in front of you. `State::aimOnTop` had been computed and
+stored since the beginning and never once read.
+
+`pick()` now returns a `Hit`: the block, which of its faces was struck, that
+face's outward normal, and the distance. Building goes at `hit + normal`, which
+is Minecraft's rule and has the useful property that a placed block always
+touches something solid by construction — so there is no separate "is it
+supported" test to get wrong.
+
+The refusals are explicit and all tested: out of the world, beyond reach, into
+something already solid, into the player's own body, or into a mob. The body
+test replaces an older rule that refused only the cell the player stood in,
+which ignored the block over their head — and what it was really guarding
+against was pillaring straight up out of a wave, which a body-sized volume
+guards properly.
+
+### `Span::sel` had two levels, and now has one
+
+The second level existed only because the block you were pointing at and the
+block about to break were different things. They are the same block now, so the
+outline follows it and the whole two-level scheme is gone — along with the case
+where the outline ran off the top of the panel while you stood beside a tall
+wall.
+
+### Reach was measured against the wrong distance
+
+`MINE_REACH` was compared against the DDA's horizontal distance, so reach grew
+as the player looked down — the one direction it should shrink. It is `REACH`
+now, 5.5 world units from the eye.
+
+The floor under that number is geometry, not taste. At the resting tilt the aim
+ray leaves the eye at `EYE` = 1.2 and descends `TILT / PROJ` = 0.2375 per cell,
+so the crosshair meets flat ground 5.05 cells out — 5.19 from the eye. A board
+with no pitch keys never leaves that tilt, so Minecraft's own 4.5 would make
+open ground unmineable on it. 5.5 is the tightest round number that clears it.
+
+Tightening it exposed an older bug immediately: for a hit on top of a column the
+reach test compared `dFar`, the far edge of the cell the ray crosses, rather
+than where the ray actually meets the ground. Reach overshot by up to a whole
+cell, invisibly, while the limit was loose enough not to matter.
+
+### Digging down only ever found dirt
+
+`matAt` measured soil depth from the column's **current** height, and mining is
+what changes that height. Take one block off and the layer beneath became the
+new "one below the top", which is the dirt band — so it was dirt again, and
+again, all the way to bedrock. Digging could never reach stone, coal or iron.
+
+Cliff *faces* rendered the bands correctly, which made it worse: you could see
+the ore, mine it, and get dirt. Ore was obtainable only where the generator had
+written it onto a surface, which put the whole upgrade economy nearly out of
+reach of the pick.
+
+It is the same mistake the leaf band made and that this file already names —
+anchoring a band to a height the column does not remember. `g_surf` is the
+anchor: one byte a cell, the height the generator left the column at. Over a
+1,064-column sample, digging now yields 1,055 coal and 390 iron worth 2,225 ore
+where it used to yield none.
+
+### A column is a list of runs now
+
+A cell was one height plus one optional *slab*, and the slab was terrain: the
+generator could make one, the player could not mine it or build into it. So the
+world had the shape of levels and denied the player access to it.
+
+The three slab arrays are replaced by a pool with a per-cell list head — 3,072
+nodes of six bytes, plus an index per cell. A fixed array of three runs a cell
+would have been 110 KB, which this board does not have; the pool costs a node
+only for cells that carry one, and almost none do.
+
+What that buys is the two verbs a heightmap cannot express. Mining the middle of
+a column **splits** it: the part above goes on standing as a run, which is a
+tunnel through a hillside. Placing a block in mid-air against a face creates a
+run, which is a floor, a roof or a bridge. Filling the hole back in **merges**
+the run into the column, because there has to be exactly one way to describe a
+given solid or every later edit has to guess which of two objects it meant.
+
+A run cut out of terrain carries the surface its materials are measured from, so
+the piece left hanging over your tunnel is still grass over dirt over stone
+rather than one flat colour. Mining at z=4 drops iron and z=5 in the remnant
+still reads as iron.
+
+When a split would need a run the cell cannot hold, it is refused — and refused
+*before* any effort is banked, so a player never grinds three seconds into a
+block that then will not come out.
+
+The walker barely changed. `castColumn` already looped over a `Run` array; it
+just happened to be built with exactly two entries in it.
+
+### Walking on what you built
+
+`surfaceUnder` replaces the assumption that a body stands on the ground column.
+It answers "where would a body at this height come to rest in that cell" — the
+highest solid top within `STEP_UP`, with `HEADROOM` over it — and the top of a
+run counts, which is the whole of standing on a floor you laid.
+
+`STEP_UP` is still one, so a two-high wall is still unclimbable and walling
+yourself in still works. A staircase is climbable, which is the point.
+
+Bodies also un-wedge now: nothing reachable within a step means the world moved
+rather than the body — a column grew underneath, or a blast dropped the floor —
+and snapping to the terrain is the only answer that does not leave a player
+standing inside the pillar that just rose around them.
+
+### Mobs path over it too
+
+The flow field's nodes are standable surfaces rather than cells. Each entry is
+a distance and the height that distance was measured at, and the step test runs
+in **both** directions — the sweep goes outward from the player but a mob
+travels inward along it, so asking "and could it get back?" is what keeps a
+two-high wall unclimbable from either side.
+
+One surface per cell, not one per run: the surface a cell is first reached at is
+by construction the one on the shortest route, so a second slot could only
+describe a longer way to the same place. Four surfaces a cell with an
+exactly-sized queue is 108 KB, and that is not available.
+
+The queue is a bounded ring instead. A breadth-first sweep of a 96x96 grid never
+has more than a couple of frontier rings pending, so the old exactly-sized queue
+was eighteen kilobytes standing idle. Overflow drops the cell, which reads as
+unreachable — the pathing degrades rather than corrupts, and it is rebuilt three
+times a second anyway.
+
+Net effect on memory: the 3-D field is **5 KB smaller** than the 2-D one it
+replaced.
+
+Mobs spawn on the terrain, never on a run, so a roof is shelter rather than a
+landing pad.
+
+### Blocks have textures
+
+`world.h` was careful to call the old speckle "not a texture", and it was not
+one: a single shared 8x8 noise tile, carrying no colour of its own, indexed by
+**screen row** — so the pattern slid across a block as the camera moved instead
+of sitting on it.
+
+Two things changed and neither costs a per-pixel branch. The tile is per
+material and 16x16, and the byte it holds now selects one of eight **authored
+colours** rather than one of four brightness steps of a single one. `shadeFor`
+runs each of those eight through exactly the ambient/fog/torch pipeline it used
+to run one colour through, so the table is the same shape and the inner loop is
+the same two loads. That is the difference between grain and a texture: an
+amplitude ramp of one colour cannot draw a grass side, because a grass side is
+brown with a green lip on it.
+
+The other half is a real wall-space `v`. A block is one world unit and pitch is
+a shear rather than a rotation, so one unit is always `PROJ/dist` pixels — the
+step is one multiply off a reciprocal the cell already has, and there is no
+divide per span. It is carried on the painter rather than passed to it, because
+`paint()` runs tens of thousands of times a frame.
+
+`u` indexes one tile across the face now, not eight. The old comment arguing for
+eight was right for a tile indexed by screen row — at one tile per face a texel
+was ten pixels wide against one tall, which draws as brushed metal — but with a
+real `v` the texels are square by construction, and one tile per block is what
+makes brick courses line up and a grass lip sit on the top edge instead of eight
+of them.
+
+Top and underside faces stay on the constant-colour path. They are most of the
+panel and texturing them needs per-row floor casting, which this repo measured
+at 10.5 ms against 4.3 ms and wrote down so it would not be tried again.
+
+**Texels have to live in RAM.** Left in `.rodata` they are external flash behind
+the instruction cache, and the wall loop reads them at a position that jumps
+with the material and the ray angle — close to the worst pattern a cache can be
+given. Measured, that cost 1.5 ms a frame; four kilobytes of SRAM buys all of it
+back. The 64-byte tile this replaced never showed the problem because 64 bytes
+stay resident whatever you do to them.
+
+### The benchmark measured a different world every time
+
+`b` called `startRun()`, which seeds from `esp_random()`. Two runs of the *same
+build* came back at 37 fps and 75 fps purely because one was looking at a house
+and the other at open ground, and several apparent regressions during this work
+were nothing but that. It generates a fixed seed now and always starts a fresh
+run, and two consecutive measurements agree to within 0.2%.
+
+With that, the cost of textures on one fixed world, against the same build with
+the sampling compiled out (`-e cardputer-notex`, which exists for exactly this):
+
+| | no textures | textures | delta |
+|---|---|---|---|
+| fps, mean over the walk | 64.4 | 62.2 | −3.4% |
+| walker, mean | 7,030 µs | 7,543 µs | +513 µs |
+
+The dev build also reports free heap on its telemetry line, because the two
+figures a build report gives you — static bytes used, and a total the
+framebuffers are not counted against — cannot be subtracted to get it.
+
+## 1.4.1 — the pickaxe looks like a pickaxe, and zombies swing
+
+### The pickaxe was a hammer
+
+The head was a straight bar with matching tapers on both ends, mounted at an
+angle, with the haft running behind it. Every one of those choices reads as a
+mallet rather than a pickaxe.
+
+Replaced with a stock 32x32 icon — an arched
+head with two different ends and a haft that comes through it, drawn by someone
+who draws these for a living.
+
+It could not be dropped in as-is. `'a'..'d'` are not free colours: `drawTool`
+swaps exactly those four for the tool tier, so the head has to be all four of
+them and the haft none of them. The import classifies metal from wood on
+saturation, ranks each into its own ramp, and puts the outline ring back the way
+the house style wants it, so the art in `make-sprites.py` is still reviewable
+ASCII and the tier recolour still works.
+
+Kept at the artist's native 32x32 rather than squeezed into the old 24x24 —
+downscaling pixel art by three quarters visibly flattened the arch, which was
+the whole reason for the change. `drawTool` drops from three panel pixels per
+texel to two to suit, which lands the tool at 64 pixels tall against the 72 it
+used to be. The swing offsets are in panel pixels and do not scale, so the arc
+is exactly the size it was.
+
+### The swing leans now
+
+`SwingFrame.ang` had been in the table since the swing was authored and had
+never been read — the comment beside it said so, and said why: three ways of
+leaning the sprite were tried on the device and all three were worse than not
+leaning it.
+
+All three walked the *source*. Rotating source texels into the destination
+drops destination pixels at any angle off ninety degrees, so a one-texel
+outline tears open and the tool comes apart mid-swing; oversized blocks close
+the holes and smear the edges into lumps; a per-row shear keeps the texels
+square but slides the head off its own handle.
+
+The fourth way walks the *destination* instead: every panel pixel the tool
+could cover, rotated backwards to ask which source texel it came from. A hole
+is impossible by construction, because the loop is over the pixels being filled
+rather than the texels doing the filling. Nearest-neighbour, so no colour is
+invented and the palette stays the nine entries it was.
+
+The scan box is sized from the angle rather than fixed at the diagonal — 34
+pixels of reach at rest against 46 fully leaned — so the fifteen barely-leaned
+frames do not pay for the slack the one extreme frame needs. Both source
+coordinates are linear across a row, so the inner loop is two adds and a
+bounds test.
+
+### The tool sits lower
+
+The anchor moves from 96 to 108. The head lives in the top-left of the art, so
+the anchor sits well below where the head lands; at 108 the art's centre is past
+the bottom edge and what is in frame is the head and the top of the haft, which
+is all a first-person tool should show. Lower was tried and the downswing takes
+the head off the bottom of the panel.
+
+### Zombies telegraph with their arms, not by standing still
+
+A committed blow already froze the mob for sixteen ticks before it landed —
+that freeze *was* the entire visual telegraph, and it is not one. A zombie
+winding up to hit you looked exactly like a zombie that had stopped walking,
+and the walk cycle froze with it, so nothing on screen moved at all.
+
+Two attack poses now: the arms come in to the body to wind up, then are thrown
+out past the silhouette to strike, sixteen pixels wide against the walk's
+fourteen. At sixteen pixels there is no room for a subtle gesture, so the
+change is in the outline where it survives being three cells away.
+
+The strike runs the last six ticks of the windup and ends as the blow lands, so
+the arms are still out when the screen kicks.
+
+`MobArt` grew a `walk` field: how many of a family's frames are the walk cycle.
+The renderer picks a stride with a modulo, and without it a zombie would have
+thrown a punch every other step. Creepers and skeletons declare all their frames
+as walk frames and are unchanged — a creeper's fuse is its own telegraph, and
+the skeleton's draw is still only a pause.
+
 ## 1.4.0 — sounds, and a switch to turn them off
 
 ### The beeps were a format problem, not a tuning problem
@@ -310,7 +704,6 @@ working at a wall the player has just sealed themselves behind is left alone.
 Not a bug, checked and confirmed: creeper craters are terraced in one-block
 steps, so nothing gets trapped in its own blast hole.
 
-
 ## 1.2.0
 
 ### Overhangs
@@ -355,7 +748,6 @@ separated by brightness as well as hue.
 Ordered 2x2 dithering between fog bands, so sixteen distance steps across a
 ground plane stop reading as visible arcs. Fewer hearts to start with — six, not
 ten — so the +2 upgrade is a real gain.
-
 
 ## 1.1.0
 
@@ -416,7 +808,6 @@ Both fade into the fog with everything else.
 **A sun, a moon and stars**, fixed to compass bearings rather than to the
 screen, so they slide past as the player turns and work as a compass. They are
 clipped against the terrain's own occlusion table.
-
 
 ## 1.0.0
 

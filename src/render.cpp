@@ -23,6 +23,7 @@
 
 #include "font5x7.h"
 #include "sprites.h"
+#include "textures.h"
 #include "world.h"
 
 namespace render {
@@ -71,7 +72,72 @@ static bool            s_held = false;   // SPI transaction kept open, see prese
 // Amplitude is per material, so snow stays smooth and coal reads as stone shot
 // through with black. Flat faces (tops, undersides) use levels 0 and 2 for the
 // old per-block wobble.
-static uint16_t s_shade[world::B_COUNT][raycast::F_COUNT][RUNGS][4];
+constexpr int TEXELS = textures::TEXELS;
+
+// The texel tiles, copied out of flash into internal RAM at startup.
+//
+// They are `static const` in the generated header, which puts them in .rodata
+// — and on this chip .rodata is external flash reached through the instruction
+// cache. The wall loop reads them at a position that jumps with the material
+// and the ray's angle, which is close to the worst access pattern a cache can
+// be given: measured, leaving them in flash cost 4.9 ms a frame, nearly
+// doubling the walker. Four kilobytes of SRAM buys all of it back.
+//
+// The shared 8x8 grain tile this replaced never showed the problem because 64
+// bytes stay resident whatever you do to them.
+static uint8_t s_tex[world::B_COUNT][textures::TEX_N][textures::TEX_N];
+
+// Top faces, for the materials whose top is not their side, and a per-material
+// pointer that resolves which of the two a floor span should sample.
+//
+// Grass is why. Its tile is dirt with a green lip — right for a wall, and wrong
+// from above, because drawFloorSpan indexes the tile by world XY and so drew
+// that lip as a green stripe every sixteen texels across open ground. The
+// pointer table means the floor loop still does one load and no branch: which
+// tile a material uses is decided once, at startup, not per span.
+static uint8_t s_texTop[textures::TOP_N][textures::TEX_N][textures::TEX_N];
+static const uint8_t* s_topFor[world::B_COUNT];
+static bool    s_texReady = false;
+
+// 1 / (row - horizon), for every row offset a floor can be drawn at.
+//
+// This is the whole reason a textured floor is affordable. A top face is a flat
+// surface at a known height, so the distance to the point under a given screen
+// row is dz * PROJ / (row - horizon) — a divide, per pixel, over the largest
+// area of the panel. Build did it with a table and so does this: the divides
+// are done once at startup and the loop is a load and two multiplies.
+//
+// Note this is NOT the floor-span merging that was tried and rejected here
+// before (see raycast.h). That replaced a flat fill with a per-row shade
+// computation across merged spans; this keeps one span per cell and one shade
+// per span, and only changes what colour each pixel reads.
+// Covers every (row - horizon) the pitch allows: the horizon reaches -213
+// looking fully down, and a row can be VIEW_H - 1, so the largest offset is
+// 347. Rounded up. Undersized, this clamps, and a clamped reciprocal is a
+// floor whose texture stops converging at the far end.
+constexpr int INV_ROWS = 384;
+static float s_invRow[INV_ROWS];
+
+static void buildTextures() {
+  if (s_texReady) return;
+  s_texReady = true;
+  s_invRow[0] = 0.0f;
+  for (int i = 1; i < INV_ROWS; ++i) s_invRow[i] = 1.0f / (float)i;
+  for (int b = 0; b < world::B_COUNT; ++b)
+    for (int u = 0; u < textures::TEX_N; ++u)
+      for (int v = 0; v < textures::TEX_N; ++v)
+        s_tex[b][u][v] = textures::kTexel[b][u][v];
+  for (int t = 0; t < textures::TOP_N; ++t)
+    for (int u = 0; u < textures::TEX_N; ++u)
+      for (int v = 0; v < textures::TEX_N; ++v)
+        s_texTop[t][u][v] = textures::kTopTexel[t][u][v];
+  for (int b = 0; b < world::B_COUNT; ++b) {
+    const uint8_t t = textures::kTopOf[b];
+    s_topFor[b] = (t == textures::TOP_NONE) ? &s_tex[b][0][0]
+                                            : &s_texTop[t][0][0];
+  }
+}
+static uint16_t s_shade[world::B_COUNT][raycast::F_COUNT][RUNGS][TEXELS];
 static uint16_t s_edge[world::B_COUNT][raycast::F_COUNT][RUNGS];      // contact shadow
 static uint16_t s_bevel[world::B_COUNT][raycast::F_COUNT][RUNGS];     // lit top edge
 
@@ -105,7 +171,18 @@ static const uint8_t kGrain[64] = {
 // highlighted block lost both the per-block wobble and the fog dither and sat
 // there visibly flatter and more banded than the blocks around it. Same shape,
 // same loop, and the highlight becomes a table swap instead of a special case.
-static uint16_t s_shadeSel[world::B_COUNT][raycast::F_COUNT][RUNGS][4];
+// The highlight table, for the one block the crosshair is on.
+//
+// It used to mirror s_shade exactly — every material, every face, every rung —
+// which is 21 KB describing fifteen materials when at most one of them is
+// selected at a time. On a board whose two framebuffers leave about eight
+// kilobytes of internal RAM spare, that was most of the remaining headroom
+// spent on a table that is 14/15 unread. It is built for the selected material
+// instead, which is 1.4 KB and rebuilt only when the selection or the hour
+// changes.
+static uint16_t s_shadeSel[raycast::F_COUNT][RUNGS][TEXELS];
+static int      s_selShadeMat = -1;
+static int      s_selQuantum = -2;
 
 // The outline colour, per material. One constant dark value could not work:
 // against snow (luminance 241) a near-black box is right, and against wood (67)
@@ -141,7 +218,7 @@ bool reserve() {
   return true;
 }
 
-void attach(LGFX_Device& disp) { s_disp = &disp; }
+void attach(LGFX_Device& disp) { s_disp = &disp; buildTextures(); }
 
 static inline uint16_t* raw() { return (uint16_t*)s_buf[s_cur]; }
 
@@ -309,6 +386,7 @@ void shadeFor(float dl, int horizon) {
   const int quantum = (int)(dl * 512.0f);
   if (quantum == s_shadeQuantum && s_shadeBuilt) return;
   s_shadeQuantum = quantum;
+  s_selShadeMat = -1;         // the highlight is derived from what follows
   s_shadeBuilt = true;
 
   // Tops catch the sky, the two side orientations fall away from it, and an
@@ -319,7 +397,9 @@ void shadeFor(float dl, int horizon) {
   static const float kFace[raycast::F_COUNT] = { 0.78f, 0.58f, 1.00f, 0.34f };
 
   for (int b = 0; b < world::B_COUNT; ++b) {
-    const world::BlockInfo& bi = world::info((uint8_t)b);
+    // The material's own colour is not read here any more: every colour this
+    // block is made of comes from its texture palette, whose entry 0 is that
+    // colour by construction (tools/make-textures.py checks it).
     for (int side = 0; side < raycast::F_COUNT; ++side) {
       // A block that makes its own light does not dim at night: a torch that
       // goes grey after dusk is worse than no torch at all.
@@ -329,10 +409,6 @@ void shadeFor(float dl, int horizon) {
       // Emissive blocks keep their own colour: a torch that turns moon-blue
       // after dusk is a worse torch than one that does not dim at all.
       // A quarter of the amplitude per level, so the four levels span it.
-      const float grain = (float)bi.speckle / 255.0f * 0.25f;
-      const float mr = emits ? bi.r : mix(bi.r, 90, night);
-      const float mg = emits ? bi.g : mix(bi.g, 110, night);
-      const float mb = emits ? bi.b : mix(bi.b, 150, night);
       for (int d = 0; d < RUNGS; ++d) {
         // Below LIT the block is lifted from the hour's ambient toward fully
         // lit; at LIT it is exactly the ambient near colour the table used to
@@ -340,25 +416,31 @@ void shadeFor(float dl, int horizon) {
         const float ambD = (d < LIT)
             ? amb + (1.0f - amb) * (float)(LIT - d) / (float)LIT
             : amb;
-        const float lr = mr * ambD * face;
-        const float lg = mg * ambD * face;
-        const float lb = mb * ambD * face;
         float t = (d < LIT) ? 0.0f : (float)(d - LIT) / (float)(BANDS - 1);
         t = t * t * (3.0f - 2.0f * t);                  // crisp near, saturating far
-        const uint8_t cr = mix((uint8_t)lr, s_fogR, t);
-        const uint8_t cg = mix((uint8_t)lg, s_fogG, t);
-        const uint8_t cb = mix((uint8_t)lb, s_fogB, t);
-        // Four grain levels, spaced by the material's own amplitude. Level 0 is
-        // the face colour; each step darkens a little. Kept small on purpose:
-        // enough to break a flat face up, not so much that two blocks of the
-        // same material look like two materials.
-        for (int k = 0; k < 4; ++k) {
-          const float g = (float)k * grain;
-          s_shade[b][side][d][k]    = pack(mix(cr, 0, g), mix(cg, 0, g), mix(cb, 0, g));
-          s_shadeSel[b][side][d][k] = pack(lift(mix(cr, 0, g)),
-                                           lift(mix(cg, 0, g)),
-                                           lift(mix(cb, 0, g)));
+
+        // Every colour the material's texture is made of, run through exactly
+        // the shading the single face colour used to get. That is what makes a
+        // texture free here: the per-pixel work is still one byte indexing this
+        // table, and the table is the same size it was when the last axis meant
+        // "one of four brightness steps" instead of "one of eight colours".
+        //
+        // Entry 0 is the material's own colour, so anything that reads
+        // BlockInfo directly — particles, the HUD swatch, distant fog — still
+        // agrees with the texture.
+        uint8_t cr0 = 0, cg0 = 0, cb0 = 0;
+        for (int k = 0; k < TEXELS; ++k) {
+          const uint8_t* pal = textures::kTexPal[b][k];
+          const float pr = emits ? pal[0] : mix(pal[0], 90, night);
+          const float pg = emits ? pal[1] : mix(pal[1], 110, night);
+          const float pb = emits ? pal[2] : mix(pal[2], 150, night);
+          const uint8_t cr = mix((uint8_t)(pr * ambD * face), s_fogR, t);
+          const uint8_t cg = mix((uint8_t)(pg * ambD * face), s_fogG, t);
+          const uint8_t cb = mix((uint8_t)(pb * ambD * face), s_fogB, t);
+          s_shade[b][side][d][k] = pack(cr, cg, cb);
+          if (k == 0) { cr0 = cr; cg0 = cg; cb0 = cb; }
         }
+        const uint8_t cr = cr0, cg = cg0, cb = cb0;
         // A block's bottom edge is a contact shadow and its top edge catches the
         // light. One dark rule alone read as a black grid ruled over the world;
         // a pair reads as a cube with a lit edge, which is the whole difference
@@ -394,19 +476,170 @@ static uint16_t shadeMob(uint8_t r, uint8_t g, uint8_t b, int band, int lit) {
               mix((uint8_t)(b * amb), s_fogB, t));
 }
 
+// Lifts one material's shading into the highlight table. A few hundred packs,
+// and only when the player looks at something new.
+static void selectMaterial(int mat) {
+  if (mat < 0 || mat >= world::B_COUNT) { s_selShadeMat = -1; return; }
+  if (mat == s_selShadeMat && s_shadeQuantum == s_selQuantum) return;
+  s_selShadeMat = mat;
+  s_selQuantum = s_shadeQuantum;
+  for (int side = 0; side < raycast::F_COUNT; ++side)
+    for (int d = 0; d < RUNGS; ++d)
+      for (int k = 0; k < TEXELS; ++k) {
+        const uint16_t c = s_shade[mat][side][d][k];
+        // Unpack the pre-swapped RGB565 the table holds, lift it, pack it back.
+        const uint16_t v = (uint16_t)((c >> 8) | (c << 8));
+        const uint8_t r = (uint8_t)((v >> 8) & 0xF8);
+        const uint8_t g = (uint8_t)((v >> 3) & 0xFC);
+        const uint8_t b = (uint8_t)((v << 3) & 0xF8);
+        s_shadeSel[side][d][k] = pack(lift(r), lift(g), lift(b));
+      }
+}
+
 // ---- world ------------------------------------------------------------------
 
 // One stripe of columns. Split out from drawWorld so the two cores can each
 // take half: measurement put 8.5 ms of a frame in the walker and only 2.4 ms
 // in the pixel writes, so halving the walker is the whole optimisation.
-static void drawColumns(const raycast::Camera& cam, int selX, int selY,
+// One textured floor span.
+//
+// Deliberately its own function and deliberately not inlined. The span loop
+// this used to sit inside already keeps a dozen values live — the span, the
+// shade rows, the dither parity, the framebuffer pointer — and the floor path
+// adds a dozen more: two texture coordinates, two steps, four span constants,
+// the tile, two palette rows. Xtensa has sixteen visible registers, so inlined
+// it spilled the inner loop to the stack and every floor pixel paid for it.
+//
+// That was the entire cost, and it took four wrong theories to find. A probe
+// that textured every pixel and a probe that stored a constant measured the
+// same 12 ms walker, which is the shape of a bottleneck that is not in the
+// arithmetic at all. A call gets a fresh register window; the same arithmetic
+// then costs what it looks like it should.
+static void __attribute__((noinline))
+drawFloorSpan(uint16_t* p, const raycast::Span& s,
+              const uint16_t (*tbl)[TEXELS], int band, int frac, int thX,
+              int horizon, const raycast::Camera& cam, float rdx, float rdy) {
+        // A floor, textured. Every pixel needs where on the surface it is
+        // looking, which is a function of the distance to that row — and that
+        // distance is dz * PROJ / (row - horizon), a divide the table above has
+        // already done.
+        //
+        // Perspective-correct, not interpolated: the reciprocal is exact for
+        // every row, so a floor cell right under the player maps as truthfully
+        // as one at the far clip. Stepping u and v linearly down the span would
+        // have been cheaper still and visibly wrong up close, where a single
+        // cell can fill half the panel.
+        const float dz = cam.z - (float)s.zTop;
+        const float kx = rdx * dz * raycast::PROJ * (float)textures::TEX_N;
+        const float ky = rdy * dz * raycast::PROJ * (float)textures::TEX_N;
+        const float bx = cam.px * (float)textures::TEX_N;
+        const float by = cam.py * (float)textures::TEX_N;
+        const uint8_t* tex = s_topFor[s.mat];
+        const uint16_t* rowA = tbl[band];
+        const uint16_t* rowB = tbl[band + (frac ? 1 : 0)];
+
+        // Rows above the horizon are not part of a floor, and 1/0 is not a
+        // number. Skipped once here rather than tested on every pixel.
+        int y = s.y0, r = s.y0 - horizon;
+        if (r < 1) { const int k = 1 - r; y += k; p += k * W; r = 1; }
+
+        // Two paths, and the split is the whole reason a textured floor is
+        // affordable.
+        //
+        // The walker emits one span per cell, so a frame is a few thousand
+        // floor spans and most of them are two or three pixels tall — a distant
+        // cell seen edge-on. The per-pixel work was never the problem: a probe
+        // that textured every floor pixel and one that stored a constant
+        // measured the same, 12.0 ms of walker either way. What cost 4.2 ms a
+        // frame was the SETUP, paid once per span whatever its height, and the
+        // two integer divides in it above all.
+        //
+        // So: a short span takes one sample and fills, which is what it would
+        // have looked like anyway at two pixels tall. A tall one — the handful
+        // that cover most of the panel — steps affine in 16.16 between exact
+        // fixes eight rows apart, and eight is a shift rather than a divide.
+        //
+        // Magnitudes are safe because dz cancels: kx * inv works out as
+        // rdx * distance * TEX_N, and distance is bounded by MAX_DIST.
+        constexpr int SEG = 8;
+
+        #define FLOOR_SAMPLE_AT(row) \
+            ({ const float iv = s_invRow[(row) < INV_ROWS ? (row) : INV_ROWS - 1]; \
+               const int su = (int)(bx + kx * iv) & 15; \
+               const int sv = (int)(by + ky * iv) & 15; \
+               tex[(su << 4) | sv]; })
+
+        if (s.y1 - y <= 4) {
+          // One texel for the whole span, taken from its middle.
+          const uint8_t t = FLOOR_SAMPLE_AT(r + ((s.y1 - y) >> 1));
+          if (frac == 0) {
+            const uint16_t c = rowA[t];
+            for (; y < s.y1; ++y, p += W) *p = c;
+          } else {
+            const uint16_t cA = rowA[t], cB = rowB[t];
+            int par = y & 1;
+            for (; y < s.y1; ++y, p += W) {
+              *p = (frac > thX + (par ? 4 : 0)) ? cB : cA;
+              par ^= 1;
+            }
+          }
+        } else {
+          float inv = s_invRow[r];
+          int32_t u = (int32_t)((bx + kx * inv) * 65536.0f);
+          int32_t v = (int32_t)((by + ky * inv) * 65536.0f);
+          int par = y & 1;
+          while (s.y1 - y >= SEG) {
+            const int r2 = r + SEG;
+            inv = s_invRow[r2 < INV_ROWS ? r2 : INV_ROWS - 1];
+            const int32_t u2 = (int32_t)((bx + kx * inv) * 65536.0f);
+            const int32_t v2 = (int32_t)((by + ky * inv) * 65536.0f);
+            const int32_t du = (u2 - u) >> 3;      // SEG is 8, so this is /SEG
+            const int32_t dv = (v2 - v) >> 3;
+            if (frac == 0) {
+              for (int i = 0; i < SEG; ++i, ++y, p += W, u += du, v += dv)
+                *p = rowA[tex[(((u >> 16) & 15) << 4) | ((v >> 16) & 15)]];
+            } else {
+              for (int i = 0; i < SEG; ++i, ++y, p += W, u += du, v += dv) {
+                const uint8_t t = tex[(((u >> 16) & 15) << 4) | ((v >> 16) & 15)];
+                *p = (frac > thX + (par ? 4 : 0)) ? rowB[t] : rowA[t];
+                par ^= 1;
+              }
+            }
+            u = u2; v = v2; r = r2;
+          }
+          // Tail: fewer than SEG rows left, so one sample rather than another
+          // fix-up pair.
+          if (y < s.y1) {
+            const uint8_t t = FLOOR_SAMPLE_AT(r + ((s.y1 - y) >> 1));
+            const uint16_t cA = rowA[t], cB = rowB[t];
+            for (; y < s.y1; ++y, p += W) {
+              *p = (frac && frac > thX + (par ? 4 : 0)) ? cB : cA;
+              par ^= 1;
+            }
+          }
+        }
+        #undef FLOOR_SAMPLE_AT
+}
+
+static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ,
                         int xStart, int stride) {
   uint16_t* base = raw();
 
   raycast::Span spans[raycast::MAX_SPANS];
   raycast::ColumnResult res;
+  const int horizon = (int)cam.horizon;
+#ifdef DEV_SERIAL
+  uint32_t fSpans = 0, fTall = 0, fPix = 0, fSeg = 0;
+#endif
   for (int x = xStart; x < W; x += stride) {
-    const int n = raycast::castColumn(cam, x, selX, selY, spans, res);
+    const int n = raycast::castColumn(cam, x, selX, selY, selZ, spans, res);
+
+    // This column's ray, rebuilt the same way the walker builds it. A textured
+    // floor needs to know which way it is looking, and recomputing it here is
+    // two multiplies a column rather than eight more bytes on every span.
+    const float camOff = 2.0f * (float)x / (float)W - 1.0f;
+    const float rdx = cam.dx + cam.planeX * camOff;
+    const float rdy = cam.dy + cam.planeY * camOff;
 
     // Sky goes exactly where nothing was painted. That is a list now, not a
     // single run from the top: the gap you see under a bridge is sky with
@@ -454,47 +687,76 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY,
       if (band >= RUNGS - 1) { band = RUNGS - 1; frac = 0; }
       // One table lookup for selected and unselected alike: the highlight is a
       // different table, not a different code path. That is what keeps the
-      // dither and the grain on the block the player is aiming at, and it takes
-      // a branch out of the hottest loop in the program.
-      // Only the top block is lifted. The rest of the column is the target's
-      // outline, not its highlight.
-      const uint16_t (*tbl)[4] = (s.sel == 2) ? s_shadeSel[s.mat][s.face]
-                                              : s_shade[s.mat][s.face];
+      // dither and the texture on the block the player is aiming at, and it
+      // takes a branch out of the hottest loop in the program.
+      const uint16_t (*tbl)[TEXELS] = s.sel ? s_shadeSel[s.face]
+                                            : s_shade[s.mat][s.face];
       const int thX = (x & 1) ? 8 : 0;
       uint16_t* p = base + (int)s.y0 * W + x;
 
-      // Grain goes on vertical faces only, and only where there is room for it
-      // to read as surface. On the two-pixel slivers a distant block turns into
-      // it is noise, and those slivers are most of the spans in a frame.
+      // Texture goes on vertical faces only, and only where there is room for
+      // it to read as surface. On the two-pixel slivers a distant block turns
+      // into it is noise, and those slivers are most of the spans in a frame.
       if (s.cap && s.y1 - s.y0 > 2) {
-        // A vertical face. It has a horizontal position on the block, so it can
-        // carry grain: one column of the shared tile, indexed down the span.
-        // u >> 2, not u >> 5: at one tile across the whole face each texel was
-        // eight or ten pixels wide against one pixel tall, and what that draws
-        // is horizontal streaking, like brushed metal. Repeating the tile eight
-        // times across the face makes a texel roughly square, which is what
-        // makes it read as grain.
-        const uint8_t*  g    = kGrain + ((((int)s.u >> 2) & 7) << 3);
+        // A vertical face, so it has a real position on the block in both
+        // directions: u across, fixed for the whole span because a vertical
+        // face seen from one screen column is hit at one horizontal position,
+        // and v down, stepped in 8.8 by the walker.
+        //
+        // One tile across the face, not the eight the shared noise tile used.
+        // That was the right call for noise indexed by screen row — at one tile
+        // per face a texel was ten pixels wide against one tall, which draws as
+        // brushed metal — but with a real v the texels are square by
+        // construction, and one tile per block is what makes brick courses line
+        // up and a grass lip sit on the top edge instead of eight of them.
+#ifdef NO_TEXTURES
+        // A/B control: same loop shape, same two loads, but the index comes
+        // from the old shared 8x8 grain tile by screen row instead of from a
+        // wall-space texture coordinate.
+        const uint8_t* col = kGrain + ((((int)s.u >> 2) & 7) << 3);
+        uint32_t v = 0;
+        const uint32_t vStep = 0;
+#else
+        const uint8_t* col = s_tex[s.mat][((int)s.u * textures::TEX_N) >> 8];
+        uint32_t v = s.vStartQ8;
+        const uint32_t vStep = s.vStepQ8;
+#endif
         const uint16_t* rowA = tbl[band];
         if (frac == 0) {
-          for (int y = s.y0; y < s.y1; ++y, p += W) *p = rowA[g[y & 7]];
+          for (int y = s.y0; y < s.y1; ++y, p += W, v += vStep)
+            *p = rowA[col[(v >> 8) & (textures::TEX_N - 1)]];
         } else {
           const uint16_t* rowB = tbl[band + 1];
           int par = (int)s.y0 & 1;
-          for (int y = s.y0; y < s.y1; ++y, p += W) {
-            *p = (frac > thX + (par ? 4 : 0)) ? rowB[g[y & 7]] : rowA[g[y & 7]];
+          for (int y = s.y0; y < s.y1; ++y, p += W, v += vStep) {
+            const uint8_t t = col[(v >> 8) & (textures::TEX_N - 1)];
+            *p = (frac > thX + (par ? 4 : 0)) ? rowB[t] : rowA[t];
             par ^= 1;
           }
         }
+      } else if (s.face == raycast::F_TOP && s.y1 - s.y0 > 1) {
+#ifdef DEV_SERIAL
+        // The rows drawFloorSpan will actually walk: it skips everything at or
+        // above the horizon, where 1/(row - horizon) is not a number.
+        {
+          const int fy0 = s.y0 > horizon + 1 ? s.y0 : horizon + 1;
+          const int fh  = s.y1 - fy0;
+          if (fh > 0) {
+            ++fSpans; fPix += (uint32_t)fh;
+            if (fh > 4) { ++fTall; fSeg += (uint32_t)(fh >> 3); }
+          }
+        }
+#endif
+        drawFloorSpan(p, s, tbl, band, frac, thX, horizon, cam, rdx, rdy);
       } else if (frac == 0) {
-        const uint16_t cA = tbl[band][s.tint << 1];
+        const uint16_t cA = tbl[band][s.tint];
         for (int y = s.y0; y < s.y1; ++y, p += W) *p = cA;
       } else {
         // Two-by-two Bayer: the column contributes 8, the row 4, so a span
         // is a stipple of the two neighbouring fog steps in the proportion
         // the true distance falls between them.
-        const uint16_t cA = tbl[band][s.tint << 1];
-        const uint16_t cB = tbl[band + 1][s.tint << 1];
+        const uint16_t cA = tbl[band][s.tint];
+        const uint16_t cB = tbl[band + 1][s.tint];
         int par = (int)s.y0 & 1;
         for (int y = s.y0; y < s.y1; ++y, p += W) {
           *p = (frac > thX + (par ? 4 : 0)) ? cB : cA;
@@ -508,9 +770,40 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY,
       if (s.cap && s.y1 - s.y0 > 3) {
         base[(int)s.y0 * W + x]       = s_bevel[s.mat][s.face][band];
         base[((int)s.y1 - 1) * W + x] = s_edge[s.mat][s.face][band];
+
+        // A span covers a whole run of like blocks now, so the boundaries
+        // between them fall INSIDE it and need ruling too.
+        //
+        // Found by arithmetic, out here, rather than by watching the texture
+        // coordinate wrap inside the pixel loop. That was the obvious way to do
+        // it — v wraps exactly once a block, so a wrap is a boundary — and it
+        // was measured at +726 us a frame against the 183 us the merging saves.
+        // A compare and an unpredictable branch on every wall pixel is simply
+        // dearer than the clipper calls it was meant to pay for. There are two
+        // stores per boundary here and nothing at all per pixel.
+        if (s.cap > 1) {
+          const float step  = (float)(textures::TEX_N << 8) / (float)s.vStepQ8;
+          const uint16_t off = (uint16_t)(s.vStartQ8 & ((textures::TEX_N << 8) - 1));
+          float yb = (float)s.y0
+                   + (float)((textures::TEX_N << 8) - off) / (float)s.vStepQ8;
+          const uint16_t bevel = s_bevel[s.mat][s.face][band];
+          const uint16_t edge  = s_edge[s.mat][s.face][band];
+          for (; yb < (float)s.y1; yb += step) {
+            const int yy = (int)yb;
+            if (yy <= s.y0 || yy >= s.y1) continue;
+            base[yy * W + x]       = bevel;
+            base[(yy - 1) * W + x] = edge;
+          }
+        }
       }
     }
   }
+#ifdef DEV_SERIAL
+  __atomic_fetch_add(&g_floorSpans, fSpans, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_floorTall,  fTall,  __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_floorPix,   fPix,   __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_floorSeg,   fSeg,   __ATOMIC_RELAXED);
+#endif
 }
 
 // ---- the second core --------------------------------------------------------
@@ -525,12 +818,13 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY,
 static TaskHandle_t s_worker = nullptr;
 static TaskHandle_t s_main   = nullptr;
 static const raycast::Camera* s_jobCam = nullptr;
+static int s_jobSelZ = -1;
 static int s_jobSelX = -1, s_jobSelY = -1;
 
 static void workerTask(void*) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    drawColumns(*s_jobCam, s_jobSelX, s_jobSelY, 0, 2);
+    drawColumns(*s_jobCam, s_jobSelX, s_jobSelY, s_jobSelZ, 0, 2);
     xTaskNotifyGive(s_main);
   }
 }
@@ -547,6 +841,21 @@ void startWorker() {
 
 #ifdef DEV_SERIAL
 uint32_t g_usWorld = 0, g_usMobs = 0, g_usSky = 0, g_usSel = 0, g_usShade = 0;
+
+// What the floor pass actually did, per frame: how many top-face spans reached
+// drawFloorSpan, how many of those were tall enough to take its stepped path
+// rather than the one-sample fill, how many pixels they covered in total, and
+// how many eight-row segments those pixels were walked in.
+//
+// Counted at the call site rather than inside drawFloorSpan, which is
+// deliberate: that function is noinline precisely because it is one register
+// short of spilling its inner loop (see the comment above it), and four
+// counters live across that loop would put it back over the edge. Everything
+// here is a function of the span alone, so the caller can work it out for free.
+//
+// Accumulated per column-stripe and folded in once, because both cores run
+// drawColumns and a plain += from two of them loses counts.
+uint32_t g_floorSpans = 0, g_floorTall = 0, g_floorPix = 0, g_floorSeg = 0;
 #endif
 
 // The selection box, drawn once both cores have finished their columns.
@@ -635,21 +944,24 @@ static void drawSelBox(int selX, int selY) {
   }
 }
 
-void drawWorld(const raycast::Camera& cam, int selX, int selY) {
+void drawWorld(const raycast::Camera& cam, int selX, int selY, int selZ) {
+  // Before either core starts: the highlight table covers one material, and
+  // both of them read it.
+  selectMaterial(selX < 0 ? -1 : (int)world::blockAt(selX, selY, selZ));
 #ifdef DEV_SERIAL
   const uint32_t t0 = micros();
 #endif
   if (s_worker) {
-    s_jobCam = &cam; s_jobSelX = selX; s_jobSelY = selY;
+    s_jobCam = &cam; s_jobSelX = selX; s_jobSelY = selY; s_jobSelZ = selZ;
     // Interleaved, not left half / right half. A contiguous split leaves one
     // core staring at a cliff filling its whole stripe while the other looks
     // at empty sky, and the frame costs whatever the slower half costs.
     // Alternating columns gives both cores a near-identical sample of the view.
     xTaskNotifyGive(s_worker);          // core 0 takes the even columns
-    drawColumns(cam, selX, selY, 1, 2); // core 1 takes the odd ones
+    drawColumns(cam, selX, selY, selZ, 1, 2); // core 1 takes the odd ones
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   } else {
-    drawColumns(cam, selX, selY, 0, 1);
+    drawColumns(cam, selX, selY, selZ, 0, 1);
   }
 #ifdef DEV_SERIAL
   const uint32_t tSel = micros();
@@ -749,6 +1061,11 @@ void drawSky(const raycast::Camera& cam, float dl) {
 
 constexpr float OUTLINE_H = 10.0f;   // below this, a blob reads better than art
 
+// Where a committed blow stops being a wind-up and becomes the strike. The
+// zombie's windup is 16 ticks, so this is the last six of them — a tenth of a
+// second of arms-out, which is as long as a strike should ever hang.
+constexpr uint16_t ATTACK_STRIKE = 6;
+
 // Palette shaded for one mob at one instant: distance, torch light, and any
 // flash it happens to be showing. Small enough to live on the stack, rebuilt
 // per drawn mob rather than per band — a table indexed by band would be 768
@@ -783,6 +1100,7 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
   struct Draw {
     float depth, sx, standZ, flash, walk;
     uint8_t kind, lit, hurt;
+    uint16_t windup;   // ticks left in a committed blow; picks the attack pose
   };
   Draw list[game::MAX_MOBS];
   int n = 0;
@@ -797,10 +1115,15 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     Draw& d = list[n++];
     d.depth  = ty;
     d.sx     = (float)W * 0.5f * (1.0f + tx / ty);
-    d.standZ = (float)world::groundAt(m.x, m.y);    // a mob stands on the terrain
+    d.standZ = (float)m.z;      // whatever it is standing on, terrain or not
     d.kind   = m.kind;
     d.lit    = world::light((int)m.x, (int)m.y);
     d.walk   = m.walk;
+    // A mob committing to a blow stands still, so its stride freezes and the
+    // walk cycle says nothing about what it is doing. The windup is the only
+    // thing that knows, and until now the renderer never saw it: a zombie
+    // winding up to hit you looked exactly like a zombie standing there.
+    d.windup = m.windup;
     // A struck mob flashes white and jolts. It is the only feedback a hit gives
     // at range, and without it combat is two numbers changing somewhere the
     // player cannot see them.
@@ -884,7 +1207,19 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
 
     // Legs swap every half-block walked, so the stride matches the speed
     // instead of a timer, and two mobs side by side never march in step.
-    const int frame = ((int)(d.walk * 2.0f)) % art.frames;
+    //
+    // Modulo art.walk, not art.frames: the frames past the walk cycle are
+    // attack poses, and dealing one out as part of a stride would make a
+    // zombie throw a punch every other step.
+    int frame = ((int)(d.walk * 2.0f)) % art.walk;
+    if (d.windup && art.frames > art.walk) {
+      // Wind up, then strike. The blow lands on the tick windup reaches
+      // zero, so the arms are out for the tenth of a second before it and
+      // drop on the tick it arrives — which is the tick the screen kicks and
+      // the hurt flash covers anyway.
+      const bool strike = d.windup <= ATTACK_STRIKE;
+      frame = art.walk + ((strike && art.frames > art.walk + 1) ? 1 : 0);
+    }
     const uint8_t* pix = art.pix + (size_t)frame * art.h * art.w;
 
     // One divide per mob, not one per pixel.
@@ -1145,14 +1480,26 @@ static const uint8_t kTier[6][4][3] = {
 void drawTool(const game::State& s) {
   const SwingFrame& f = kSwing[s.toolPhase % game::TOOL_ANIM];
 
-  // Three panel pixels per texel. Two kept the whole sprite on screen but left
-  // it small and spindly next to the chunky art it was drawn from; at three the
-  // texels read as texels. The anchor is up and left of the corner to suit it:
-  // the head sits in frame and the haft runs off the bottom edge, which is
-  // where a handle should go — into the hand holding it.
-  constexpr int SCALE = 3;
+  // Two panel pixels per texel, against three for the 24x24 art this replaced.
+  // The art is 32x32 now, so the same three would have put a 96-pixel tool on a
+  // 135-pixel panel and left the player looking at their own pickaxe. Two lands
+  // it at 64, slightly smaller than the 72 it used to be, and the extra eight
+  // texels a side carry the detail the bigger ones were standing in for.
+  //
+  // The swing offsets below are in panel pixels and do not scale, so the arc is
+  // exactly the size it was.
+  //
+  // The anchor is up and left of the corner: the head sits in frame and the
+  // haft runs off the bottom edge, which is where a handle should go — into the
+  // hand holding it.
+  constexpr int SCALE = 2;
   const int ax = 168 + (int)f.dx * 3 / 2;   // where the art's centre lands
-  const int ay = 96  + (int)f.dy * 3 / 2;
+  // Low on the panel. The head is in the top-left of the art, so the anchor
+  // sits well below where the head ends up: at 108 the art's centre is past the
+  // bottom edge and what is in frame is the head and the top of the haft, which
+  // is all a first-person tool should show. Lower than this and the downswing
+  // takes the head off the bottom of the screen entirely.
+  const int ay = 108 + (int)f.dy * 3 / 2;
 
   const int tier = s.miningLevel > 5 ? 5 : s.miningLevel;
 
@@ -1165,30 +1512,59 @@ void drawTool(const game::State& s) {
   for (int k = 0; k < 4; ++k)                      // 'a'..'d' are the metal
     pal[2 + k] = pack(kTier[tier][k][0], kTier[tier][k][1], kTier[tier][k][2]);
 
-  // The swing is pure motion. The sprite is never rotated, sheared or scaled —
-  // it is blitted at whole-pixel offsets, so every texel on screen is exactly
-  // the square it was authored as.
+  // The swing leans as well as moves, which it did not used to.
   //
-  // Three ways of leaning it were tried on the device and all three were worse
-  // than not leaning it. Rotating and walking the destination drops source
-  // texels at any angle off ninety degrees, and a one-texel outline tears open:
-  // the tool came apart mid-swing. Walking the source instead with oversized
-  // blocks closes the holes and smears the edges into lumps. A per-row shear
-  // keeps the texels square but slides the head sideways off its own handle,
-  // which looks like the tool bending.
+  // Three ways of leaning it were tried before and all three were worse than
+  // not leaning it: rotating and walking the *source* drops destination pixels
+  // at any angle off ninety degrees, so a one-texel outline tears open and the
+  // tool comes apart mid-swing; walking the source with oversized blocks closes
+  // the holes and smears the edges into lumps; and a per-row shear keeps the
+  // texels square but slides the head sideways off its own handle.
   //
-  // The swing arc in kSwing is large — nineteen pixels across and twenty-eight
-  // down — and on its own it reads as a swing perfectly well. What the rotation
-  // was adding was damage.
+  // What follows is the fourth way, and the difference is the direction. It
+  // walks the *destination* — every panel pixel the tool could cover — and asks
+  // each one which source texel it came from, by rotating it backwards. A hole
+  // is then impossible by construction: every pixel in the box is written or
+  // deliberately skipped, because the loop is over the pixels being filled
+  // rather than over the texels doing the filling. Nearest-neighbour, so no
+  // colour is invented and the palette stays exactly the nine entries above.
+  //
+  // f.ang was already in the table and had never been read.
   const int hw = sprites::PICK_W / 2, hh = sprites::PICK_H / 2;
 
-  for (int sy = 0; sy < sprites::PICK_H; ++sy) {
-    const int py = ay + (sy - hh) * SCALE;
-    if (py + SCALE <= 0 || py >= H) continue;
-    for (int sx = 0; sx < sprites::PICK_W; ++sx) {
-      const uint8_t v = sprites::kPick[0][sy][sx];
-      if (!v) continue;
-      rect(ax + (sx - hw) * SCALE, py, SCALE, SCALE, pal[v]);
+  // The backwards rotation, in 16.16, with the texel-to-pixel scale folded in
+  // so the inner loop divides by nothing.
+  const float rad = (float)f.ang * 0.017453292f;
+  const int32_t cs = (int32_t)(cosf(rad) * (65536.0f / SCALE));
+  const int32_t sn = (int32_t)(sinf(rad) * (65536.0f / SCALE));
+
+  // How far the leaned sprite can reach from its centre: half its width times
+  // |cos| + |sin|. Computed rather than fixed at the diagonal because most
+  // frames are barely leaned and the whole box is scanned — an upright tool
+  // should not pay for the slack a fully leaned one needs.
+  const int32_t acs = cs < 0 ? -cs : cs, asn = sn < 0 ? -sn : sn;
+  const int R = (int)(((int32_t)(sprites::PICK_W * SCALE / 2)
+                       * (acs + asn) * SCALE) >> 16) + 2;
+
+  const int x0 = ax - R < 0 ? 0 : ax - R, x1 = ax + R > W ? W : ax + R;
+  const int y0 = ay - R < 0 ? 0 : ay - R, y1 = ay + R > H ? H : ay + R;
+
+  uint16_t* base = raw();
+  for (int py = y0; py < y1; ++py) {
+    const int dy = py - ay;
+    // Both source coordinates are linear in px, so the two multiplies happen
+    // once a row and the inner loop is an add each.
+    int32_t u = (int32_t)(x0 - ax) * cs + (int32_t)dy * sn;
+    int32_t v = (int32_t)dy * cs - (int32_t)(x0 - ax) * sn;
+    uint16_t* row = base + py * W;
+    for (int px = x0; px < x1; ++px, u += cs, v -= sn) {
+      // Unsigned compare catches negative and past-the-end in one test.
+      const unsigned sx = (unsigned)((u >> 16) + hw);
+      const unsigned sy = (unsigned)((v >> 16) + hh);
+      if (sx >= (unsigned)sprites::PICK_W || sy >= (unsigned)sprites::PICK_H)
+        continue;
+      const uint8_t val = sprites::kPick[0][sy][sx];
+      if (val) row[px] = pal[val];
     }
   }
 }

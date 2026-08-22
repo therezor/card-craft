@@ -52,11 +52,31 @@ constexpr float PROJ = 160.0f;
 constexpr int TILT = 38;
 constexpr int HORIZON = VIEW_H / 2 - TILT;
 
-// How far the horizon may shear from its resting place, in pixels. Bounded
-// rather than free: past this the floor or the sky fills the panel and the
-// world stops being legible, and the walker's cost grows with how much wall
-// is on screen.
-constexpr int PITCH_RANGE = 46;
+// How far the horizon may shear from its resting place, in pixels.
+//
+// Pitch is a y-shear, so "straight up" is not a thing this projection can
+// reach: the slope through a screen row is (VIEW_H/2 - horizon) / PROJ, and
+// vertical is that slope going to infinity. What "fully" can mean here is
+// therefore an angle, and these are set to about 60 degrees either side of
+// level — slope 1.75, which is 280 pixels of shear at PROJ 160.
+//
+// They used to be 111 and 39, roughly 25 degrees up and 12 down, and the
+// reason given for keeping down short was that down is the direction that
+// fills the screen with near geometry and that is where the frame time is.
+// That reasoning does not survive contact with the walker: looking steeply
+// down, every ray meets the floor within a cell or two and the DDA stops
+// almost immediately. The expensive view is the one across a landscape, which
+// is the RESTING tilt, not either extreme.
+//
+// Two limits and not one, because the rest pose is not level. HORIZON already
+// carries TILT pixels of downward tilt, so a range symmetric around it is not
+// symmetric around the direction the player is actually facing; these are
+// symmetric about level, which is what the control has to feel like.
+//
+// As horizon rows, with VIEW_H 135 and HORIZON 29: level is 67, fully up is
+// 347 and fully down is -213.
+constexpr int PITCH_UP   = 318;   // level (67) + 280, less HORIZON
+constexpr int PITCH_DOWN = 242;   // HORIZON, less (level (67) - 280)
 
 // Eye height above whatever surface the body is standing on. A little over one
 // block, so a one-block step is waist height and a two-block wall is over your
@@ -78,7 +98,12 @@ constexpr float slopeFor(int horizon) {
 // holds. Walking further is work with nothing to show for it.
 constexpr float MAX_DIST  = 17.0f;
 constexpr int   MAX_STEPS = 72;
-constexpr int   MAX_SPANS = 64;      // a column is 135 rows; this is never reached
+// A column is 135 rows, so this cannot be reached by geometry that tiles the
+// panel — but a stack thirty-two blocks tall seen edge-on emits one span per
+// block, and several such stacks along one ray can. The walker stops early at
+// MAX_SPANS - 12 and the clipper drops the rest, so overflow costs far detail
+// rather than correctness; this is set well clear of it instead.
+constexpr int   MAX_SPANS = 112;
 
 // Merging consecutive floor cells into one span, Doom-style, was tried here
 // and measured as a clear loss: A/B on a fixed scene put the walker at 10.5 ms
@@ -105,20 +130,22 @@ struct Span {
   uint16_t distQ8;    // 8.8 fixed distance, for the shade band
   uint8_t  mat;       // world::Block
   uint8_t  face;      // Face — drives which of the three shade tables is used
-  // 0 = not the target. 1 = part of the column the crosshair is on. 2 = the
-  // top block of it, which is the one a swing actually takes off.
+  // 1 = this span belongs to the block the crosshair is on.
   //
-  // Two levels, not one, because in a heightmap those are different things.
-  // Mining always removes the topmost block, so the block that comes off is not
-  // the block the crosshair is pointing at unless you happen to be aiming at
-  // the top of the stack. Outlining only the top block put the box somewhere
-  // the player was not looking — and, standing next to a six-high wall, off the
-  // top of the panel entirely. The outline follows the whole column, so the
-  // crosshair is always inside it; the lift stays on the top block, so what is
-  // about to come off is still the thing that is glowing.
+  // It used to carry two levels: the whole column at 1, its top block at 2.
+  // That existed because mining always removed the topmost block, so the block
+  // being pointed at and the block about to break were different things and the
+  // outline had to describe both — and standing beside a six-high wall it ran
+  // off the top of the panel. Mining takes the block you are aiming at now, so
+  // there is one thing to draw.
   uint8_t  sel;
   uint8_t  tint;      // 0 or 1: a per-block shade wobble, so faces are not flat
-  uint8_t  cap;       // 1 = draw a darker rule along the top, separating blocks
+  // 0 = a flat face (top, underside): no texture, no rules.
+  // 1 = a vertical face exactly one block tall: rule its two ends.
+  // 2 = a vertical face covering SEVERAL blocks, merged into one span. The
+  //     renderer has to find the block boundaries inside it, which it does off
+  //     the texture coordinate — v wraps once a block by construction.
+  uint8_t  cap;
   uint8_t  lit;       // torch light on this column, 0..world::LIGHT_MAX
 
   // Where across the face this column landed, 0..255. Constant for a whole
@@ -126,6 +153,20 @@ struct Span {
   // horizontal position — which is exactly what makes surface texture cheap
   // here: the renderer needs no interpolation across the span, only down it.
   uint8_t  u;
+
+  // ...and how far down the face it starts, with how much of the texture each
+  // screen row covers, both 8.8. This is the other half of a texture
+  // coordinate, and the half the grain tile never had: it indexed by screen
+  // row, so the pattern slid over a block as the camera moved instead of
+  // sitting on it. Zero on faces that take the flat path.
+  uint16_t vStartQ8;
+  uint16_t vStepQ8;
+
+  // For a top face: the world height of the surface being looked down on.
+  // A floor's texture coordinates are a function of how far the ray has
+  // travelled when it reaches each row, and that distance falls out of this
+  // height and the row — see render.cpp. Zero on every other face.
+  uint8_t  zTop;
 };
 
 struct Camera {
@@ -205,15 +246,31 @@ struct ColumnResult {
   int16_t  selGeoY0, selGeoY1;
 };
 
-// (selX, selY) is the column the crosshair is on; spans belonging to that
-// column's topmost block — the one a swing would take off — come back with
-// sel set, so the player can see what they are about to mine. Pass (-1, -1)
+// What the crosshair is on.
+//
+// It used to be two ints and a bool — the cell, and whether the ray came down
+// on its top. That was everything a heightmap could act on, because both verbs
+// worked on the column rather than on a block: mining popped the top whatever
+// you aimed at, and building grew the same column. Placing a block *against a
+// face* needs to know which face, and which block owns it, and neither of those
+// is a property of a column.
+struct Hit {
+  int16_t x, y, z;      // the block the ray struck
+  uint8_t face;         // which of its faces: F_NS, F_EW, F_TOP, F_BOT
+  int8_t  nx, ny, nz;   // that face's outward normal, so a block placed against
+                        // it goes at (x + nx, y + ny, z + nz)
+  float   dist;         // distance from the eye along the ray, the same measure
+                        // pick()'s maxDist is given in
+};
+
+// (selX, selY, selZ) is the block the crosshair is on; its spans come back with
+// sel set, so the player can see what they are about to mine. Pass (-1, -1, -1)
 // for no selection.
-int castColumn(const Camera& cam, int x, int selX, int selY,
+int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
                Span* out, ColumnResult& res);
 
 // The crosshair ray. Returns the column it lands on and whether it came down
 // on the top of that column rather than running into its side.
-bool pick(const Camera& cam, float maxDist, int& hitX, int& hitY, bool& onTop);
+bool pick(const Camera& cam, float maxDist, Hit& hit);
 
 }  // namespace raycast

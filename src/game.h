@@ -97,6 +97,12 @@ enum Event : uint32_t {
   EV_WHIFF      = 1u << 14,   // the strike frame of a swing that found nothing
   EV_ARROW_FIRE = 1u << 15,
   EV_ARROW_HIT  = 1u << 16,
+  // Aimed somewhere a block cannot go: off the map, inside a body, or — while
+  // the world is still a heightmap — out in mid-air where nothing can hold it.
+  EV_CANT_PLACE = 1u << 18,
+  // The world has no run left to describe the hole a cut would leave, or the
+  // block a build would need. A wall the player has honeycombed too finely.
+  EV_NO_ROOM    = 1u << 19,
 };
 
 // ---- effects ----------------------------------------------------------------
@@ -148,7 +154,12 @@ struct Arrow {
 };
 
 struct Mob {
-  float   x, y;      // z is not stored: a body always stands on world::groundAt
+  float   x, y;
+  // The surface it is standing on. It used to be derived from the terrain on
+  // the spot, on the reasoning that a body always stands on world::groundAt —
+  // which stopped being true the moment a cell could offer more than one place
+  // to stand. A mob on a bridge deck and a mob under it are in the same cell.
+  uint8_t z;
   int16_t hp;
   uint8_t kind;
   uint16_t timer;    // attack cooldown, or the creeper's fuse
@@ -211,8 +222,18 @@ struct State {
   // What the crosshair is on this tick, for the HUD.
   bool     aimValid = false;
   bool     aimOnTop = false;   // came down on a column top rather than its side
-  int16_t  aimX = 0, aimY = 0;
+  int16_t  aimX = 0, aimY = 0, aimZ = 0;
+  // The outward normal of the face being pointed at. A block built against
+  // that face goes at aim + this, which is the whole of Minecraft's placement
+  // rule and the reason the hit has to carry a face at all.
+  int8_t   aimNX = 0, aimNY = 0, aimNZ = 0;
   uint8_t  aimDamage = 0;
+
+  // The surface the player is standing on. Not derivable from the cell any
+  // more: a cell can offer several, and which one you are on depends on which
+  // one you walked in at. This is what makes a floor you built somewhere you
+  // can stand rather than scenery.
+  uint8_t  feetZ = 0;
 
   // Eye height, eased toward the ground the body is standing on rather than
   // snapped to it. The snap was a teleport: step up one block and the whole

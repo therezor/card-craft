@@ -5,7 +5,7 @@
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/platform-M5Stack%20Cardputer-informational">
   <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%2F%20PlatformIO-blue">
-  <img alt="fps" src="https://img.shields.io/badge/frame%20rate-33%E2%80%9376%20fps-success">
+  <img alt="fps" src="https://img.shields.io/badge/frame%20rate-32%E2%80%9367%20fps-success">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -29,36 +29,64 @@ matter what is in it. That is a hard ceiling of 77 fps, and it leaves roughly
 
 ## The solution
 
-A first-person survival game with a real loop, running at **33 fps worst case
-and 64 fps average**, measured on-device against a full twenty-four-mob wave.
+A first-person survival game with a real loop, running at **32 fps worst case
+and 48 fps average**, measured on-device against a full twenty-four-mob wave.
 
 **The loop.** Daylight is a countdown. You mine to gather blocks to build with
 and ore to upgrade with, but ore only exists underground and in the open pits,
 which are the last places you want to be at dusk. At night, mobs spawn at the
-map edges and walk to you. Zombies press. Creepers detonate and blow a hole in
-whatever you built, which is what stops walling yourself in from being a solved
-strategy. Skeletons outrange you from night four. Survive to dawn and you spend
+map edges and walk to you. Zombies press: every blow is announced by a wind-up
+pose and can be walked out of, which is the difference between a fair fight and
+an unreadable one. Creepers detonate and blow a hole in whatever you built,
+which is what stops walling yourself in from being a solved strategy. Skeletons outrange you from night four. Survive to dawn and you spend
 your ore on one of three upgrades. Score is nights survived; it persists to NVS.
 
-**The world** is a 64x64 heightmap of one-metre cubes, three blocks deep and six
-tall over a bedrock plane. You dig down as well as build up. Terrain is two
-octaves of value noise, and on top of it go shapes noise cannot make: trees,
-walled ruins you can shelter in, and open quarries cut past the stone line where
-ore shows on the surface.
+**The world** is a 96x96 grid of one-metre cubes, eight blocks deep and
+twenty-four tall over a bedrock plane. A column is a **32-bit occupancy mask**,
+one bit a block — the world is exactly 32 tall, so a column is exactly one word.
+Any block anywhere can be taken out or put back: mine into the side of a hill
+and the rest of it stays up as a tunnel, build out from a ledge and you get a
+floor you can stand on, and a column can have as many holes in it as it has
+blocks. There is no cap and so no refusal. Terrain is
+two octaves of value noise, and on top of it go shapes noise cannot make: trees
+with real canopies, walled ruins you can shelter in, and open quarries cut past
+the stone line where ore shows on the surface.
 
-**The renderer** is a heightmap raycaster. A ray does not stop at the first solid
-cell — it keeps stepping outward, and each cell contributes the side of its
-column (split into one span per block, so a stack reads as stacked cubes) and
-the top of its column seen from above. Spans are painted bottom-up while
-tracking the topmost row already covered, so occlusion, early-out and
-back-to-front ordering are all the same single test.
+**Materials under the surface are computed, not stored.** A column remembers the
+height the generator left it at; grass over dirt over stone over ore falls out of
+the depth below that number. It costs one byte a cell and it cannot drift out of
+step with the terrain. Everything the profile cannot derive — a trunk, a canopy,
+a wall, anything a player placed — is a short list of **markers**, each saying
+"from this z upward, the material is m".
+
+Geometry and material are kept apart deliberately, and it is what makes the
+world's one hard rule work: **removing a block cannot change what anything is
+made of, so mining allocates nothing and can never be refused.**
+
+**The renderer** is a raycaster. A ray does not stop at the first solid cell —
+it keeps stepping outward, and each cell contributes the side of every run of
+solid blocks it carries, plus each run's top and underside. The runs come off
+the occupancy mask with a bit scan, and a run of like blocks is **one span, not
+one per block**: a six-high stone wall costs the clipper a single call where it
+used to cost six, and the bevels that separate the blocks inside it are ruled
+afterwards from the texture coordinate. Occlusion is a list of still-unpainted row ranges
+rather than a single high-water mark, because the moment a world can have an
+overhang the painted region of a column stops being one contiguous run.
+
+**Blocks are textured** from a 16x16 tile per material, and it costs about half
+a millisecond a frame. The trick is that a texel is an index rather than a
+colour: it picks one of eight authored colours, and the shade table that already
+existed runs all eight through the same distance, torch and daylight shading it
+used to run one through. The inner loop is the same two loads it was when the
+last axis meant "one of four brightness steps".
 
 ## Controls
 
 Four buttons is the entire input budget, so the game can be ported to boards
-with no keyboard. There is no look up/down: the camera carries a fixed downward
-tilt, and the crosshair sits at the centre of the panel where the aim ray
-actually lands.
+with no keyboard. The crosshair sits at the centre of the panel, where the aim
+ray actually lands, at any pitch. Looking up and down is outside that four-button
+core on purpose: a board with no keys to spare leaves the camera at the fixed
+downward tilt the game shipped with and plays exactly as it always did.
 
 The layout is two-handed: the right hand lives on the arrow cluster and does
 all the moving and all the menu navigation, the left hand lives on `E` and `D`
@@ -69,16 +97,25 @@ also bound to movement — `D` has to mean build.
 |---|---|---|
 | Move, back | `;` `.` (up/down arrows) | right |
 | Turn | `,` `/` (left/right arrows) | right |
-| Mine, attack | `E` (or `SPACE`) — hold it; the target block is lit and outlined | left |
-| Build | `D` — stacks one block on the column you are aiming at | left |
+| Mine, attack | `E` (or `SPACE`) — hold it; the block under the crosshair is lit and outlined | left |
+| Build | `D` — places against the face you are aiming at | left |
+| Cycle block | `S` — steps through the six-slot hotbar | left |
+| Craft | `W` — opens the crafting card | left |
+| Look up, down | `R` `F` — about 60° each way; both together recentres | left |
 | Pause | `` ` `` or `TAB` | left |
 | Confirm | `E` or `ENTER` | left |
 
-The pause card carries the one setting the game has: **SOUND: ON/OFF**, kept in
-NVS so it survives a reboot.
+Mining takes the block the crosshair is on, and building puts one against the
+face it is on — so aiming at the foot of a wall tunnels into it rather than
+taking the block off its top, and aiming at a wall's side builds outward rather
+than upward. Reach is 5.5 world units from the eye, for both.
 
-Building on your own cell is refused: with a heightmap that would jack you up a
-block at a time and let you pillar out of every wave for free.
+The pause card carries the one setting the game has: **SOUND: ON/OFF**, kept in
+NVS so it survives a reboot. It defaults to off.
+
+Building into your own body is refused — not just the cell you stand in but the
+whole volume you occupy, which is what stops pillaring straight up out of a
+wave. Building into a mob is refused too.
 
 ## Performance
 
@@ -88,14 +125,43 @@ jumps straight to a late-night wave, because a benchmark that measures night one
 measures five mobs and the frame rate that has to hold is the one with a full
 field of twenty-four.
 
-| | worst | average | best |
+| | worst | mean | best |
 |---|---|---|---|
-| Night, full 24-mob wave | 33 fps | 64 fps | 76 fps |
+| Night, full 24-mob wave | 32 fps | 48 fps | 67 fps |
 
-CPU averages 9.6 ms against a 12.98 ms transfer, so most frames are limited by
-the panel rather than by the processor and sit at the 76 fps ceiling. The worst
-case is a view filled with close geometry, where the column walker alone reaches
-22 ms.
+CPU averages 14.9 ms against a 12.98 ms transfer, so the frame is now limited by
+the processor rather than by the panel — which is the opposite of what this
+section used to say, and the change is the textured floors. `world_us` alone is
+11.9 ms of it.
+
+**The benchmark is deterministic, and a fixed seed was not enough to make it so.**
+It seeds from a constant, so every run measures the same island. But the
+simulation was still advanced by *elapsed time*, and that quietly ruined the
+comparison: a build that renders more slowly takes more catch-up ticks per
+frame, walks further per frame, and a few seconds in is standing somewhere else
+looking at a different scene. Render cost feeds tick rate feeds camera position
+feeds render cost. Measured over forty windows, that put two runs of the **same
+build** 12% apart on frame rate and 33% apart on CPU.
+
+The bench loop runs exactly one tick per frame and ignores the clock. The walk
+is then frame-indexed, window *n* is the same simulated moment in every build,
+and two consecutive runs agree to within 0.3% — often to 0.0%. The game runs
+slower than real time while benching, which does not matter: nothing here is
+measuring how the game feels.
+
+Block textures cost about half a millisecond a frame. `-e cardputer-notex` is
+the same dev build with the sampling compiled out, so the figure can be checked
+rather than asserted:
+
+| | no textures | textures | delta |
+|---|---|---|---|
+| fps, mean over the scripted walk | 64.4 | 62.2 | −3.4% |
+| walker, mean | 7,030 µs | 7,543 µs | +513 µs |
+
+Texels have to live in RAM. Left in `.rodata` they are external flash behind the
+instruction cache, and the wall loop reads them at a position that jumps with
+the material and the ray angle — close to the worst pattern a cache can be
+given. That cost 1.5 ms a frame; four kilobytes of SRAM buys all of it back.
 
 The single largest saving was not in the renderer at all. `shadeFor` rebuilds
 every material's shade table from the hour of the day, and it was doing so on
@@ -138,8 +204,16 @@ source so they are not tried again:
 - **`-flto`.** It has to be on the link line to resolve `src/`'s objects, which
   collects the Arduino core, where it drops `app_main()` as unreferenced —
   the only caller is inside a precompiled archive the optimiser cannot see, and
-  `--undefined=app_main` does not save it. The inlining it would have bought was
-  got instead by batching the per-cell world lookups into one `world::cellAt()`.
+  `--undefined=app_main` does not save it. The inlining it would have bought is
+  got instead by **`src/unity.cpp`**, which compiles the four files in the
+  frame's path as one translation unit. Same cross-module inlining, no link line
+  involved, and the Arduino core never enters into it.
+- **Ruling block boundaries inside the pixel loop.** A span covers a whole run
+  of like blocks now, so the bevels between them fall inside it. The obvious way
+  to find them is to watch the texture coordinate wrap, since it wraps exactly
+  once a block — and that costs a compare and an unpredictable branch on every
+  wall pixel. Measured at **+726 µs a frame against the 183 µs the merging
+  saves.** The boundaries are computed arithmetically outside the loop instead.
 
 The walker itself carries the reciprocal from each cell's far edge to the next
 cell's near edge (one divide per cell, not two), steps block bands by
@@ -151,10 +225,13 @@ saturates at 16.
 
 ```sh
 pio run -e cardputer -t upload          # the game
-pio test -e native                      # 94 host tests, no hardware needed
+pio test -e native                      # 126 host tests, no hardware needed
 pio run -e cardputer-dev -t upload      # + frame-time overlay, telemetry, screenshots
 ./tools/grab-screenshots.py             # pull PNGs off the dev build
 ./tools/make-font.py                    # regenerate src/font5x7.h from its glyph art
+./tools/make-textures.py                # regenerate src/textures.h from its block art
+pio run -e cardputer-notex -t upload    # the dev build with textures compiled out,
+                                        #   for A/B'ing what they cost
 ```
 
 One binary runs on both the Cardputer and the Cardputer ADV: they share the
@@ -166,14 +243,21 @@ controller (IO matrix or TCA8418) at runtime.
 ```
 src/
   main.cpp          screens, the fixed 60 Hz timestep, audio
-  world.h/.cpp      PURE  heightmap, materials, terrain + structures, mining
+  world.h/.cpp      PURE  the block grid as occupancy masks, material markers,
+                    terrain + structures, mining and building
   raycast.h/.cpp    PURE  camera -> screen spans
   game.h/.cpp       PURE  clock, waves, flow-field pathing, combat, upgrades
   render.h/.cpp     framebuffers, shade tables, spans, billboards, the pickaxe
+  unity.cpp         compiles world/raycast/game/render as one TU — see -flto
   ui.h/.cpp         HUD and the title/upgrade/death cards
   sfx.h/.cpp        cue table and the non-blocking channel sequencer
   sfxdata.h         generated by tools/make-sfx.py — the sound bank, as PCM
-  sprites.h         generated by tools/make-sprites.py
+  textures.h        generated by tools/make-textures.py — a 16x16 palette-indexed
+                    tile per material, plus a top-face tile where the top is
+                    not the side (grass)
+  sprites.h         generated by tools/make-sprites.py; the pickaxe is
+  textures.h        generated by tools/make-textures.py — a 16x16 tile and an
+                    eight-colour palette per block material
   font5x7.h         generated by tools/make-font.py
   screenshot.h/.cpp  #ifdef DEV_SERIAL
   hal/hal.h         board contract — six held buttons and four edges
@@ -262,11 +346,11 @@ Mobs are clipped correctly against them: the occlusion table records ground
 geometry only, so a mob under a bridge is not hidden by the deck over it, while
 slabs contribute a separate band so a mob on the *far* side of one is.
 
-**A caveat worth knowing.** The camera has a fixed downward tilt and no pitch
-control, so anything above eye level lives in the top 38 rows of the panel. An
-overhang directly above you is off the top of the screen — you see one by
-approaching it, not by standing under it. Cave mouths read best, because you
-walk into them at ground level.
+**They are ordinary blocks now.** A run used to be terrain: the generator could
+make one, the player could not mine it or build into it. Both work, so a roof
+can be dug through and a floor can be laid in mid-air — and `R`/`F` tilt the
+view up, so an overhang directly above you is something you can look at rather
+than something you have to back away from to see.
 
 ---
 

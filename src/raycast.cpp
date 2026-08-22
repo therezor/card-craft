@@ -15,6 +15,7 @@
 
 #include <math.h>
 
+#include "textures.h"
 #include "world.h"
 
 namespace raycast {
@@ -36,7 +37,7 @@ void init() {
 }
 
 void setPitch(Camera& cam, int horizon) {
-  const int lo = HORIZON - PITCH_RANGE, hi = HORIZON + PITCH_RANGE;
+  const int lo = HORIZON - PITCH_DOWN, hi = HORIZON + PITCH_UP;
   if (horizon < lo) horizon = lo;
   if (horizon > hi) horizon = hi;
   cam.horizon  = (int16_t)horizon;
@@ -80,6 +81,19 @@ struct Painter {
   Span*     out;
   int*      n;
 
+  // Where the face being painted begins on screen BEFORE clipping, and how
+  // much of the texture one screen row covers. Set once per block rather than
+  // passed in: paint() is called tens of thousands of times a frame, and two
+  // more arguments on that signature is two more words of call overhead every
+  // time — measurably more than the per-pixel work they pay for.
+  //
+  // Together they give every emitted piece its own start into the texture, so a
+  // face half hidden behind something nearer still shows the right half of
+  // itself instead of restarting the pattern at the cut.
+  float    fyTop   = 0.0f;
+  uint16_t vStepQ8 = 0;
+  uint8_t  zTop    = 0;
+
   bool paint(int a, int b, uint16_t distQ8, uint8_t mat, uint8_t face,
              uint8_t sel, uint8_t tint, uint8_t cap, uint8_t lit, uint8_t u,
              int& topRow) {
@@ -108,6 +122,9 @@ struct Painter {
         s.y0 = (int16_t)a; s.y1 = (int16_t)b;
         s.distQ8 = distQ8; s.mat = mat; s.face = face;
         s.sel = sel; s.tint = tint; s.cap = cap; s.lit = lit; s.u = u;
+        s.vStepQ8  = vStepQ8;
+        s.vStartQ8 = (uint16_t)(((float)a - fyTop) * (float)vStepQ8);
+        s.zTop     = zTop;
       }
       open[0].y1 = (int16_t)a;
       if (a <= 0) *nOpen = 0;
@@ -128,6 +145,9 @@ struct Painter {
         s.y0 = (int16_t)c0; s.y1 = (int16_t)c1;
         s.distQ8 = distQ8; s.mat = mat; s.face = face;
         s.sel = sel; s.tint = tint; s.cap = cap; s.lit = lit; s.u = u;
+        s.vStepQ8  = vStepQ8;
+        s.vStartQ8 = (uint16_t)(((float)c0 - fyTop) * (float)vStepQ8);
+        s.zTop     = zTop;
         any = true;
         if (c0 < topRow) topRow = c0;
       }
@@ -166,11 +186,28 @@ struct Painter {
 
 }  // namespace
 
-// One solid run in a column — the ground stack, or a slab floating over it.
+// One solid run in a column — the ground stack, or something floating over it.
 // Both draw the same way, which is why they share this.
-struct Run { int base, top; uint8_t mat; bool ground; };
+struct Run { int base, top; bool ground; };
 
-int castColumn(const Camera& cam, int x, int selX, int selY,
+// The next run of set bits at or above `from`. Both ends come out of one bit
+// scan each; on Xtensa NSAU makes those single instructions.
+//
+// This replaces copying a cell's run list into a fixed array. The array had to
+// be fixed because the world had a per-cell run cap, and that cap was the
+// reason mining and building could be refused. A mask has no cap, so neither
+// does this: a column can be as full of holes as it likes and the walker just
+// finds one more run.
+static inline bool nextRun(uint32_t m, int from, int& base, int& top) {
+  const uint32_t rest = (from >= 32) ? 0u : (m & (~0u << from));
+  if (!rest) return false;
+  base = __builtin_ctz(rest);
+  const uint32_t gaps = ~m >> base;
+  top = gaps ? base + __builtin_ctz(gaps) : 32;
+  return true;
+}
+
+int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
                Span* out, ColumnResult& res) {
   const float camX = s_camX[x];
   const float rdx = cam.dx + cam.planeX * camX;
@@ -219,7 +256,7 @@ int castColumn(const Camera& cam, int x, int selX, int selY,
     if (res.nOpen == 0 || dNear >= MAX_DIST || n >= MAX_SPANS - 12) break;
 
     const float dFar = (sideX < sideY) ? sideX : sideY;
-    const bool  sel  = (mapX == selX && mapY == selY);
+    const bool  selCell = (mapX == selX && mapY == selY);
     const world::Cell cell = world::cellAt(mapX, mapY);
     const uint8_t lit = cell.light;
 
@@ -235,27 +272,27 @@ int castColumn(const Camera& cam, int x, int selX, int selY,
     const uint16_t qn = (uint16_t)(dNear * 256.0f > 65535.0f ? 65535.0f : dNear * 256.0f);
     const uint16_t qf = (uint16_t)(df * 256.0f > 65535.0f ? 65535.0f : df * 256.0f);
 
-    const int h     = (int)cell.h;
-    const int sBase = (int)cell.slabBase;
-    const int sTop  = (int)cell.slabTop;
-
-    Run runs[2];
-    int nRuns = 0;
-    runs[nRuns++] = { 0, h, 0, true };
-    if (sTop) runs[nRuns++] = { sBase, sTop, cell.slabMat, false };
-
     // The overall open extent, for rejecting whole runs without touching them.
     const int openLo = res.open[0].y0;
     const int openHi = res.open[res.nOpen - 1].y1;
 
-    for (int r = 0; r < nRuns; ++r) {
-      const Run& run = runs[r];
+    // The ground column first, then every run floating above it, ascending.
+    // This loop was written against a generic Run from the start; what changed
+    // is only where the runs come from — a bit scan of the column instead of a
+    // copied list with a cap on it.
+    //
+    // The ground run is walked even when it is empty. A column dug down to
+    // nothing is not an absence of run: the base plane's top face is still
+    // there at z = 0, and it is the floor of the pit that was just dug.
+    Run run = { 0, (int)cell.h, true };
+    for (;;) {
       // A ground column dug down to nothing is not an empty run: the base
       // plane's top face is still there at z = 0, and it is the floor of the
       // pit you just dug. Skipping the run outright left the hole with no
       // bottom — the far wall's side face stretched down across the opening
       // and you saw straight through where the floor should have been.
-      if (run.top < run.base || (!run.ground && run.top == run.base)) continue;
+      if (run.top < run.base || (!run.ground && run.top == run.base)) goto nextrun;
+      {
       int* topTracker = run.ground ? &groundTop : nullptr;
       int scratch = VIEW_H;
       int& track = topTracker ? *topTracker : scratch;
@@ -277,68 +314,149 @@ int castColumn(const Camera& cam, int x, int selX, int selY,
         if (r3 < lo) lo = r3; if (r3 > hi) hi = r3;
         if (r4 < lo) lo = r4; if (r4 > hi) hi = r4;
       }
-      if (hi <= openLo || lo >= openHi) continue;
+      if (hi <= openLo || lo >= openHi) goto nextrun;
 
       // -- underside, seen from below. A slab's floor is the ceiling of
       // whatever you are standing under; the ground run has none, since
       // nothing can get beneath the base plane.
       if (!run.ground && cam.z < (float)run.base) {
+        paint.vStepQ8 = 0;
+        paint.zTop = 0;
         const float dz = cam.z - (float)run.base;
         const int ya = clampRow(horizon + dz * invFar);
         const int yb = clampRow(horizon + dz * invNear);
         paint.paint(ya < yb ? ya : yb, ya < yb ? yb : ya, qf,
-                    run.mat, F_BOT, 0,
+                    world::matAt(mapX, mapY, run.base), F_BOT, 0,
                     tintOf(mapX, mapY, run.base), 0, lit, wallU, track);
       }
 
       // -- the side, one span per block.
       // Consecutive blocks are exactly invNear rows apart, so the loop steps
       // by subtraction rather than reprojecting each one.
+      // Texels per screen row, 8.8. A block is one world unit tall and pitch is
+      // a shear rather than a rotation, so one unit is always invNear pixels —
+      // which makes this one multiply off a reciprocal the cell already has,
+      // and no divide per span.
+      const uint16_t vStepQ8 =
+          (uint16_t)((float)(textures::TEX_N << 8) / invNear);
+
       if (dNear > 0.001f) {
-        float fyb = horizon + (cam.z - (float)run.base) * invNear;
-        for (int k = run.base; k < run.top; ++k) {
-          const float fyt = fyb - invNear;
+        // Only the blocks that can land somewhere still unpainted. A column is
+        // up to MAX_H blocks tall and every one of them used to cost a loop
+        // turn, two clamps and a rejected paint() call — and close to a tall
+        // cliff almost all of them project off the top of the panel, so the
+        // walker spent most of its time discarding geometry it had just
+        // computed. Measured on a 32-block world: 41.7 ms worst-case column
+        // walk before, and the frame rate floor went with it.
+        //
+        // Row of the underside of block k is horizon + (cam.z - k) * invNear,
+        // which falls as k rises, so the two bounds inverting is what "no
+        // block of this run is visible" looks like. Inverted by a block either
+        // way for float slack — one extra iteration is far cheaper than a
+        // dropped span.
+        int kLo = run.base, kHi = run.top;
+        {
+          // The selected column reports its full projected extent, clipped
+          // only to the panel: the crosshair has to stay inside the outline
+          // even where something nearer covers the rows it lands on.
+          const int bandLo = selCell ? 0 : openLo;
+          const int bandHi = selCell ? VIEW_H : openHi;
+          const float invStep = 1.0f / invNear;
+          const int lo2 = (int)(cam.z - 1.0f - (float)(bandHi - horizon) * invStep);
+          const int hi2 = (int)(cam.z - (float)(bandLo - horizon) * invStep) + 2;
+          if (lo2 > kLo) kLo = lo2;
+          if (hi2 < kHi) kHi = hi2;
+          if (kLo < run.base) kLo = run.base;
+        }
+        // One span per RUN of like blocks, not one per block.
+        //
+        // This is where the walker's worst case was. Every block of every
+        // column used to be its own candidate: a loop turn, two clamps and a
+        // full trip through the clipper, ~30,000 times a frame — which is why
+        // paint() carries a hand-written fast path at all. A six-high stone
+        // wall is one span now, and the pixels it produces are identical,
+        // because a face's texture coordinate is a function of world height:
+        // v simply keeps accumulating and wraps every TEX_N texels, which is
+        // once a block, exactly as it did when each block emitted its own.
+        //
+        // The run breaks where the material does — and below the natural
+        // surface that is often every block, because the ore lattice is seeded
+        // per position. That is not a defect: the scene that costs the frame is
+        // a close face of uniform stone or something a player built, and both
+        // of those merge whole.
+        //
+        // It also breaks at the selected block, which has to stay its own span:
+        // `sel` picks a different shade table for the whole span, and the
+        // outline is a property of one block.
+        float fyb = horizon + (cam.z - (float)kLo) * invNear;
+        int k = kLo;
+        while (k < kHi) {
+          const uint8_t mat = world::matAt(mapX, mapY, k);
+          const bool selHere = (selCell && k == selZ);
+
+          // How far this run of like blocks goes. Stops at a material change,
+          // at the selected block, and at the end of the run.
+          int kEnd = k + 1;
+          if (!selHere)
+            while (kEnd < kHi
+                   && !(selCell && kEnd == selZ)
+                   && world::matAt(mapX, mapY, kEnd) == mat) ++kEnd;
+
+          const float fyt = fyb - invNear * (float)(kEnd - k);
           const int yb = clampRow(fyb);
           const int yt = clampRow(fyt);
           fyb = fyt;
-          if (yt >= yb) continue;
-          const uint8_t mat = run.ground ? world::matAt(mapX, mapY, k) : run.mat;
-          const bool selHere = (sel && run.ground);
-          if (selHere) {
-            if (yt < selGeo0) selGeo0 = yt;
-            if (yb > selGeo1) selGeo1 = yb;
+          if (yt < yb) {
+            paint.fyTop = fyt;
+            paint.vStepQ8 = vStepQ8;
+            paint.zTop = 0;
+            if (selHere) {
+              if (yt < selGeo0) selGeo0 = yt;
+              if (yb > selGeo1) selGeo1 = yb;
+            }
+            // `cap` is 2 rather than 1 where the span is more than one block
+            // tall, so the renderer knows to rule a bevel at every block
+            // boundary inside it instead of only at its ends.
+            paint.paint(yt, yb, qn, mat, enterFace, selHere ? 1 : 0,
+                        tintOf(mapX, mapY, k), (kEnd - k) > 1 ? 2 : 1,
+                        lit, wallU, track);
           }
-          paint.paint(yt, yb, qn, mat, enterFace,
-                      selHere ? (k == run.top - 1 ? 2 : 1) : 0,
-                      tintOf(mapX, mapY, k), 1, lit, wallU, track);
+          k = kEnd;
         }
       }
 
       // -- the top, seen from above
       if ((float)run.top < cam.z) {
-        const uint8_t mat = run.ground ? cell.top : run.mat;
+        paint.vStepQ8 = 0;
+        paint.zTop = (uint8_t)run.top;
+        const uint8_t mat = world::matAt(mapX, mapY, run.top - 1);
         const float dz = cam.z - (float)run.top;
         const int yb = clampRow(horizon + dz * invNear);
         const int yt = clampRow(horizon + dz * invFar);
-        // run.ground, not just sel: pick() aims at a cell's ground column, and
-        // a slab cannot be mined at all. Lighting a bridge deck because the
-        // crosshair is on the cell underneath it points at the wrong block.
-        const bool selHere = (sel && run.ground);
+        // The top face belongs to the block under it.
+        const bool selHere = (selCell && run.top - 1 == selZ);
         if (selHere) {
           if (yt < selGeo0) selGeo0 = yt;
           if (yb > selGeo1) selGeo1 = yb;
         }
-        paint.paint(yt, yb, qf, mat, F_TOP, selHere ? 2 : 0,
+        paint.paint(yt, yb, qf, mat, F_TOP, selHere ? 1 : 0,
                     tintOf(mapX, mapY, run.top), 0, lit, wallU, track);
       }
 
-      // Everything this run just emitted was slab, so fold it into the band a
-      // farther billboard has to clip against.
+      // Everything this run just emitted was overhead, so fold it into the
+      // band a farther billboard has to clip against.
       if (!run.ground) {
         for (int i = slabMark; i < n; ++i) {
           if (out[i].y0 < slabHi) slabHi = out[i].y0;
           if (out[i].y1 > slabLo) slabLo = out[i].y1;
         }
+      }
+      }
+nextrun:
+      {
+        int nb, nt;
+        if (!nextRun(cell.solid, run.top, nb, nt)) break;
+        run = { nb, nt, false };
       }
     }
 
@@ -376,10 +494,24 @@ int castColumn(const Camera& cam, int x, int selX, int selY,
   return n;
 }
 
-bool pick(const Camera& cam, float maxDist, int& hitX, int& hitY, bool& onTop) {
+bool pick(const Camera& cam, float maxDist, Hit& hit) {
   const float rdx = cam.dx, rdy = cam.dy;
   int mapX = (int)floorf(cam.px);
   int mapY = (int)floorf(cam.py);
+
+  // maxDist is a reach: a distance from the eye to the thing being touched, in
+  // world units. The stepper below measures horizontal distance, because it is
+  // a 2-D DDA with the height carried alongside as a slope — so the reach has
+  // to be converted into that measure once, here, rather than compared against
+  // a number that means something else.
+  //
+  // The aim ray is (dx, dy, -aimSlope) with (dx, dy) already unit length, so a
+  // horizontal distance d covers d * sqrt(1 + aimSlope^2) of actual ray. At the
+  // resting tilt that factor is 1.028, which is small enough that the old
+  // horizontal comparison looked right and wrong enough that reach grew as you
+  // looked down — the one direction where a shorter reach is what you want.
+  const float ray = sqrtf(1.0f + cam.aimSlope * cam.aimSlope);
+  const float hMax = maxDist / ray;
 
   const float deltaX = (rdx == 0.0f) ? FAR_STEP : fabsf(1.0f / rdx);
   const float deltaY = (rdy == 0.0f) ? FAR_STEP : fabsf(1.0f / rdy);
@@ -391,27 +523,84 @@ bool pick(const Camera& cam, float maxDist, int& hitX, int& hitY, bool& onTop) {
   if (rdy < 0) { stepY = -1; sideY = (cam.py - (float)mapY) * deltaY; }
   else         { stepY =  1; sideY = ((float)mapY + 1.0f - cam.py) * deltaY; }
 
+  // Which way the ray entered the cell being examined, so a side hit knows
+  // which face it landed on. The camera's own cell is never a side hit, so the
+  // initial value is only ever read after the first step has set it.
+  uint8_t enterFace = F_NS;
+  int     enterStepX = stepX, enterStepY = stepY;
+
   float dNear = 0.0f;
-  for (int stepN = 0; stepN < MAX_STEPS && dNear < maxDist; ++stepN) {
+  for (int stepN = 0; stepN < MAX_STEPS && dNear < hMax; ++stepN) {
     const float dFar = (sideX < sideY) ? sideX : sideY;
     const int   h    = (int)world::height(mapX, mapY);
     const float zNear = cam.z - cam.aimSlope * dNear;
     const float zFar  = cam.z - cam.aimSlope * dFar;
 
+    // Blocked by a slab. The ray crosses this cell between zNear and zFar, so
+    // it is stopped if that interval meets the slab's [base, top) at all.
+    //
+    // pick() used to ignore slabs completely, on the reasoning that a slab
+    // cannot be mined and so cannot be a target. But "not a target" and "not
+    // there" are different things: the ray went straight through a roof, a
+    // bridge deck or a cave mouth and lit up a block on the far side of it, so
+    // the crosshair sat on solid brick and the outline appeared on something
+    // behind it. Standing on a roof and looking down was the clearest case —
+    // every block picked was one you could not see.
+    const int st = (int)world::slabTop(mapX, mapY);
+    if (st) {
+      const int sb = (int)world::slabBase(mapX, mapY);
+      const float zLo = zNear < zFar ? zNear : zFar;
+      const float zHi = zNear < zFar ? zFar  : zNear;
+      if (zLo < (float)st && zHi >= (float)sb) return false;
+    }
+
     // Running into the side of a column. Skipped for the cell the camera is
     // standing in, where the ray starts above its own floor by definition.
     if (h > 0 && dNear > 0.001f && zNear <= (float)h) {
-      hitX = mapX; hitY = mapY; onTop = false;
-      return dNear <= maxDist;
+      // The block struck is the one the ray's height falls inside, not the top
+      // of the stack. Clamped because zNear can sit exactly on h after the
+      // compare above, and floorf of that is the empty block over the column.
+      int bz = (int)floorf(zNear);
+      if (bz > h - 1) bz = h - 1;
+      if (bz < 0)     bz = 0;
+      hit.x = (int16_t)mapX; hit.y = (int16_t)mapY; hit.z = (int16_t)bz;
+      hit.face = enterFace;
+      hit.nx = (enterFace == F_NS) ? (int8_t)-enterStepX : (int8_t)0;
+      hit.ny = (enterFace == F_EW) ? (int8_t)-enterStepY : (int8_t)0;
+      hit.nz = 0;
+      hit.dist = dNear * ray;
+      return dNear <= hMax;
     }
     // Coming down onto the top of a column, or onto open ground.
+    //
+    // The reach test uses where the ray actually crosses z = h, not dFar. dFar
+    // is the far edge of the cell the crossing happens in, so testing it let
+    // reach overshoot by up to a whole cell — invisibly, while the limit was
+    // loose enough not to matter. Tightening the reach to something the player
+    // can feel made it matter at once: flat ground at the resting tilt is met
+    // 5.05 cells out and was being measured as nearly 6.
     if (zFar <= (float)h) {
-      hitX = mapX; hitY = mapY; onTop = true;
-      return dFar <= maxDist;
+      float dHit = dFar;
+      if (cam.aimSlope > 1e-4f) {
+        dHit = (cam.z - (float)h) / cam.aimSlope;
+        if (dHit < dNear) dHit = dNear;
+        if (dHit > dFar)  dHit = dFar;
+      }
+      hit.x = (int16_t)mapX; hit.y = (int16_t)mapY;
+      hit.z = (int16_t)(h > 0 ? h - 1 : 0);
+      hit.face = F_TOP;
+      hit.nx = 0; hit.ny = 0; hit.nz = 1;
+      hit.dist = dHit * ray;
+      return dHit <= hMax;
     }
 
-    if (sideX < sideY) { sideX += deltaX; mapX += stepX; }
-    else               { sideY += deltaY; mapY += stepY; }
+    if (sideX < sideY) {
+      sideX += deltaX; mapX += stepX;
+      enterFace = F_NS; enterStepX = stepX;
+    } else {
+      sideY += deltaY; mapY += stepY;
+      enterFace = F_EW; enterStepY = stepY;
+    }
     dNear = dFar;
   }
   return false;

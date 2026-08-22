@@ -69,7 +69,7 @@ void shadeFor(float daylight, int horizon = raycast::HORIZON);
 //
 // (selX, selY) is the column under the crosshair; its top block is drawn lit
 // and outlined. Pass (-1, -1) for none.
-void drawWorld(const raycast::Camera& cam, int selX, int selY);
+void drawWorld(const raycast::Camera& cam, int selX, int selY, int selZ);
 // Sun, moon and stars, drawn into whatever the terrain left as sky. Must run
 // after drawWorld, which is what fills the occlusion table it clips against.
 void drawSky(const raycast::Camera& cam, float daylight);
@@ -113,6 +113,7 @@ const uint16_t* buildBuffer();
 #ifdef DEV_SERIAL
 // Per-stage frame cost, so tuning is driven by measurement rather than by
 // guesswork about which stage is expensive.
+extern uint32_t g_floorSpans, g_floorTall, g_floorPix, g_floorSeg;
 extern uint32_t g_usWorld, g_usMobs, g_usSky, g_usSel, g_usShade;
 #endif
 

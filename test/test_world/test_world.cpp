@@ -44,13 +44,20 @@ static void test_border_is_full_height_bedrock(void) {
 // generate() used to be able to drop the player inside a hill. The spawn pad
 // is cleared last, after the structures, precisely so a tree or a ruin cannot
 // land on it.
+//
+// The slab as well as the column. The clear used to reset height and material
+// and leave the second run behind, which put a roof, an eave or a tree crown
+// over the landing pad with nothing underneath holding it — rare while only
+// ruins had slabs, routine now that every tree does.
 static void test_spawn_pad_is_clear(void) {
   for (uint32_t seed = 1; seed <= 25; ++seed) {
     generate(seed);
     const int cx = W / 2, cy = H / 2;
     for (int y = cy - 3; y <= cy + 3; ++y)
-      for (int x = cx - 3; x <= cx + 3; ++x)
+      for (int x = cx - 3; x <= cx + 3; ++x) {
         TEST_ASSERT_EQUAL_UINT8(GROUND, height(x, y));
+        TEST_ASSERT_FALSE(hasSlab(x, y));
+      }
   }
 }
 
@@ -67,13 +74,9 @@ static void test_terrain_never_starts_below_ground(void) {
 
 // ---- material profile -------------------------------------------------------
 
-// A tree is a canopy over a trunk over ordinary soil. It used to be leaves
-// sitting on a plug of dirt, because the soil profile was measured from the
-// column top rather than from ground level.
-//
-// Only the tall centre column of a tree has a trunk: the short leafy skirts
-// beside it are two blocks of canopy resting straight on the ground, so the
-// trunk assertion is made against height, not against every leaf column.
+// A tree is a cap of leaves over a trunk over ordinary soil. It used to be
+// leaves sitting on a plug of dirt, because the soil profile was measured from
+// the column top rather than from ground level.
 static void test_tree_is_wood_under_leaves(void) {
   generate(4242);
   int canopies = 0, trunks = 0;
@@ -83,9 +86,8 @@ static void test_tree_is_wood_under_leaves(void) {
       const int h = height(x, y);
       ++canopies;
       TEST_ASSERT_EQUAL_UINT8(B_LEAVES, matAt(x, y, h - 1));
-      TEST_ASSERT_EQUAL_UINT8(B_LEAVES, matAt(x, y, h - 2));
-      // Everything between ground level and the canopy is trunk.
-      for (int z = GROUND; z < h - 2; ++z) {
+      // Everything between ground level and the cap is trunk.
+      for (int z = GROUND; z < h - 1; ++z) {
         TEST_ASSERT_EQUAL_UINT8(B_WOOD, matAt(x, y, z));
         ++trunks;
       }
@@ -98,11 +100,193 @@ static void test_tree_is_wood_under_leaves(void) {
   TEST_ASSERT_TRUE(trunks > 0);       // at least one tree was tall enough
 }
 
-// Ore only exists below the dirt band, which is what makes it worth digging
-// for rather than something you trip over on the surface.
+// And the trunk you can see is the trunk you get. The leaf band used to be the
+// top *two* layers of the column, measured from a height that mining changes:
+// take the cap off and the block under it became the new top two, so the leaves
+// walked down the trunk ahead of the pick and a whole tree yielded nothing but
+// leaves. B_WOOD was in the material table, described as the trunk, drawn on
+// the side of every tree, and could not be obtained at all.
+static void test_chopping_a_tree_actually_yields_wood(void) {
+  generate(4242);
+  int tx = -1, ty = -1;
+  for (int y = 1; y < H - 1 && tx < 0; ++y)
+    for (int x = 1; x < W - 1 && tx < 0; ++x)
+      if (topMat(x, y) == B_LEAVES && height(x, y) > GROUND + 2) { tx = x; ty = y; }
+  TEST_ASSERT_TRUE(tx > 0);
+
+  uint8_t dm, db, dro;
+  int leaves = 0, wood = 0;
+  while (height(tx, ty) > GROUND)
+    if (mine(tx, ty, 100000, dm, db, dro)) {
+      if (dm == B_LEAVES) ++leaves;
+      if (dm == B_WOOD)   ++wood;
+    }
+  TEST_ASSERT_EQUAL_INT(1, leaves);       // one block of cap
+  TEST_ASSERT_TRUE(wood >= 2);            // and the rest of it is trunk
+}
+
+// ---- canopies ---------------------------------------------------------------
+
+// The canopy is the whole point of the tree: leaves over open air, a cell out
+// from a trunk that is not underneath them. A heightmap cannot say that, and a
+// column of leaves standing on the ground is a bush however tall you build it —
+// which is what the old tree was. It is a slab, the same second run per cell
+// that roofs a ruin, and it has to leave room to walk under.
+static void test_a_tree_canopy_hangs_over_walkable_ground(void) {
+  int canopies = 0;
+  for (uint32_t seed = 1; seed <= 6; ++seed) {
+    generate(seed);
+    for (int y = 1; y < H - 1; ++y)
+      for (int x = 1; x < W - 1; ++x) {
+        if (!hasSlab(x, y) || slabMat(x, y) != B_LEAVES) continue;
+        ++canopies;
+        TEST_ASSERT_TRUE(slabBase(x, y) > height(x, y));   // over air
+        TEST_ASSERT_TRUE(standable(x, y));                 // with headroom
+        TEST_ASSERT_TRUE(canEnter(GROUND, x, y));          // and you can get in
+        // A trunk near it, reaching its underside, holding it up. Two cells,
+        // not one: the crown is five across, so its outer ring stands that far
+        // out from the trunk it hangs off.
+        bool held = false;
+        for (int dy = -2; dy <= 2 && !held; ++dy)
+          for (int dx = -2; dx <= 2 && !held; ++dx)
+            held = topMat(x + dx, y + dy) == B_LEAVES
+                   && height(x + dx, y + dy) >= slabBase(x, y);
+        TEST_ASSERT_TRUE(held);
+      }
+  }
+  TEST_ASSERT_TRUE(canopies > 0);
+}
+
+// Fell the tree and the crown comes down with it. Leaves left hanging over
+// their own stump are worse than the bush this replaced.
+static void test_felling_a_tree_drops_its_canopy(void) {
+  generate(4242);
+  int tx = -1, ty = -1;
+  for (int y = 5; y < H - 5 && tx < 0; ++y)
+    for (int x = 5; x < W - 5 && tx < 0; ++x) {
+      if (topMat(x, y) != B_LEAVES || height(x, y) <= GROUND + 2) continue;
+      // A tree standing on its own: no other trunk within four cells, so every
+      // leaf slab inside its own crown can only have been held up by this one.
+      int slabs = 0, others = 0;
+      for (int dy = -4; dy <= 4; ++dy)
+        for (int dx = -4; dx <= 4; ++dx) {
+          if ((dx || dy) && topMat(x + dx, y + dy) == B_LEAVES) ++others;
+          if (dx >= -2 && dx <= 2 && dy >= -2 && dy <= 2
+              && hasSlab(x + dx, y + dy) && slabMat(x + dx, y + dy) == B_LEAVES)
+            ++slabs;
+        }
+      if (slabs > 0 && others == 0) { tx = x; ty = y; }
+    }
+  TEST_ASSERT_TRUE(tx > 0);
+
+  uint8_t dm, db, dro;
+  while (height(tx, ty) > GROUND) mine(tx, ty, 100000, dm, db, dro);
+
+  for (int dy = -2; dy <= 2; ++dy)
+    for (int dx = -2; dx <= 2; ++dx)
+      TEST_ASSERT_FALSE(hasSlab(tx + dx, ty + dy)
+                        && slabMat(tx + dx, ty + dy) == B_LEAVES);
+}
+
+// ---- buildings --------------------------------------------------------------
+
+// A house is three materials at three brightnesses, and that is what has to be
+// true for it to read as a house six cells away in fog rather than as the ruin
+// standing next to it.
+// The block under a roofed column's brick cap, or B_BEDROCK where there is no
+// such thing. A wall and the roof over it are one column now, so "what is this
+// wall made of" is a question about the block below the cap.
+static uint8_t underRoof(int x, int y) {
+  const int h = (int)height(x, y);
+  if (h < 2 || blockAt(x, y, h - 1) != B_BRICK) return B_BEDROCK;
+  return blockAt(x, y, h - 2);
+}
+
+static void test_a_house_has_posts_walls_and_a_roof(void) {
+  int posts = 0, roofs = 0;
+  for (uint32_t seed = 1; seed <= 8; ++seed) {
+    generate(seed);
+    for (int y = 1; y < H - 1; ++y)
+      for (int x = 1; x < W - 1; ++x) {
+        // A corner post is a wood column with the brick roof sitting on it.
+        // Not identified by height: a building levels its own site, so its
+        // walls stand on whatever that site settled at and not on GROUND. And
+        // not by material alone either — a dead tundra snag is a bare wood
+        // column too, which is exactly why the roof is part of the test.
+        //
+        // Read as "brick with wood directly under it" rather than "a wood
+        // column carrying a slab". Those used to be different things: a roof
+        // laid at exactly the wall's top height was a separate object floating
+        // at the height the column ended, and hasSlab() found it. A column is
+        // a bitmask now, so a roof resting on a wall is simply the next block
+        // up — which is what it always was in the world, and what the test
+        // should have been asking about.
+        const int h = (int)height(x, y);
+        if (h < 2) continue;
+        if (blockAt(x, y, h - 1) != B_BRICK) continue;
+        if (blockAt(x, y, h - 2) != B_WOOD) continue;
+        ++posts;
+        // A corner post has plank wall running away from it. Only along one
+        // edge, necessarily: the other one can be the doorway, whose threshold
+        // is left at ground level with whatever the biome puts there.
+        int walls = 0;
+        for (int d = -1; d <= 1; d += 2) {
+          if (underRoof(x + d, y) == B_PLANK) ++walls;
+          if (underRoof(x, y + d) == B_PLANK) ++walls;
+        }
+        TEST_ASSERT_TRUE(walls >= 1);
+        ++roofs;
+      }
+  }
+  TEST_ASSERT_TRUE(posts > 0);
+  TEST_ASSERT_TRUE(roofs > 0);
+}
+
+// You walk in through the door and you do not climb in through the window.
+// That is the entire difference between the two, and it is a step-up rule and a
+// headroom rule rather than anything about how either one looks.
+static void test_a_house_door_admits_and_its_windows_do_not(void) {
+  int doors = 0, windows = 0;
+  for (uint32_t seed = 1; seed <= 8; ++seed) {
+    generate(seed);
+    for (int y = 1; y < H - 1; ++y)
+      for (int x = 1; x < W - 1; ++x) {
+        // A window sill: plank, with the roof course two above it and nothing
+        // between. The floor of the room it looks into is two blocks below.
+        if (topMat(x, y) == B_PLANK && hasSlab(x, y)
+            && slabMat(x, y) == B_BRICK && slabBase(x, y) == height(x, y) + 2) {
+          ++windows;
+          TEST_ASSERT_FALSE(canEnter(height(x, y) - 2, x, y));   // too tall to step
+          continue;
+        }
+        // A threshold: a plank lintel over floor-level ground.
+        if (hasSlab(x, y) && slabMat(x, y) == B_PLANK) {
+          ++doors;
+          const int floorH = (int)height(x, y);
+          TEST_ASSERT_TRUE(canEnter(floorH, x, y));       // and walk through
+          TEST_ASSERT_TRUE(standable(x, y));
+          // The lintel and the eave over it are one run, not two: a cell holds
+          // one slab, so a separate eave would have overwritten this or left a
+          // hole in the roofline exactly where the door is.
+          TEST_ASSERT_TRUE(slabTop(x, y) >= floorH + 6);
+        }
+      }
+  }
+  TEST_ASSERT_TRUE(doors > 0);
+  TEST_ASSERT_TRUE(windows > 0);
+}
+
 static void test_ore_is_below_the_dirt_band(void) {
   generate(31337);
-  TEST_ASSERT_EQUAL_UINT8(B_DIRT, matAt(20, 20, GROUND - 2));
+  // An untouched column, found rather than assumed: a fixed cell can land in a
+  // quarry, which is cut well below GROUND and is bedrock at this depth.
+  int ux = -1, uy = -1;
+  for (int y = 3; y < H - 3 && ux < 0; ++y)
+    for (int x = 3; x < W - 3 && ux < 0; ++x)
+      if (height(x, y) == GROUND && !isStructure(topMat(x, y)) && !hasSlab(x, y))
+        { ux = x; uy = y; }
+  TEST_ASSERT_TRUE(ux > 0);
+  TEST_ASSERT_EQUAL_UINT8(B_DIRT, matAt(ux, uy, GROUND - 2));
   bool sawOre = false;
   for (int y = 2; y < H - 2 && !sawOre; ++y)
     for (int x = 2; x < W - 2 && !sawOre; ++x)
@@ -293,7 +477,15 @@ static void test_biome_sets_the_surface_material(void) {
 // Light falls off with distance and follows the source when it moves.
 static void test_light_follows_its_source(void) {
   generate(11);
-  const int x = W / 2, y = H / 2;
+  // Somewhere dark, found rather than assumed: the generator lights its own
+  // villages and castles now, and one of them can sit near the middle of the
+  // map where this used to just take the centre cell.
+  int x = -1, y = -1;
+  for (int j = 3; j < H - 3 && x < 0; ++j)
+    for (int i = 3; i < W - 3 && x < 0; ++i)
+      if (light(i, j) == 0 && height(i, j) == GROUND && !hasSlab(i, j)
+          && !isStructure(topMat(i, j))) { x = i; y = j; }
+  TEST_ASSERT_TRUE(x > 0);
   TEST_ASSERT_EQUAL_UINT8(0, light(x, y));
 
   TEST_ASSERT_TRUE(place(x, y, B_TORCH));
@@ -364,6 +556,287 @@ static void test_degenerate_input(void) {
   TEST_ASSERT_FALSE(fits(GROUND, -3.0f, -3.0f, 0.3f));
 }
 
+
+// The bug this locks down: matAt measured soil depth from the column's CURRENT
+// height, and mining is what changes that height — so the layer under the one
+// you just took off was always "one below the top", which is the dirt band.
+// Digging down produced dirt forever and never reached stone, coal or iron.
+// Cliff faces rendered the bands correctly, so you could see ore, mine it, and
+// get dirt. Ore was obtainable only where the generator wrote it onto a
+// surface, which made the whole upgrade economy nearly unreachable by digging.
+static void test_digging_down_reaches_stone_and_ore(void) {
+  world::generate(88);
+
+  bool sawStone = false;
+  int oreTotal = 0;
+  // A sample of columns, because whether any single one carries ore is a
+  // function of the position hash.
+  for (int y = 20; y < 76 && !(sawStone && oreTotal); ++y) {
+    for (int x = 20; x < 76; x += 3) {
+      if (world::isBorder(x, y)) continue;
+      for (int i = 0; i < 40 && world::height(x, y) > 0; ++i) {
+        uint8_t m = 0, b = 0, o = 0;
+        int guard = 0;
+        while (!world::mine(x, y, 4096, m, b, o) && ++guard < 200) {}
+        if (guard >= 200) break;
+        if (m == world::B_STONE) sawStone = true;
+        oreTotal += o;
+      }
+    }
+  }
+  TEST_ASSERT_TRUE(sawStone);
+  TEST_ASSERT_TRUE(oreTotal > 0);
+}
+
+// The other half of the same anchor: building a column up and mining it back
+// down must not turn the blocks you placed into the soil profile.
+static void test_a_built_column_mines_back_as_what_was_built(void) {
+  world::generate(88);
+  const int x = world::W / 2 + 5, y = world::H / 2;
+  const uint8_t natural = world::height(x, y);
+  for (int i = 0; i < 4; ++i) TEST_ASSERT_TRUE(world::place(x, y, world::B_BRICK));
+
+  for (int i = 0; i < 4; ++i) {
+    uint8_t m = 0, b = 0, o = 0;
+    int guard = 0;
+    while (!world::mine(x, y, 4096, m, b, o) && ++guard < 400) {}
+    TEST_ASSERT_EQUAL_UINT8(world::B_BRICK, m);
+  }
+  TEST_ASSERT_EQUAL_UINT8(natural, world::height(x, y));
+}
+
+
+// ---- multi-run columns ------------------------------------------------------
+
+// The verb a heightmap could not express: take a block out of the middle of a
+// column and the part above it goes on standing. That is a tunnel through a
+// hillside, and it is what "different levels" means for mining.
+static void test_mining_mid_column_splits_it(void) {
+  generate(88);
+  const int x = W / 2 + 6, y = H / 2;
+  while (height(x, y) < 10) TEST_ASSERT_TRUE(place(x, y, B_DIRT));
+  TEST_ASSERT_EQUAL_INT(0, runsAt(x, y, (RunView*)nullptr, 0));
+
+  uint8_t m, b, o;
+  MineResult r = MINE_PROGRESS;
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
+
+  TEST_ASSERT_EQUAL_UINT8(4, height(x, y));      // the column keeps what is below
+  RunView rv[8];
+  TEST_ASSERT_EQUAL_INT(1, runsAt(x, y, rv, 8));    // and the rest stands overhead
+  TEST_ASSERT_EQUAL_UINT8(5,  rv[0].base);
+  TEST_ASSERT_EQUAL_UINT8(10, rv[0].top);
+
+  TEST_ASSERT_TRUE(solidAt(x, y, 3));
+  TEST_ASSERT_FALSE(solidAt(x, y, 4));           // the hole
+  TEST_ASSERT_TRUE(solidAt(x, y, 5));
+}
+
+// A run cut out of terrain has to remember the surface its materials were
+// measured from, or the piece left hanging over a tunnel turns into one flat
+// colour instead of the banded rock you just dug through.
+static void test_a_split_run_keeps_its_soil_profile(void) {
+  generate(88);
+  const int x = W / 2 + 6, y = H / 2;
+  while (height(x, y) < 12) TEST_ASSERT_TRUE(place(x, y, B_DIRT));
+
+  // What the untouched column reads at the heights that will end up in the run.
+  const uint8_t was5 = matAt(x, y, 5), was6 = matAt(x, y, 6);
+
+  uint8_t m, b, o;
+  MineResult r = MINE_PROGRESS;
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
+
+  TEST_ASSERT_EQUAL_UINT8(was5, blockAt(x, y, 5));
+  TEST_ASSERT_EQUAL_UINT8(was6, blockAt(x, y, 6));
+}
+
+// Building out into the air is the other half of the same feature: a floor, a
+// roof, a bridge deck. A heightmap could not hold one at all.
+static void test_a_block_can_be_placed_in_mid_air(void) {
+  generate(88);
+  const int x = W / 2 + 8, y = H / 2;
+  const int z = (int)height(x, y) + 5;
+  TEST_ASSERT_FALSE(solidAt(x, y, z));
+  TEST_ASSERT_EQUAL_UINT8(PLACE_OK, place(x, y, z, B_PLANK));
+  TEST_ASSERT_TRUE(solidAt(x, y, z));
+  TEST_ASSERT_FALSE(solidAt(x, y, z - 1));       // still air underneath it
+  TEST_ASSERT_EQUAL_UINT8(B_PLANK, blockAt(x, y, z));
+}
+
+// There must be exactly one way to describe a given solid, or every later edit
+// has to guess which of two objects it meant. Filling a tunnel back in has to
+// put the column back the way it was.
+static void test_filling_a_tunnel_merges_the_run_back_in(void) {
+  generate(88);
+  const int x = W / 2 + 6, y = H / 2;
+  while (height(x, y) < 10) TEST_ASSERT_TRUE(place(x, y, B_DIRT));
+
+  uint8_t m, b, o;
+  MineResult r = MINE_PROGRESS;
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
+  RunView rv[8];
+  TEST_ASSERT_EQUAL_INT(1, runsAt(x, y, rv, 8));
+
+  TEST_ASSERT_EQUAL_UINT8(PLACE_OK, place(x, y, 4, B_DIRT));
+  TEST_ASSERT_EQUAL_INT(0, runsAt(x, y, rv, 8));    // one object again
+  TEST_ASSERT_EQUAL_UINT8(10, height(x, y));
+}
+
+// A column is a bitmask, so there is no limit on how many holes it can have.
+//
+// This test used to assert the opposite: a cell could describe three runs and
+// the fourth split was refused with MINE_NO_ROOM, before any effort was banked.
+// That refusal was a real rule the player met -- there were hillsides you were
+// simply not allowed to tunnel through -- and removing it is the point of the
+// change. What is checked now is that the refusal is gone and that every hole
+// is real.
+static void test_a_column_can_be_split_without_limit(void) {
+  generate(88);
+  const int x = W / 2 + 10, y = H / 2;
+  while (height(x, y) < 20) TEST_ASSERT_TRUE(place(x, y, B_STONE));
+
+  uint8_t m, b, o;
+  int splits = 0;
+  for (int z = 2; z <= 16; z += 2) {
+    MineResult r = MINE_PROGRESS;
+    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b, o);
+    TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);      // never refused
+    ++splits;
+  }
+  TEST_ASSERT_EQUAL_INT(8, splits);              // eight holes in one column
+
+  // Every hole is really there, and so is every block between them.
+  for (int z = 2; z <= 16; z += 2) {
+    TEST_ASSERT_FALSE(solidAt(x, y, z));
+    TEST_ASSERT_TRUE(solidAt(x, y, z + 1));
+  }
+
+  // ...and the runs the walker will find are sorted and disjoint.
+  RunView rv[8];
+  const int n = runsAt(x, y, rv, 8);
+  TEST_ASSERT_EQUAL_INT(8, n);
+  for (int i = 1; i < n; ++i) {
+    TEST_ASSERT_TRUE(rv[i].base >= rv[i - 1].top);
+    TEST_ASSERT_TRUE(rv[i].base < rv[i].top);
+  }
+}
+
+// Effort is still discarded when the player looks away, which is what makes a
+// tough block a commitment rather than something you chip at from three angles.
+//
+// This replaces a test that checked a refused mine banked no effort. There is
+// no refusal to bank against now.
+static void test_looking_away_discards_banked_effort(void) {
+  generate(88);
+  const int x = W / 2 + 10, y = H / 2;
+  while (height(x, y) < 20) TEST_ASSERT_TRUE(place(x, y, B_STONE));
+
+  uint8_t m, b, o;
+  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 8, 16, m, b, o));
+  TEST_ASSERT_TRUE(damage(x, y, 8) > 0);
+
+  // One swing at a different block, and the first one's progress is gone.
+  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 10, 16, m, b, o));
+  TEST_ASSERT_EQUAL_UINT8(0, damage(x, y, 8));
+}
+
+// The marker pool is finite and generate() runs many times over a session. A
+// marker that leaks is a canopy that stops appearing several worlds later.
+static void test_the_marker_pool_does_not_leak_across_generates(void) {
+  generate(3);
+  const int first = marksFree();
+  for (int i = 0; i < 20; ++i) generate(3);
+  TEST_ASSERT_EQUAL_INT(first, marksFree());
+  // And a different world hands everything back too.
+  generate(9);
+  generate(3);
+  TEST_ASSERT_EQUAL_INT(first, marksFree());
+}
+
+// Mining must not draw from the marker pool at all.
+//
+// This is the property that makes the pool safe to have: taking a block out
+// cannot change what anything is made of, so the edit the player performs
+// thousands of times a session allocates nothing. Digging a column to pieces
+// should hand markers BACK, never take them.
+static void test_mining_never_consumes_markers(void) {
+  generate(88);
+  const int x = W / 2 + 10, y = H / 2;
+  while (height(x, y) < 24) TEST_ASSERT_TRUE(place(x, y, B_STONE));
+  const int before = marksFree();
+
+  uint8_t m, b, o;
+  for (int z = 2; z <= 20; z += 2) {
+    MineResult r = MINE_PROGRESS;
+    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b, o);
+    TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
+    TEST_ASSERT_TRUE(marksFree() >= before);
+  }
+}
+
+
+// ---- standing on runs -------------------------------------------------------
+
+// The point of runs, from the player's side: a floor you build is somewhere you
+// can stand, not scenery you walk through the middle of.
+static void test_you_can_stand_on_a_floor_you_built(void) {
+  generate(4242);
+  const int x = W / 2, y = H / 2;
+  const int deck = (int)height(x, y) + 3;
+  TEST_ASSERT_EQUAL_UINT8(PLACE_OK, place(x, y, deck, B_PLANK));
+
+  // A body already at deck height rests on top of it.
+  TEST_ASSERT_EQUAL_UINT8(deck + 1, surfaceUnder(x, y, deck));
+  // ...but one on the ground stays on the ground. Three blocks up is not a
+  // step, and being able to walk onto it from below would be a teleport.
+  TEST_ASSERT_EQUAL_UINT8(height(x, y), surfaceUnder(x, y, (int)height(x, y)));
+}
+
+// The core loop of the game is walling yourself in at night, and it rests
+// entirely on this: STEP_UP is one, so two is unclimbable.
+static void test_a_two_high_wall_is_still_unclimbable(void) {
+  generate(4242);
+  const int x = W / 2 + 2, y = H / 2;
+  const int g = (int)height(x, y);
+  TEST_ASSERT_TRUE(place(x, y, B_STONE));
+  TEST_ASSERT_TRUE(canEnter(g, x, y));         // one block is a step
+  TEST_ASSERT_TRUE(place(x, y, B_STONE));
+  TEST_ASSERT_FALSE(canEnter(g, x, y));        // two is a wall
+}
+
+// And the other half of the same rule: a staircase is climbable, which is what
+// makes building one worth doing.
+static void test_a_staircase_can_be_climbed(void) {
+  generate(4242);
+  const int x0 = W / 2, y = H / 2;
+  const int g = (int)height(x0, y);
+  for (int i = 1; i <= 4; ++i)
+    for (int k = 0; k < i; ++k) TEST_ASSERT_TRUE(place(x0 + i, y, B_PLANK));
+
+  int z = g;
+  for (int i = 1; i <= 4; ++i) {
+    const uint8_t sfc = surfaceUnder(x0 + i, y, z);
+    TEST_ASSERT_NOT_EQUAL(NO_SURFACE, sfc);
+    TEST_ASSERT_EQUAL_UINT8(g + i, sfc);
+    z = sfc;
+  }
+}
+
+// A body with something resting on its head has nowhere to stand, however
+// solid the floor under it looks.
+static void test_no_surface_where_there_is_no_headroom(void) {
+  generate(4242);
+  const int x = W / 2 + 4, y = H / 2;
+  const int g = (int)height(x, y);
+  TEST_ASSERT_EQUAL_UINT8(g, surfaceUnder(x, y, g));
+  devSlab(x, y, g + 1, g + 2, B_STONE);        // a ceiling one block up
+  TEST_ASSERT_EQUAL_UINT8(NO_SURFACE, surfaceUnder(x, y, g));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_generate_is_deterministic);
@@ -371,16 +844,31 @@ int main(int, char**) {
   RUN_TEST(test_spawn_pad_is_clear);
   RUN_TEST(test_terrain_never_starts_below_ground);
   RUN_TEST(test_tree_is_wood_under_leaves);
+  RUN_TEST(test_chopping_a_tree_actually_yields_wood);
+  RUN_TEST(test_a_tree_canopy_hangs_over_walkable_ground);
+  RUN_TEST(test_felling_a_tree_drops_its_canopy);
+  RUN_TEST(test_a_house_has_posts_walls_and_a_roof);
+  RUN_TEST(test_a_house_door_admits_and_its_windows_do_not);
   RUN_TEST(test_ore_is_below_the_dirt_band);
   RUN_TEST(test_above_column_is_base_plane);
   RUN_TEST(test_mine_takes_exactly_one_block);
   RUN_TEST(test_mining_reveals_what_is_underneath);
+  RUN_TEST(test_digging_down_reaches_stone_and_ore);
+  RUN_TEST(test_a_built_column_mines_back_as_what_was_built);
   RUN_TEST(test_mining_effort_resets_on_new_target);
   RUN_TEST(test_can_dig_below_ground_level);
   RUN_TEST(test_border_is_unbreakable);
   RUN_TEST(test_place_stacks_and_caps);
   RUN_TEST(test_step_up_limit);
   RUN_TEST(test_fits_checks_every_overlapped_cell);
+  RUN_TEST(test_mining_mid_column_splits_it);
+  RUN_TEST(test_a_split_run_keeps_its_soil_profile);
+  RUN_TEST(test_a_block_can_be_placed_in_mid_air);
+  RUN_TEST(test_filling_a_tunnel_merges_the_run_back_in);
+  RUN_TEST(test_a_column_can_be_split_without_limit);
+  RUN_TEST(test_looking_away_discards_banked_effort);
+  RUN_TEST(test_the_marker_pool_does_not_leak_across_generates);
+  RUN_TEST(test_mining_never_consumes_markers);
   RUN_TEST(test_explode_is_deepest_at_the_centre);
   RUN_TEST(test_all_biomes_appear);
   RUN_TEST(test_biome_sets_the_surface_material);
@@ -388,6 +876,10 @@ int main(int, char**) {
   RUN_TEST(test_lava_glows_and_is_unbreakable);
   RUN_TEST(test_cannot_build_into_a_slab);
   RUN_TEST(test_standable_reports_headroom);
+  RUN_TEST(test_you_can_stand_on_a_floor_you_built);
+  RUN_TEST(test_a_two_high_wall_is_still_unclimbable);
+  RUN_TEST(test_a_staircase_can_be_climbed);
+  RUN_TEST(test_no_surface_where_there_is_no_headroom);
   RUN_TEST(test_degenerate_input);
   return UNITY_END();
 }
