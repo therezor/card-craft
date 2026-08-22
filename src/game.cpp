@@ -265,10 +265,14 @@ const ToolInfo& toolInfo(uint8_t kind, uint8_t tier) {
 // Every row here is stored already shifted to the top-left, which is what makes
 // fillGrid() lay out a grid matchGrid() is guaranteed to recognise.
 static const RecipeInfo kRecipe[R_COUNT] = {
-  //  [W][ ]
-  //  [ ][ ]
-  { "PLANKS",  { world::B_WOOD,  CELL_EMPTY, CELL_EMPTY, CELL_EMPTY },
-    world::B_PLANK, 3, 0 },
+  //  [W][ ]   two logs stacked, for four planks. It was one log for three,
+  //  [W][ ]   which made wood the one material you never had to think about:
+  //           a single punched tree paid for the whole bootstrap and left
+  //           change. Two-for-four is a worse rate per log, and that is the
+  //           point -- it puts a second tree between the player and their first
+  //           pickaxe, which is where the early game was missing a step.
+  { "PLANKS",  { world::B_WOOD,  CELL_EMPTY, world::B_WOOD, CELL_EMPTY },
+    world::B_PLANK, 4, 0 },
   //  [C][ ]   coal over wood: a torch, drawn the way a torch looks.
   //  [W][ ]
   { "TORCH",   { world::B_COAL,  CELL_EMPTY, world::B_WOOD, CELL_EMPTY },

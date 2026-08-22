@@ -1,5 +1,102 @@
 # Changelog
 
+## 1.8.1 — daylight has a tune under it, and the fog finally does its job
+
+### Music
+
+Two voices of note data under the daylight, looping. Not a recording: a rendered
+piece of this length would be several megabytes against a flash the whole game
+lives in, and the entire effects bank is 10,000 lines for a couple of seconds.
+Notes are a few hundred bytes. It plays on channels above `CH_COUNT`, so it can
+never be the reason a creeper hiss is not heard, and it is off at night — the
+night's soundtrack is the mobs.
+
+**Two wrong versions came first, and the second was wrong in the opposite
+direction from the first**, which is the part worth keeping.
+
+The first put a note on every beat of every bar. Sixteen bars of
+root-rest-fifth-rest is a metronome, and `hal::voice` has no envelope, so every
+one of those notes is a flat tone that starts and stops at full volume. Under a
+three-minute day it became a tick you could not stop hearing.
+
+The fix for that was more silence — 55% of the loop, one note every two seconds
+— and it was the wrong lever. Measuring a calm track from the genre settles it:
+**1.40 notes a second, almost no silence, and still calm.** Density was never
+the problem. Three other things were:
+
+| | reference | first two versions | now |
+|---|---|---|---|
+| register | 97–311 Hz | 196–988 Hz | 174–440 Hz |
+| density | 1.40 /s | 0.29 /s | 1.35 /s |
+| dyads | 26 of 58 attacks | none, ever | 15 of 39 |
+| note lengths | 500 / 1000 / 1500 | 1500 / 1600 / 3000 | 500 / 1000 / 1500 |
+
+Register is most of it: the old one ran up to 988 Hz, which is where a small
+speaker is harshest and the ear least willing to look away. The floor is raised
+off the reference's because a speaker this size does not really reproduce 97 Hz
+— going that low again would trade shrill for inaudible.
+
+Then two notes at once. The old piece had a melody and a separate accompanying
+pulse and never struck two notes together, which is most of why it sounded thin;
+the voices land together on downbeats now and the upper one moves alone after.
+That is what the second channel was always for.
+
+The melody is original. What came from the measurement is proportion — how low,
+how dense, how often two notes sound together, how long a note runs — and none
+of that is anybody's tune.
+
+The two tracks have to total the same number of milliseconds or they drift a
+little further apart on every lap until the harmony is landing under the wrong
+bar. That is a `static_assert` rather than a thing to discover by ear.
+
+### Fog, and what it was for
+
+**Fog here is not weather, it is what hides the draw distance**, and it was
+doing neither end of that job. The curve was a smoothstep across the whole ramp:
+symmetric, so it put real haze on a block three cells away, and it only reached
+full opacity on the very last band it had — which is the one thing fog exists to
+prevent, since a last cell drawn at less than full fog is a visible edge with
+nothing behind it.
+
+Squared, and saturating two bands early:
+
+```
+cells   0     1     2     3     4     5     6     7     8     9
+was   0.00  0.04  0.13  0.26  0.41  0.59  0.74  0.87  0.96  1.00
+now   0.00  0.02  0.06  0.14  0.25  0.39  0.56  0.77  1.00  1.00
+```
+
+The near half is about half as hazy; the far end is solid at eight cells rather
+than arriving exactly on time.
+
+It was also spelled out twice — once for the block shade tables and once for the
+mobs — which is a drift waiting to happen. Blocks fogging on a different curve
+from the mobs standing among them is the sort of thing nobody sees and everybody
+feels. One `fogAt()` now, two callers.
+
+**And it paid for a draw-distance cut.** Cells past the point where the fog has
+shut are provably invisible: the span is the fog colour and the fog colour is
+what the background already holds. So the walker stops at nine cells rather than
+eleven and gives up nothing a player could see.
+
+| | worst | mean | CPU |
+|---|---|---|---|
+| 11 cells | 33 fps | 47.0 fps | 15.3 ms |
+| 9 cells | 39 fps | 49.7 fps | 13.9 ms |
+
+Worst-case frame rate is the number that matters, and it went up by a fifth.
+
+### Planks cost two logs
+
+One log for three planks made wood the single material nobody had to think
+about — a punched tree paid for the whole opening and left change. Two logs for
+four is a worse rate per log, which puts a second tree between the player and
+their first pickaxe. That is where the early game was missing a step.
+
+It also retires the last one-cell recipe, which a matcher test had been leaning
+on to prove that a shape matches in all four corners; it proves the same thing
+with a two-cell shape in both columns now.
+
 ## 1.8.0 — a hand you can play without looking, and a recipe you can read
 
 ### The left hand gets a shape

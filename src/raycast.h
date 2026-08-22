@@ -98,25 +98,31 @@ constexpr float slopeFor(int horizon) {
   return (float)(VIEW_H / 2 - horizon) / PROJ;
 }
 
-// The shade table saturates at render::BANDS cells (one distance band per
-// cell), so a span drawn beyond that is exactly the fog colour the background
-// already holds. Walking further is work with nothing to show for it.
+// A span drawn past the point where the fog has fully closed is exactly the fog
+// colour the background already holds. Walking further is work with nothing to
+// show for it.
 //
-// Pulled in from 17 with the fog, and the figure is measured rather than
-// reasoned about. The walker usually stops because every screen row is painted,
-// not because it ran out of distance, so this only bites once it drops below
-// where a column typically fills up — which is why 12 was worth nothing and 11
-// is worth something. On the fixed-seed daylight sweep, averaged over 1200
-// frames of it, world_us and the worst frame rate went:
+// The rule is ONE CELL PAST WHERE THE FOG SHUTS, and the second half of that
+// moved. It used to be one past render::BANDS, because the old smoothstep only
+// reached full fog on the very last band it had. render::fogAt saturates two
+// bands early now, so the haze is solid from 8 cells and this comes in from 11
+// to 9 — the cells given up were already painted the background colour, pixel
+// for pixel. Shorter than this and the walker would stop before the fog has
+// finished closing, which reads as a cut-off edge rather than as distance.
 //
-//     17 cells  11.9 ms  34 fps        11 cells  10.4 ms  38 fps
-//     12 cells  11.7 ms  35 fps         9 cells   9.7 ms  41 fps
+// Measured rather than reasoned about. The walker usually stops because every
+// screen row is painted, not because it ran out of distance, so this only bites
+// once it drops below where a column typically fills up — which is why 12 was
+// worth nothing and 11 was worth something. On the fixed-seed benchmark:
 //
-// Eleven is the modest end of that: a real gain, and a view you can still see
-// across. Keep it exactly one cell past render::BANDS — shorter and the walker
-// stops before the fog has finished closing, which reads as a cut-off edge
-// rather than as distance.
-constexpr float MAX_DIST  = 11.0f;
+//     17 cells  11.9 ms  34 fps        11 cells  15.3 ms CPU  33 fps worst
+//     12 cells  11.7 ms  35 fps         9 cells  13.9 ms CPU  39 fps worst
+//
+// The right-hand pair is the current fog and the current bench; the left-hand
+// pair is the older measurement that set the figure at eleven, kept because it
+// is what rules 12 and 17 out. Worst-case frame rate is the number that matters
+// and it went up by a fifth for no visible change at all.
+constexpr float MAX_DIST  = 9.0f;
 constexpr int   MAX_STEPS = 72;
 // A column is 135 rows, so this cannot be reached by geometry that tiles the
 // panel — but a stack thirty-two blocks tall seen edge-on emits one span per

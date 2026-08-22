@@ -59,6 +59,37 @@ constexpr int BANDS   = 10;
 constexpr int LIT     = world::LIGHT_MAX;
 constexpr int RUNGS   = LIT + BANDS;
 
+// How much of the fog colour a distance band carries, 0 (clear) to 1 (gone).
+//
+// Fog is not weather here, it is what hides the draw distance, and that job has
+// two ends to it. Near, it should be almost absent: the player is standing in a
+// world, not inside a cloud, and haze on the block in front of you buys nothing
+// and costs contrast. Far, it has to be COMPLETELY shut before the walker runs
+// out of distance -- a last cell drawn at less than full fog is a visible edge
+// with nothing behind it, which is the one thing fog exists to prevent.
+//
+// The old curve was a smoothstep across the whole ramp, which is symmetric and
+// so did neither: it put real haze three cells out and only closed on the very
+// last band it had. Squared, and saturating one band early:
+//
+//   cells   0     1     2     3     4     5     6     7     8     9
+//   was   0.00  0.04  0.13  0.26  0.41  0.59  0.74  0.87  0.96  1.00
+//   now   0.00  0.02  0.06  0.14  0.25  0.39  0.56  0.77  1.00  1.00
+//
+// The near half is about half as hazy as it was, and the far end is solid two
+// cells before the walker stops rather than arriving exactly on time. Those two
+// cells of nothing-but-fog are the margin the cut-off hides inside.
+//
+// One function, two callers -- the block shade tables and the mob shading both
+// want this and used to spell it out separately, which is a drift waiting to
+// happen: blocks fogging on a different curve from the mobs standing among them
+// is exactly the sort of thing nobody sees and everybody feels.
+static inline float fogAt(int band) {
+  float t = (float)band / (float)(BANDS - 2);
+  if (t > 1.0f) t = 1.0f;
+  return t * t;
+}
+
 // Where the sky/ground gradient turns over. Not raycast::HORIZON: the geometric
 // horizon is where distant terrain converges, while this is where the haze
 // finishes handing over to the ground colour, and putting it at the middle of
@@ -480,8 +511,7 @@ void shadeFor(float dl, int horizon) {
         const float ambD = (d < LIT)
             ? amb + (1.0f - amb) * (float)(LIT - d) / (float)LIT
             : amb;
-        float t = (d < LIT) ? 0.0f : (float)(d - LIT) / (float)(BANDS - 1);
-        t = t * t * (3.0f - 2.0f * t);                  // crisp near, saturating far
+        const float t = (d < LIT) ? 0.0f : fogAt(d - LIT);
 
         // Every colour the material's texture is made of, run through exactly
         // the shading the single face colour used to get. That is what makes a
@@ -533,8 +563,7 @@ static uint16_t shadeMob(uint8_t r, uint8_t g, uint8_t b, int band, int lit) {
                     / (float)world::LIGHT_MAX;
     amb += (1.0f - amb) * k;
   }
-  float t = (float)band / (float)(BANDS - 1);
-  t = t * t * (3.0f - 2.0f * t);
+  const float t = fogAt(band);
   return pack(mix((uint8_t)(r * amb), s_fogR, t),
               mix((uint8_t)(g * amb), s_fogG, t),
               mix((uint8_t)(b * amb), s_fogB, t));

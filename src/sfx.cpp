@@ -244,6 +244,225 @@ uint32_t lcg() {
   return s_rand >> 16;
 }
 
+
+// ---- background music -------------------------------------------------------
+//
+// A calm loop under the daylight, in the register a speaker this size can
+// actually reproduce. Two voices: a sparse melody and a two-note harmony pulse
+// under it, both triangle, both quiet enough to sit beneath the effects rather
+// than compete with them.
+//
+// This is ORIGINAL music written for the game. It is in the manner of the genre
+// -- slow, sparse, major sevenths, long rests, no strong hook -- and it copies
+// no actual tune.
+//
+// Why notes and not a waveform: every other sound here is PCM rendered offline
+// by tools/make-sfx.py, and that is right for a 300 ms crack of stone. At 48
+// seconds it would be several megabytes and would not fit the flash the whole
+// game lives in. Notes are a few hundred bytes.
+
+// MIDI note to Hz, equal temperament, A4 = 440. MIDI 48 (C3) to 96 (C7), which
+// covers both voices with room either side. Rounded to whole Hz: the largest
+// error in here is a fifth of a cent and the speaker is a great deal further
+// out of tune than that.
+static constexpr uint16_t kMidiHz[] = {
+   131,  139,  147,  156,  165,  175,  185,  196,
+   208,  220,  233,  247,  262,  277,  294,  311,
+   330,  349,  370,  392,  415,  440,  466,  494,
+   523,  554,  587,  622,  659,  698,  740,  784,
+   831,  880,  932,  988, 1047, 1109, 1175, 1245,
+  1319, 1397, 1480, 1568, 1661, 1760, 1865, 1976,
+  2093,
+};
+constexpr uint8_t MIDI_LO = 48;
+constexpr uint8_t MIDI_HI = 96;
+
+struct MusNote {
+  uint8_t  midi;   // 0 for a rest
+  uint16_t ms;
+};
+
+// The piece: twenty bars of 2000 ms, looping. The two tracks must total the
+// same number of milliseconds or they drift a little further apart on every lap
+// until the harmony is landing under the wrong bar -- see the static_assert
+// below, which is what stops that being found by ear six months from now.
+//
+// TWO WRONG VERSIONS CAME BEFORE THIS ONE, and the second was wrong in the
+// opposite direction from the first, which is worth writing down.
+//
+// The first put a note on every beat of every bar. Sixteen bars of
+// root-rest-fifth-rest is a metronome, and hal::voice has no envelope, so each
+// note is a flat tone starting and stopping at full volume. It became a tick
+// you could not stop hearing.
+//
+// The fix for that was more silence -- 55% of the loop, one note every two
+// seconds -- and it was the wrong lever. Measuring a calm track from the genre
+// settles it: 1.40 notes a second, almost no silence at all, and it is still
+// calm. Density was never the problem.
+//
+// Three things were, and all three are here:
+//
+//   REGISTER. The reference sits at 97-311 Hz, entirely below middle C. This
+//   used to run to 988 Hz, which is the part of the spectrum a small speaker is
+//   harshest in and the ear is least willing to ignore. 174-440 Hz now -- the
+//   bottom is raised off the reference's because a speaker this size does not
+//   really reproduce 97 Hz, so going as low again would trade shrill for
+//   inaudible.
+//
+//   TWO NOTES AT ONCE. Nearly half the reference's attacks are dyads, mostly
+//   major thirds. This had a melody and a separate accompanying pulse and never
+//   struck two notes together at all, which is most of why it sounded thin. The
+//   two voices land together on the downbeats now and the upper one moves alone
+//   after -- that is what the second channel is for.
+//
+//   SHORT NOTES. The reference is built from 500 and 1000 ms with a few 1500s.
+//   This was built from 1500s and 3000s, and a three-second flat tone with no
+//   envelope is a drone rather than a note.
+//
+// The melody is original. What was taken from the measurement is proportion --
+// how low, how dense, how often two notes sound together, how long a note runs
+// -- and none of that is anybody's tune.
+
+// The upper voice. Lands with the lower one on a downbeat, then moves alone.
+static constexpr MusNote kMelody[] = {
+  //  1
+  {60, 1000}, {62,  500}, {60,  500},
+  //  2
+  {57, 1000}, {55, 1000},
+  //  3
+  {58, 1000}, {57,  500}, {55,  500},
+  //  4
+  {53, 1500}, { 0,  500},
+  //  5
+  {64, 1000}, {62,  500}, {60,  500},
+  //  6
+  {62, 1000}, {60, 1000},
+  //  7
+  {65, 1000}, {64,  500}, {62,  500},
+  //  8
+  {60, 1500}, { 0,  500},
+  //  9
+  {67, 1000}, {65,  500}, {64,  500},
+  // 10
+  {69, 1000}, {67, 1000},
+  // 11
+  {65, 1000}, {64,  500}, {62,  500},
+  // 12
+  {60, 1500}, { 0,  500},
+  // 13
+  {62, 1000}, {60,  500}, {58,  500},
+  // 14
+  {57, 1000}, {55, 1000},
+  // 15
+  {60, 1000}, {58,  500}, {57,  500},
+  // 16
+  {53, 1500}, { 0,  500},
+  // 17
+  {57, 1500}, { 0,  500},
+  // 18
+  {55, 1000}, {53, 1000},
+  // 19
+  { 0, 2000},
+  // 20
+  { 0, 2000},
+};
+
+// The lower voice. Not a bass line and not a pulse: it exists to be the second
+// note of a dyad, so it sounds only where one is wanted and rests out the rest
+// of the bar.
+static constexpr MusNote kHarmony[] = {
+  //  1
+  {53, 1000}, { 0, 1000},
+  //  2
+  {53, 1000}, { 0, 1000},
+  //  3
+  {55, 1000}, { 0, 1000},
+  //  4
+  { 0, 2000},
+  //  5
+  {60, 1000}, { 0, 1000},
+  //  6
+  {58, 1000}, { 0, 1000},
+  //  7
+  {60, 1000}, { 0, 1000},
+  //  8
+  {53, 1500}, { 0,  500},
+  //  9
+  {60, 1000}, { 0, 1000},
+  // 10
+  {65, 1000}, { 0, 1000},
+  // 11
+  {62, 1000}, { 0, 1000},
+  // 12
+  {57, 1500}, { 0,  500},
+  // 13
+  {55, 1000}, { 0, 1000},
+  // 14
+  {53, 1000}, { 0, 1000},
+  // 15
+  {53, 1000}, { 0, 1000},
+  // 16
+  { 0, 2000},
+  // 17
+  {53, 1500}, { 0,  500},
+  // 18
+  { 0, 2000},
+  // 19
+  { 0, 2000},
+  // 20
+  { 0, 2000},
+};
+
+// Compile-time proof that the two tracks are the same length.
+constexpr uint32_t totalMs(const MusNote* n, size_t count) {
+  uint32_t t = 0;
+  for (size_t i = 0; i < count; ++i) t += n[i].ms;
+  return t;
+}
+static_assert(totalMs(kMelody, sizeof(kMelody) / sizeof(kMelody[0])) ==
+              totalMs(kHarmony, sizeof(kHarmony) / sizeof(kHarmony[0])),
+              "music tracks must be the same length or they drift apart");
+
+struct MusTrack {
+  const MusNote* notes;
+  uint16_t       n;
+  uint8_t        ch;
+  uint8_t        vol;
+  uint16_t       i = 0;
+  uint32_t       nextAt = 0;
+};
+
+// Above CH_COUNT by construction, so music never takes a channel a cue wants.
+// hal::voice accepts eight and the cues use four.
+static MusTrack s_mus[2] = {
+  { kMelody,  (uint16_t)(sizeof(kMelody) / sizeof(kMelody[0])),
+    (uint8_t)(CH_COUNT + 0), 38 },
+  { kHarmony, (uint16_t)(sizeof(kHarmony) / sizeof(kHarmony[0])),
+    (uint8_t)(CH_COUNT + 1), 30 },
+};
+static bool s_musOn = false;
+
+
+// Advances both voices. Called from update(), which has already established
+// that sound is switched on at all.
+static void musicUpdate(uint32_t nowMs) {
+  if (!s_musOn) return;
+  for (MusTrack& t : s_mus) {
+    if ((int32_t)(nowMs - t.nextAt) < 0) continue;
+    const MusNote& note = t.notes[t.i];
+    if (note.midi >= MIDI_LO && note.midi <= MIDI_HI)
+      hal::voice(t.ch, kMidiHz[note.midi - MIDI_LO], note.ms, W_TRI, t.vol);
+    // Advance the clock by the note rather than from now, so rounding does not
+    // accumulate into a tempo. If a frame hitch has already put us more than a
+    // whole note behind, that is a stall rather than drift and chasing it would
+    // rattle off the backlog at once -- resync instead.
+    t.nextAt = ((int32_t)(nowMs - t.nextAt) > (int32_t)note.ms)
+                   ? nowMs + note.ms
+                   : t.nextAt + note.ms;
+    if (++t.i >= t.n) t.i = 0;
+  }
+}
+
 }  // namespace
 
 void setEnabled(bool on) {
@@ -254,9 +473,24 @@ void setEnabled(bool on) {
   // as well.
   hal::silence();
   for (uint8_t ch = 0; ch < CH_COUNT; ++ch) s_voice[ch] = Voice{};
+  // ...and the music, which schedules straight to the HAL and has no Voice slot
+  // to clear. Left running it would keep feeding notes to a silenced speaker and
+  // come back mid-phrase the moment sound was switched on again.
+  s_musOn = false;
 }
 
 bool enabled() { return s_on; }
+
+void musicSet(bool playing) {
+  if (playing == s_musOn) return;
+  s_musOn = playing;
+  // Starting picks up where it left off rather than rewinding. Three days into
+  // a run, restarting from bar one every dawn would make the piece feel shorter
+  // than it is; carrying the position means each morning opens somewhere new.
+  // The clock is what has to be reset -- it has been standing still since dusk.
+  if (playing)
+    for (MusTrack& t : s_mus) t.nextAt = s_nowMs;
+}
 
 void play(const Cue& c) {
   if (!s_on || c.ch >= CH_COUNT) return;
@@ -304,6 +538,8 @@ void update(uint32_t nowMs) {
   // a cue through.
   s_nowMs = nowMs;
   if (!s_on) return;
+
+  musicUpdate(nowMs);
 
   for (uint8_t ch = 0; ch < CH_COUNT; ++ch) {
     Voice& v = s_voice[ch];

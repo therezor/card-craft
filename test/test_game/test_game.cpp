@@ -936,12 +936,15 @@ static void test_a_shape_matches_wherever_it_fits(void) {
   layGrid(s, { CELL_EMPTY, world::B_PLANK, CELL_EMPTY, world::B_PLANK });
   TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
 
-  // A single cell is the same recipe in all four corners.
-  for (int i = 0; i < GRID_N; ++i) {
-    layGrid(s, { CELL_EMPTY, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
-    s.grid[i] = world::B_WOOD;
-    TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
-  }
+  // The same holds for a different two-cell recipe in a different material, so
+  // this is a property of the matcher and not of one lucky row in the table.
+  // (It used to check a ONE-cell recipe in all four corners -- planks, back
+  // when they came from a single log. There is no one-cell recipe left to
+  // check: planks are two logs stacked now.)
+  layGrid(s, { world::B_WOOD, CELL_EMPTY, world::B_WOOD, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
+  layGrid(s, { CELL_EMPTY, world::B_WOOD, CELL_EMPTY, world::B_WOOD });
+  TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
 
   layGrid(s, { CELL_EMPTY, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
   TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
@@ -978,6 +981,35 @@ static void test_the_right_materials_in_the_wrong_shape_are_named(void) {
   layGrid(s, { world::B_SAND, world::B_SNOW, CELL_EMPTY, CELL_EMPTY });
   TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
   TEST_ASSERT_EQUAL_UINT8(R_NONE, matchLoose(s.grid));
+}
+
+// Planks cost two logs and pay four. Pinned because it is a balance decision
+// rather than a mechanism: it was one log for three, which made wood the one
+// material nobody had to think about, and the whole early game is measured from
+// this number.
+static void test_planks_take_two_logs_and_give_four(void) {
+  State s = fresh();
+  s.inv[world::B_WOOD] = 2;
+  s.slot[0] = world::B_WOOD;
+
+  layGrid(s, { world::B_WOOD, CELL_EMPTY, world::B_WOOD, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
+  TEST_ASSERT_TRUE(craftGrid(s));
+  TEST_ASSERT_EQUAL_UINT16(4, s.inv[world::B_PLANK]);
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_WOOD]);   // both logs spent
+
+  // One log is not enough, and says so before anything is taken.
+  State t = fresh();
+  t.inv[world::B_WOOD] = 1;
+  t.slot[0] = world::B_WOOD;
+  TEST_ASSERT_FALSE(canCraft(t, R_PLANK));
+  layGrid(t, { world::B_WOOD, CELL_EMPTY, world::B_WOOD, CELL_EMPTY });
+  TEST_ASSERT_FALSE(craftGrid(t));
+  TEST_ASSERT_EQUAL_UINT16(1, t.inv[world::B_WOOD]);
+
+  // ...and one log alone spells nothing at all now, where it used to be planks.
+  layGrid(t, { world::B_WOOD, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(t.grid));
 }
 
 // All four cells are finally worth something. A full grid used to be, by
@@ -1114,7 +1146,7 @@ static void test_a_tool_needs_a_free_slot(void) {
 
   // A material, by contrast, is never refused -- it just goes uncounted on the
   // bar until a slot frees. That asymmetry is the point.
-  s.inv[world::B_WOOD] = 1;
+  s.inv[world::B_WOOD] = 2;          // planks are two logs
   TEST_ASSERT_TRUE(canCraft(s, R_PLANK));
 }
 
@@ -2810,6 +2842,7 @@ int main(int, char**) {
   RUN_TEST(test_a_shape_matches_wherever_it_fits);
   RUN_TEST(test_the_same_materials_in_the_wrong_shape_do_not_craft);
   RUN_TEST(test_the_right_materials_in_the_wrong_shape_are_named);
+  RUN_TEST(test_planks_take_two_logs_and_give_four);
   RUN_TEST(test_the_four_cell_recipes_craft);
   RUN_TEST(test_no_two_recipes_share_a_shape);
   RUN_TEST(test_every_recipe_is_stored_normalised);

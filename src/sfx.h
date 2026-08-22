@@ -90,6 +90,23 @@ extern const Cue kHurt, kDied, kTelegraph, kHiss, kExplode;
 extern const Cue kArrowFire, kArrowHit;
 extern const Cue kDusk, kDawn, kMenuMove, kBuy, kCraft, kCraftFail;
 
+// ---- background music -------------------------------------------------------
+//
+// Daylight has a tune under it. It is two voices of note data rather than a
+// recording -- a rendered piece of this length would be megabytes of PCM, and
+// the whole sound bank is 10,000 lines for a couple of seconds of effects.
+// Notes are a few hundred bytes and loop for as long as the sun is up.
+//
+// It plays on channels ABOVE CH_COUNT, so it occupies none of the four the cues
+// share out and can never be the reason a creeper hiss is not heard.
+//
+// Switched on and off by the caller rather than by the clock in here, because
+// what counts as "day" is the simulation's business: see the call in main.cpp.
+// Turning it off stops scheduling notes and lets the last one ring out, which
+// at under a second is a fade rather than a cut. Sound being switched off kills
+// it outright, like everything else.
+void musicSet(bool playing);
+
 // Starts a cue. Cheap enough to call unconditionally: a cue that loses to a
 // higher-priority one still playing is dropped here rather than at the speaker.
 void play(const Cue& c);

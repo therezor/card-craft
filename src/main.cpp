@@ -235,6 +235,21 @@ int s_book = 0;
 int    s_titleSel = 0;
 Screen s_ctrlFrom = SCR_TITLE;
 
+// True on the screens that are inside a run -- the ones with a world behind
+// them. The title, the death card and the controls card reached from the title
+// are the outside; everything else is somewhere the player has paused in the
+// middle of a day, and the music should carry on across all of it.
+bool inRun() {
+  switch (s_scr) {
+    case SCR_PLAY: case SCR_PAUSE: case SCR_CRAFT: case SCR_RECIPES:
+      return true;
+    case SCR_CONTROLS:
+      return s_ctrlFrom != SCR_TITLE;
+    default:
+      return false;
+  }
+}
+
 // The craft card's control hint, built from caps() rather than spelled out, so
 // a board that binds these elsewhere gets its own keys named back to it.
 const char* menuFoot() {
@@ -1018,6 +1033,31 @@ void loop() {
     }
   }
   if (s_bench) ++s_benchFrames;
+#endif
+
+  // Daylight has a tune under it, and night does not: the night's soundtrack is
+  // the mobs, and a piece of music playing over a creeper fuse would be working
+  // against the one thing the audio is actually for.
+  //
+  // Driven from here every frame rather than fired off the EV_DAWN and EV_DUSK
+  // events, because those say what changed and this is a question about what IS
+  // -- a run started in daylight, a run reloaded, a death, or a trip out to the
+  // title all have to leave the music in the right state, and only one of those
+  // four is an event at all.
+  const bool wantMusic = inRun() && !s_game.dead && s_game.phase == game::PH_DAY;
+  sfx::musicSet(wantMusic);
+#ifdef DEV_SERIAL
+  // Music is the one thing here that cannot be checked by looking at the panel,
+  // and the board is usually on the far end of a USB cable from whoever is
+  // testing it. Reported on the transition only -- every frame would drown the
+  // frame-time line it shares a wire with.
+  {
+    static int8_t s_saidMusic = -1;
+    if ((int8_t)wantMusic != s_saidMusic) {
+      s_saidMusic = (int8_t)wantMusic;
+      Serial.printf("music=%d phase=%d\n", (int)wantMusic, (int)s_game.phase);
+    }
+  }
 #endif
 
   sfx::update(millis());

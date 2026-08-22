@@ -29,8 +29,8 @@ matter what is in it. That is a hard ceiling of 77 fps, and it leaves roughly
 
 ## The solution
 
-A first-person survival game with a real loop, running at **32 fps worst case
-and 48 fps average**, measured on-device against a full twenty-four-mob wave.
+A first-person survival game with a real loop, running at **39 fps worst case
+and 50 fps average**, measured on-device against a full twenty-four-mob wave.
 
 **The loop.** Daylight is a countdown. You mine to gather blocks to build with
 and ore to upgrade with, but ore only exists underground and in the open pits,
@@ -160,7 +160,7 @@ blade over a handle, a torch is coal over wood.
 
 ```
 PLANKS   [W][ ]     TORCH    [C][ ]     BRICKS   [S][S]     MASONRY  [S][S]
-         [ ][ ]              [W][ ]              [S][ ]              [S][S]
+         [W][ ]              [W][ ]              [S][ ]              [S][S]
 
 PICK     [t][t]     SWORD    [t][ ]     PATCH    [L][L]     SALVE    [L][L]
          [P][ ]              [P][ ]              [W][ ]              [W][W]
@@ -195,11 +195,27 @@ a dropped item to take it back; `Q` throws one out to make room. Lava eats what
 falls in it, and nothing lies around for more than about ninety seconds.
 
 A run starts with **nothing in your hands**. Wood comes away from a tree in
-about four seconds by fist, three blocks at a time, and three planks make the
-first pickaxe; from there the ladder is stone, iron, and diamond from the
-bottom three layers of the world. Pickaxes and swords both wear out — the bar
+about four seconds by fist, three blocks at a time; two logs make four planks
+and three planks make the first pickaxe, so the bootstrap is two trees rather
+than one. It was one log for three planks, which made wood the single material
+nobody ever had to think about — a punched tree paid for the whole opening and
+left change. From there the ladder is stone, iron, and diamond from the bottom
+three layers of the world. Pickaxes and swords both wear out — the bar
 under the icon is what is left of one — and a sword's tier is the difference
 between three blows on a zombie and one.
+
+**Daylight has a tune under it**, and night does not — the night's soundtrack is
+the mobs, and music over a creeper fuse would be working against the one thing
+the audio is for. It is two voices of note data rather than a recording: a
+rendered piece this long would be several megabytes and the whole effects bank
+is a couple of seconds.
+
+It sits low — 174 to 440 Hz, under middle C for most of its range — and the two
+voices land together on the downbeats as thirds and fifths rather than one
+carrying a melody over the other keeping time. Both of those are the difference
+between calm and shrill on a speaker this size, and both were learned the hard
+way: the first version was a metronome, and the second tried to fix that with
+silence, which is not what makes quiet music quiet.
 
 Torches are the only light there is, and nothing on the map comes with any: no
 village, no house, no castle. Mobs will not spawn on lit ground, so a torch is
@@ -231,12 +247,29 @@ field of twenty-four.
 
 | | worst | mean | best |
 |---|---|---|---|
-| Night, full 24-mob wave | 32 fps | 48 fps | 67 fps |
+| Night, full 24-mob wave | 39 fps | 50 fps | 70 fps |
 
-CPU averages 14.9 ms against a 12.98 ms transfer, so the frame is now limited by
-the processor rather than by the panel — which is the opposite of what this
-section used to say, and the change is the textured floors. `world_us` alone is
-11.9 ms of it.
+CPU averages 13.9 ms against a 12.98 ms transfer, so the frame is still limited
+by the processor rather than by the panel, but only just — and the last step
+toward that came from the fog rather than from the renderer.
+
+**Fog is not weather here, it is what hides the draw distance**, and it was
+doing neither end of that job well. The curve was a smoothstep across the whole
+ramp: symmetric, so it put real haze on a block three cells away, and it only
+reached full opacity on the very last band it had. Squared instead, and
+saturating two bands early, the near half of the view is about half as hazy as
+it was while the far end is *completely* shut at eight cells rather than
+arriving there exactly on time.
+
+Which pays for itself twice, because the cells past that point are now provably
+invisible — a span there is the fog colour, and the fog colour is what the
+background already holds. So the walker stops at nine cells rather than eleven,
+gives up nothing a player could see, and hands back:
+
+| | worst | mean | CPU |
+|---|---|---|---|
+| 11 cells | 33 fps | 47.0 fps | 15.3 ms |
+| 9 cells | 39 fps | 49.7 fps | 13.9 ms |
 
 **The benchmark is deterministic, and a fixed seed was not enough to make it so.**
 It seeds from a constant, so every run measures the same island. But the
