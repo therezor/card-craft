@@ -37,7 +37,29 @@ constexpr int MAX_MOBS     = 24;
 constexpr int MOB_CAP      = 12;
 constexpr int TOOL_ANIM    = 16;   // frames in one pickaxe swing, ~0.27 s
 
+// How long the player stays loud after doing something loud. Mining, building
+// and swinging all set State::noise to this, and a mob within earshot of a
+// noisy player comes to look -- which is what makes digging after dark a
+// decision rather than free progress.
+constexpr uint8_t NOISE_TICKS = 30;
+
 enum Phase : uint8_t { PH_DAY, PH_NIGHT };
+
+// What a mob is doing, as distinct from what it is. Mobs used to have exactly
+// one behaviour -- walk at the player, forever, from the tick they spawned --
+// so the only variable a night had was how many of them there were.
+//
+// MS_HUNT is zero on purpose. Every posed mob in the host tests and in the
+// serial dev commands is a zeroed Mob{}, and zero has to keep meaning "behaves
+// the way mobs behaved before this enum existed" or a dozen combat tests go
+// quiet without failing.
+enum MobState : uint8_t {
+  MS_HUNT = 0,     // has the player, and is closing
+  MS_ALERT,        // heading for where they were; will not attack on the way
+  MS_WANDER,       // no idea; drifting between places of its own choosing
+  MS_REPOSITION,   // taking a beat -- see MobInfo's reposMode in game.cpp
+  MS_STATE_COUNT
+};
 
 enum MobKind : uint8_t {
   MOB_ZOMBIE,     // melee, slow, night 1+
@@ -62,7 +84,21 @@ constexpr int SLOT_N = 9;
 // materials occupy 0..B_COUNT-1, so every `it < world::B_COUNT` test in the
 // codebase still means exactly "is this a block" without being touched.
 constexpr uint8_t TOOL_BASE  = 100;   // ..107, see toolId below
+// A third band, above the tools and below SLOT_EMPTY: things that exist only on
+// the floor. A pickup is never in a slot, never in inv[], has no count and
+// nothing to select -- it is spent the instant it is walked over. That is what
+// lets a health drop exist without the hotbar having to grow a concept, and it
+// is why the band is named rather than the one id being a bare constant.
+constexpr uint8_t PICKUP_BASE = 150;   // ..199
+constexpr uint8_t ITEM_HEART  = PICKUP_BASE + 0;
+// What a creeper leaves if it is cut down before its fuse catches. The same two
+// hearts the PATCH recipe gives, deliberately: patching is a daytime errand
+// that wants leaves and wood, and this is the same health bought a different
+// way -- by reading a creeper early rather than by walking to a tree.
+constexpr int16_t HEART_HEAL  = 2;
 constexpr uint8_t SLOT_EMPTY = 201;
+
+constexpr bool isPickup(uint8_t it) { return it >= PICKUP_BASE && it < 200; }
 
 enum ToolKind : uint8_t { TK_PICK, TK_SWORD, TK_COUNT };
 enum ToolTier : uint8_t { TT_WOOD, TT_STONE, TT_IRON, TT_DIAMOND, TT_COUNT };
@@ -203,6 +239,10 @@ enum Event : uint32_t {
   EV_TOOL_BROKE = 1u << 21,
   EV_DROP       = 1u << 22,   // something left the bar and is now on the floor
   EV_PICKUP     = 1u << 23,   // ...and something was walked over and taken back
+  // Something on the floor put hearts back. Raised alongside EV_PICKUP, because
+  // a heal IS a pickup -- whoever turns these into sound has to pick one, see
+  // playEvents.
+  EV_HEAL       = 1u << 24,
 };
 
 // ---- effects ----------------------------------------------------------------
@@ -220,6 +260,7 @@ enum SparkKind : uint8_t {
   SP_DEATH,    // a mob went down
   SP_BLAST,    // a creeper went off
   SP_ARROW,    // an arrow struck something
+  SP_HEART,    // a heart was taken off the floor
   SP_COUNT
 };
 
@@ -313,10 +354,49 @@ struct Mob {
   uint8_t flowHold;  // ticks left ignoring los and pathing on the grid instead
   uint8_t side;      // which way it circles at standoff; fixed at spawn
   uint8_t hitFlash;  // ticks left showing white, so a landed blow is visible
+  // 1 when the player is looking at it with a clear line. Refreshed on the same
+  // stagger as `los`, so the two can never disagree -- a mob the player can
+  // plainly see but that the simulation believes is hidden would get the
+  // forgiving treatment in the middle of the screen, which reads as the mob
+  // being broken rather than as mercy.
+  uint8_t seen;
   float   walk;      // distance travelled, for the walk cycle — see render.cpp
   uint16_t voice;    // ticks until it makes a noise of its own accord
   uint16_t press;    // ticks a creeper has spent close but unable to close
+
+  // ---- what it thinks is going on (see updateMob) ---------------------------
+  uint8_t  state;    // MobState. MS_HUNT is 0 deliberately -- see the enum.
+  // Ticks since it last had eyes on the player. Counts UP, not down, so the
+  // zero a freshly-constructed Mob carries reads as "seeing you right now" --
+  // which is what every posed mob in the host tests wants, and is why none of
+  // them had to learn this field exists.
+  uint16_t attn;
+  // The cell it is walking to: where the player was last seen while MS_ALERT,
+  // a place of its own while MS_WANDER. Cells rather than floats -- the map is
+  // 96x96, so a byte each is the whole address space at a quarter of the cost.
+  uint8_t  memX, memY;
+  // Ticks left in the current short intention: a hesitation, or one leg of a
+  // wander. One field for two things that can never overlap, because they are
+  // different states.
+  uint8_t  repos;
+  // Which way it is facing, as a pair of signed bytes at roughly unit length.
+  // The renderer only ever takes a dot and a cross with this and both are
+  // scale-free, so it never has to be a true unit vector -- which is what lets
+  // it be two bytes instead of two floats. Zero means "has never moved", and
+  // the renderer draws such a mob front-on.
+  int8_t   hx, hy;
 };
+
+// The mob array is MAX_MOBS of these, and the two framebuffers leave about
+// eight kilobytes of internal SRAM behind them. That makes this a number worth
+// writing down rather than discovering when a boot goes silent.
+//
+// 56 bytes as it stands, so the array is 1344 -- it was 40 and 960 before mobs
+// learned to have a state of mind. A little slack above that rather than a
+// tripwire pinned to the exact figure, because padding is the compiler's to
+// choose and the host and the device need not agree on it; the point is to
+// catch a careless doubling, not to fail on a rearranged field.
+static_assert(sizeof(Mob) <= 64, "Mob grew past its RAM budget");
 
 struct State {
   raycast::Camera cam;
@@ -371,6 +451,12 @@ struct State {
   uint8_t  spawnFails = 0;
   uint16_t swingCooldown = 0;
   uint16_t hurtFlash = 0;      // ticks of red vignette left
+
+  // Ticks of lingering noise. Mining, building and swinging are loud, and a mob
+  // within earshot of a loud player has a reason to come and look. Kept as a
+  // decaying count rather than read off the tick's event mask because the mob
+  // loop runs before the player acts and cannot see this tick's events at all.
+  uint8_t  noise = 0;
 
   // Ticks of immunity to mob damage. Not to lava: standing in lava is a choice
   // the player keeps making every tick, and the burn timer already paces it.

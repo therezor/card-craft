@@ -17,6 +17,7 @@
 //      present()          hand it to the DMA and flip
 // =============================================================================
 #include <Arduino.h>
+#include <math.h>
 #include <Preferences.h>
 #include <esp_heap_caps.h>
 
@@ -86,7 +87,11 @@ void playEvents(uint32_t ev) {
   // A tool going is the one thing here the player cannot see happen -- it is a
   // slot emptying at the bottom of the screen while they are looking at a wall.
   if (ev & game::EV_TOOL_BROKE)  sfx::play(sfx::kCraftFail);
-  if (ev & game::EV_PICKUP)      sfx::play(sfx::kBuy);
+  // A heal is a pickup with a consequence, so it takes the pickup's place in
+  // the chain rather than sitting alongside it: one heart raises both bits, and
+  // kBuy under kCraft is two UI cues stacked in a single frame.
+  if (ev & game::EV_HEAL)        sfx::play(sfx::kCraft);
+  else if (ev & game::EV_PICKUP) sfx::play(sfx::kBuy);
   else if (ev & game::EV_DROP)   sfx::play(sfx::kMenuMove);
   if (ev & game::EV_MOB_HIT)     sfx::play(sfx::kMobHurt[hitKind]);
   else if (ev & game::EV_SWING)  sfx::play(sfx::kSwing);
@@ -569,7 +574,45 @@ void loop() {
 #ifdef DEV_SERIAL
   if (Serial.available()) {
     const int cmd = Serial.read();
-    if (cmd == 's') {
+    if (cmd == 'i') {
+      // Immortal, for playtesting. Not a heal and not a cheat menu -- it puts
+      // the health bar somewhere the night cannot reach so the mobs can be
+      // watched for as long as it takes, which is the only way to judge whether
+      // a wander looks like a wander.
+      if (s_game.maxHp > 1000) { s_game.maxHp = 10; s_game.hp = 10; }
+      else { s_game.maxHp = 30000; s_game.hp = 30000; }
+      Serial.printf("immortal=%d hp=%d\n", s_game.maxHp > 1000, (int)s_game.hp);
+    } else if (cmd == 'k') {
+      // A night, and a ring of mobs far enough out that they have to FIND you.
+      // 'm' poses three at seven cells, which is close enough that all three
+      // notice immediately and turn to face you -- fine for judging the front
+      // art, useless for judging anything else. These start outside their own
+      // sight range, wandering, so the approach is the thing on display.
+      s_game.phase = game::PH_NIGHT;
+      s_game.phaseTick = game::NIGHT_TICKS / 4;
+      int n = 0;
+      for (int k = 0; k < game::MAX_MOBS && n < 10; ++k) {
+        game::Mob& m = s_game.mobs[k];
+        if (m.alive) continue;
+        const float a = (float)k * 0.9f;
+        const float r = 13.0f + (float)(k % 4) * 1.5f;
+        const float mx = s_game.cam.px + cosf(a) * r;
+        const float my = s_game.cam.py + sinf(a) * r;
+        if (!world::standable((int)mx, (int)my)) continue;
+        m = game::Mob{};
+        m.alive = true;
+        m.kind  = (uint8_t)(k % game::MOB_COUNT);
+        m.hp    = 20;
+        m.x = mx; m.y = my;
+        m.z = world::groundAt(mx, my);
+        m.bestDist = 1e9f;
+        m.side  = (uint8_t)(k & 1);
+        m.state = game::MS_WANDER;
+        m.voice = (uint16_t)(30 + k * 17);
+        ++n;
+      }
+      Serial.printf("spawned=%d night\n", n);
+    } else if (cmd == 's') {
       static const char* const kName[] = { "title", "play", "pause", "craft",
                                           "recipes", "dead" };
       // Indexed by the screen, so adding one without a name here would read
@@ -651,14 +694,57 @@ void loop() {
         m.y = s_game.cam.py + s_game.cam.dy * 7.0f
                             + s_game.cam.dx * (float)(k - 1) * 2.2f;
         m.bestDist = 99.0f;
+        // One per view, so the row is a contact sheet rather than three copies
+        // of the same picture: the left mob walks at the camera, the middle one
+        // crosses in profile, the right one walks away. Without it they all pose
+        // front-on -- a zeroed Mob has no heading at all -- and the side and
+        // back art cannot be looked at.
+        //
+        // Given a destination to WALK to rather than a heading and a freeze.
+        // Setting hx/hy alone does not survive: the mob keeps walking, and the
+        // heading is re-derived from the step it actually took, so within a
+        // second all three faced wherever their wander had taken them. A real
+        // destination makes the heading genuine and keeps it that way.
+        //
+        // In camera space: -1 is toward the eye, +1 away, and the second
+        // component runs across the view.
+        static const int8_t kPose[3][2] = { { -1, 0 }, { 0, 1 }, { 1, 0 } };
+        const float fwd = kPose[k][0], side = kPose[k][1];
+        const float wx = s_game.cam.dx * fwd - s_game.cam.dy * side;
+        const float wy = s_game.cam.dy * fwd + s_game.cam.dx * side;
+        m.hx = (int8_t)(wx * 127.0f);
+        m.hy = (int8_t)(wy * 127.0f);
+        m.state = game::MS_WANDER;
+        m.repos = 255;                       // one long leg, no re-targeting
+        m.memX  = (uint8_t)(m.x + wx * 5.0f);
+        m.memY  = (uint8_t)(m.y + wy * 5.0f);
       }
-      Serial.printf("mobs: 3 posed at %.1f,%.1f\n", s_game.cam.px, s_game.cam.py);
+      Serial.printf("mobs: 3 posed at %.1f,%.1f (front / side / back)\n",
+                    s_game.cam.px, s_game.cam.py);
     } else if (cmd == 'h') {
       // Flash every mob, and hold it far longer than a real hit does, so the
       // reaction can be photographed over a serial link. The renderer clamps
       // the strength, so a long hold looks exactly like a real one.
-      for (int i = 0; i < game::MAX_MOBS; ++i)
-        if (s_game.mobs[i].alive) s_game.mobs[i].hitFlash = 90;
+      // ...and throw the blood, which is the other half of what a landed blow
+      // looks like and the half that could not be reviewed at all before: a
+      // burst lasts a third of a second, so catching one by timing a capture
+      // against a real swing was not a thing worth attempting twice.
+      for (int i = 0; i < game::MAX_MOBS; ++i) {
+        game::Mob& m = s_game.mobs[i];
+        if (!m.alive) continue;
+        m.hitFlash = 90;
+        game::Spark sp{};
+        sp.x = m.x; sp.y = m.y; sp.z = (float)m.z + 0.95f;
+        sp.kind = game::SP_HIT;
+        sp.mat  = 0;
+        sp.mag  = 255;
+        render::emit(sp);
+      }
+    } else if (cmd == 'n') {
+      // Start a run. Same reason 'p' and 'c' exist: the title card is dismissed
+      // with a key, so without this the screenshot tour cannot get past it
+      // unattended and everything behind it is unreachable over the wire.
+      startRun();
     } else if (cmd == 'p') {
       // Lets the screenshot tool reach the pause card, which is otherwise only
       // openable from the keyboard.

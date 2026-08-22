@@ -189,6 +189,11 @@ const Cue kPlace[MC_COUNT] = { kPlaceSoft, kPlaceStone, kPlaceWood };
 // MobKind order: zombie, creeper, skeleton. A creeper has no idle — the thing
 // that announces one is its fuse, and giving it an ambient noise would spend
 // the only warning the player gets on a mob that is not yet coming.
+// Index 1 is the creeper, and it is the zombie's moan because no creeper idle
+// cue was ever recorded. Nothing reaches it any more -- game.cpp's voice loop
+// skips creepers outright, deliberately -- and it is left pointing somewhere
+// harmless rather than removed, because the array is indexed by MobKind and a
+// hole in it would be a crash waiting for the day a creeper does get a voice.
 const Cue kMobIdle[3] = { kZombieIdle, kZombieIdle, kSkeletonIdle };
 const Cue kMobHurt[3] = { kZombieHurt, kCreeperHurt, kSkeletonHurt };
 const Cue kMobDied[3] = { kZombieDie,  kCreeperDie,  kSkeletonDie };

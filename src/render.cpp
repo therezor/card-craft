@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "font5x7.h"
+#include "facing.h"
 #include "sprites.h"
 #include "textures.h"
 #include "world.h"
@@ -1133,7 +1134,14 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
   struct Draw {
     float depth, sx, standZ, flash, walk;
     uint8_t kind, lit, hurt;
-    uint16_t windup;   // ticks left in a committed blow; picks the attack pose
+    // Ticks left in whatever this mob's tell is: a committed blow for the two
+    // that swing, the burning fuse for the one that does not. Named for the
+    // tell rather than for the windup because a creeper's windup is always
+    // zero -- it has no committed blow -- and keying the attack pose on windup
+    // alone meant the creeper's swell frame was art that could never be drawn.
+    uint16_t tell;
+    uint8_t view;      // 0 front, 1 side, 2 back -- see the facing test below
+    uint8_t mirror;    // the side view, flipped for the far side
   };
   Draw list[game::MAX_MOBS];
   int n = 0;
@@ -1161,7 +1169,10 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     // walk cycle says nothing about what it is doing. The windup is the only
     // thing that knows, and until now the renderer never saw it: a zombie
     // winding up to hit you looked exactly like a zombie standing there.
-    d.windup = m.windup;
+    d.tell = m.windup;
+    // A lit fuse is the creeper's whole telegraph, so it drives the pose the
+    // way a windup drives everyone else's.
+    if (m.kind == game::MOB_CREEPER && m.timer) d.tell = m.timer;
     // A struck mob flashes white and jolts. It is the only feedback a hit gives
     // at range, and without it combat is two numbers changing somewhere the
     // player cannot see them.
@@ -1173,6 +1184,12 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     // Creepers strobe while their fuse burns, faster as it runs out.
     if (m.kind == game::MOB_CREEPER && m.timer && d.flash == 0.0f)
       d.flash = ((m.timer / 5u) & 1u) ? 0.75f : 0.0f;
+
+    // Which of the three authored views, and whether to mirror it. The rule
+    // itself is in facing.h so the host tests can ask the same question.
+    bool flip = false;
+    d.view   = (uint8_t)facing::pickView(m.hx, m.hy, spx, spy, flip);
+    d.mirror = (uint8_t)flip;
   }
 
   // Back to front, so a near mob covers a far one. Insertion sort: n is at
@@ -1249,14 +1266,22 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     // Modulo art.walk, not art.frames: the frames past the walk cycle are
     // attack poses, and dealing one out as part of a stride would make a
     // zombie throw a punch every other step.
-    int frame = ((int)(d.walk * 2.0f)) % art.walk;
-    if (d.windup && art.frames > art.walk) {
+    // View-major: view V's stride frames live at V * walk, and everything from
+    // views * walk onward is an attack pose.
+    int frame = (int)d.view * art.walk + (((int)(d.walk * 2.0f)) % art.walk);
+    const int atk = (int)art.views * (int)art.walk;
+    if (d.tell && art.frames > atk) {
       // Wind up, then strike. The blow lands on the tick windup reaches
       // zero, so the arms are out for the tenth of a second before it and
       // drop on the tick it arrives — which is the tick the screen kicks and
       // the hurt flash covers anyway.
-      const bool strike = d.windup <= ATTACK_STRIKE;
-      frame = art.walk + ((strike && art.frames > art.walk + 1) ? 1 : 0);
+      //
+      // The attack poses are drawn front-on and are used whichever view the
+      // walk cycle would have picked, because a mob winding up at you has
+      // turned to face you -- see the heading update in game.cpp, which points
+      // it at the player for exactly as long as `windup` lasts.
+      const bool strike = d.tell <= ATTACK_STRIKE;
+      frame = atk + ((strike && art.frames > atk + 1) ? 1 : 0);
     }
     const uint8_t* pix = art.pix + (size_t)frame * art.h * art.w;
 
@@ -1268,7 +1293,12 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
       int32_t sx = (int32_t)(x - x0) * stepX >> 16;
       if (sx < 0) sx = 0;
       if (sx >= art.w) sx = art.w - 1;
-      srcX[x] = (int16_t)sx;
+      // The side view is drawn once and flipped here rather than authored
+      // twice. A mirrored column is the whole of the difference between a mob
+      // walking left and one walking right, and this table is already a
+      // per-destination-column indirection -- so the flip is one subtraction in
+      // a loop that exists, and it halves what has to be drawn by hand.
+      srcX[x] = (int16_t)(d.mirror ? (art.w - 1 - sx) : sx);
     }
 
     for (int x = cx0; x < cx1; ++x) {
@@ -1328,7 +1358,13 @@ struct Particle {
   uint8_t  gravity;      // 0 = drifts (smoke), 1 = falls (debris)
 };
 
-constexpr int MAX_PARTICLES = 96;
+// Raised with the blood. A hit is eighteen particles now and a kill twenty-six,
+// so at ninety-six a scrappy fight ran the pool dry and later bursts came out
+// half-sized -- freeParticle() hands back nothing when it is full and the burst
+// is silently smaller. Thirty-six bytes each, so this is 5.8 KB of .bss against
+// the ~38 KB the two framebuffers leave behind; check the `heap=` line after
+// touching it, because the build report will not tell you.
+constexpr int MAX_PARTICLES = 160;
 static Particle s_part[MAX_PARTICLES];
 static uint32_t s_prng = 0x9e3779b9u;
 
@@ -1359,12 +1395,19 @@ void emit(const game::Spark& sp) {
       break;
     }
     case game::SP_HIT:
-      r = 255; g = 236; b = 180;
-      count = 7; spread = 2.2f; rise = 2.0f; ttl = 14.0f; size = 2;
+      // Blood. It used to be a pale yellow spark -- three of them, once the
+      // magnitude had scaled the count down -- which read as a glint off the
+      // sword rather than as damage done. A landed blow is the one piece of
+      // feedback the player gets at range, and it has to be unmistakable.
+      r = 200; g = 30; b = 30;
+      count = 18; spread = 2.6f; rise = 2.2f; ttl = 22.0f; size = 2;
       break;
     case game::SP_DEATH:
-      r = 210; g = 220; b = 230;
-      count = 14; spread = 1.6f; rise = 2.6f; ttl = 40.0f; size = 2; grav = 0;
+      // The same red, and more of it. A kill that puffed pale grey directly
+      // after a spray of red read as two unrelated events rather than as the
+      // last blow in a sequence. Falls now, too: blood does.
+      r = 190; g = 26; b = 26;
+      count = 26; spread = 2.2f; rise = 3.0f; ttl = 44.0f; size = 2;
       break;
     case game::SP_BLAST:
       r = 255; g = 168; b = 60;
@@ -1490,6 +1533,17 @@ void drawParticles(const raycast::Camera& cam) {
 // It bobs. A stationary flat square on ground of a similar colour is genuinely
 // hard to find, and the bob is what separates "an item is lying there" from a
 // texture artefact, for about six instructions a frame.
+// The light level a heart is drawn at, however dark the cell it is lying in.
+// Every other item on the floor takes the world's shading so it does not read
+// as a lamp after dark; a heart is the one thing whose whole purpose is to be
+// found at night while you are losing, so it carries its own floor.
+//
+// Four of world::LIGHT_MAX's six, not the maximum: shadeMob clamps to
+// LIGHT_MAX and full brightness there is exactly what a torch looks like, so
+// asking for more would both lie about the number and make the heart read as a
+// light source rather than as a lit object. It still fogs with distance.
+constexpr int HEART_GLOW = 4;
+
 void drawDrops(const game::State& s, const raycast::Camera& cam) {
   const float det = cam.planeX * cam.dy - cam.dx * cam.planeY;
   if (fabsf(det) < 1e-6f) return;
@@ -1562,6 +1616,43 @@ void drawDrops(const game::State& s, const raycast::Camera& cam) {
           const int sy = ((y - y0) * step) >> 16;
           if ((unsigned)sy >= (unsigned)sprites::PICK_H) continue;
           const uint8_t v = art[sy * sprites::PICK_W + sx];
+          if (v) base[y * W + x] = pal[v];
+        }
+      }
+      continue;
+    }
+
+    // Before the block path. world::info() clamps an id it does not know back
+    // to entry zero rather than reading off the end of its table, so an
+    // unhandled pickup is a grass-green cube rather than a crash -- which is
+    // worse in its way, because it looks deliberate.
+    if (d.item == game::ITEM_HEART) {
+      // Lifted out of the dark by its own light. Everything else here goes
+      // through the world's shading so it cannot read as a lamp after sunset;
+      // the heart is the one exception, because the situation it exists for is
+      // that it is night, you are hurt, and you have to be able to FIND it.
+      const int hl = lit < HEART_GLOW ? HEART_GLOW : lit;
+      uint16_t pal[sprites::HEART_COLOURS];
+      for (int k = 1; k < sprites::HEART_COLOURS; ++k)
+        pal[k] = shadeMob(sprites::kHeartPal[k][0], sprites::kHeartPal[k][1],
+                          sprites::kHeartPal[k][2], band, hl);
+
+      const uint8_t* art = &sprites::kHeart[0][0][0];
+      const int step = (sprites::HEART_W << 16) / (sz > 0 ? sz : 1);
+      const int x0 = cx - sz / 2, y0 = cy - sz / 2;
+      for (int x = x0 < 0 ? 0 : x0; x < (x0 + sz > W ? W : x0 + sz); ++x) {
+        const int lim = (int)s_limit[x][bucket];
+        const int cut = y0 + sz > lim ? lim : y0 + sz;
+        const int hi = (int)s_slabHi[x][bucket];
+        const int lo = (int)s_slabLo[x][bucket];
+        const int sx = ((x - x0) * step) >> 16;
+        if ((unsigned)sx >= (unsigned)sprites::HEART_W) continue;
+        for (int y = y0 < 0 ? 0 : y0; y < cut; ++y) {
+          if (y >= H) break;
+          if (hi < lo && y >= hi && y < lo) continue;
+          const int sy = ((y - y0) * step) >> 16;
+          if ((unsigned)sy >= (unsigned)sprites::HEART_H) continue;
+          const uint8_t v = art[sy * sprites::HEART_W + sx];
           if (v) base[y * W + x] = pal[v];
         }
       }

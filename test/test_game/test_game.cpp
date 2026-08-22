@@ -4,10 +4,12 @@
 // millis().
 // Run with:  pio test -e native
 #include <math.h>
+#include <stdio.h>
 #include <initializer_list>
 
 #include <unity.h>
 
+#include "facing.h"
 #include "game.h"
 #include "raycast.h"
 #include "world.h"
@@ -491,6 +493,66 @@ static void test_attacks_are_telegraphed(void) {
   TEST_ASSERT_FALSE(hurtWithoutWarning);
 }
 
+// The anti-regression for the whole state machine, and the reason it is worth
+// having one test that asserts something so vague.
+//
+// Every other mob test here poses a mob and studies it. None of them would
+// notice if wandering quietly made the night EMPTY -- mobs drifting politely
+// around the map, never noticing the player, every posed-mob assertion still
+// green. This runs a real night with the real spawner and asks the only
+// question that matters: did anything find you, and did it announce itself.
+static void test_the_dark_still_finds_you(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);          // dusk
+
+  int close = 0, warnings = 0;
+  for (int t = 0; t < NIGHT_TICKS; ++t) {
+    const uint32_t ev = tick(s, idle);
+    if (ev & (EV_TELEGRAPH | EV_HISS)) ++warnings;
+    for (int i = 0; i < MAX_MOBS; ++i) {
+      const Mob& m = s.mobs[i];
+      if (!m.alive) continue;
+      const float dx = m.x - s.cam.px, dy = m.y - s.cam.py;
+      if (dx * dx + dy * dy < 3.0f * 3.0f) { ++close; break; }
+    }
+  }
+  // Deliberately loose floors. The claim is "a night is still a night", not a
+  // particular number of encounters -- tightening these would make the test a
+  // tuning tripwire rather than a safety net.
+  TEST_ASSERT_TRUE(close > 60);         // at least a second of contact, total
+  TEST_ASSERT_TRUE(warnings > 0);       // and something announced itself
+}
+
+// Directly guards the anti-turtling override: a sealed-in player must not be
+// able to make the siege wander off.
+static void test_a_creeper_under_siege_never_wanders(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);
+  run(s, idle, 60 * 4);
+
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx)
+      if (dx || dy)
+        for (int k = 0; k < 3; ++k) world::place(px + dx, py + dy, world::B_PLANK);
+
+  run(s, idle, 60 * 5);
+  TEST_ASSERT_TRUE(s.sealedTicks > 0);
+
+  for (int t = 0; t < 60 * 25; ++t) {
+    tick(s, idle);
+    for (int i = 0; i < MAX_MOBS; ++i) {
+      const Mob& m = s.mobs[i];
+      if (!m.alive) continue;
+      TEST_ASSERT_TRUE(m.state != MS_WANDER);
+    }
+  }
+}
+
 // Sealing yourself in has to have an answer, or the whole night phase is
 // solved by a ring of blocks. The answer is creepers, which is why their fuse
 // is not gated on line of sight.
@@ -724,6 +786,119 @@ static void test_patch_heals_without_overhealing(void) {
   s.hp = s.maxHp;
   TEST_ASSERT_TRUE(craft(s, R_PATCH));
   TEST_ASSERT_EQUAL_INT16(s.maxHp, s.hp);
+}
+
+// ---- the heart ---------------------------------------------------------------
+//
+// A creeper is the only thing that pays for killing it, and it only pays if you
+// get to it before the fuse does. These pin both halves of that bargain.
+
+// Kills a creeper with a diamond sword, which is one blow, and returns the
+// events of the tick the blow landed on. The fuse state is the caller's to set
+// up -- that is the whole variable under test.
+static uint32_t killPosedCreeper(State& s) {
+  giveTool(s, TK_SWORD, TT_DIAMOND);
+  s.swingCooldown = 0;
+  Input act; act.act = true;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & (EV_MOB_DIED | EV_EXPLODE))) {
+    ev = tick(s, act);
+    TEST_ASSERT_TRUE(++guard < 300);
+  }
+  return ev;
+}
+
+static int heartsOnTheFloor(const State& s) {
+  int n = 0;
+  for (int i = 0; i < MAX_DROPS; ++i)
+    if (s.drops[i].alive && s.drops[i].item == ITEM_HEART) ++n;
+  return n;
+}
+
+static void test_a_creeper_killed_before_its_fuse_drops_a_heart(void) {
+  State s = fresh();
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+  Mob& m = poseMob(s, 0, MOB_CREEPER, 1.2f);
+  m.hp = 2;
+  m.timer = 0;                       // fuse never caught
+  const uint32_t ev = killPosedCreeper(s);
+  TEST_ASSERT_TRUE(ev & EV_MOB_DIED);
+  TEST_ASSERT_EQUAL_INT(1, heartsOnTheFloor(s));
+}
+
+// ...and the other half of the bargain. A creeper that got its fuse lit takes
+// the floor with it and leaves nothing, which is what makes reading one early
+// worth anything at all.
+static void test_a_creeper_that_detonates_leaves_nothing(void) {
+  State s = fresh();
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+  Mob& m = poseMob(s, 0, MOB_CREEPER, 1.2f);
+  m.hp = 2;
+  m.timer = 40;                      // fuse burning
+  const uint32_t ev = killPosedCreeper(s);
+  TEST_ASSERT_TRUE(ev & EV_EXPLODE);
+  TEST_ASSERT_EQUAL_INT(0, heartsOnTheFloor(s));
+}
+
+// Drops a heart at the player's feet, armed and ready to be taken.
+static void dropHeartUnderfoot(State& s) {
+  for (int i = 0; i < MAX_DROPS; ++i) s.drops[i].alive = false;
+  Drop& d = s.drops[0];
+  d = Drop{};
+  d.alive = true;
+  d.item = ITEM_HEART;
+  d.count = 1;
+  d.life = (uint16_t)DROP_LIFE;
+  d.x = s.cam.px; d.y = s.cam.py;
+  d.z = s.cam.z - 0.6f;
+  d.rest = true;
+  d.arm = 0;
+}
+
+// The thing a pickup band exists for: it heals, and it does it without ever
+// touching the nine slots. A heart filed as though it were material 150 would
+// pass a health assertion and quietly corrupt the bar, so the bar is asserted
+// byte for byte.
+static void test_a_heart_heals_on_contact_and_takes_no_slot(void) {
+  State s = fresh();
+  s.hp = 4;
+  uint8_t slotWas[SLOT_N];
+  for (int i = 0; i < SLOT_N; ++i) slotWas[i] = s.slot[i];
+  uint16_t invWas[world::B_COUNT];
+  for (int i = 0; i < world::B_COUNT; ++i) invWas[i] = s.inv[i];
+
+  dropHeartUnderfoot(s);
+  Input idle;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_HEAL)) { ev = tick(s, idle); TEST_ASSERT_TRUE(++guard < 120); }
+
+  TEST_ASSERT_EQUAL_INT16(4 + HEART_HEAL, s.hp);
+  TEST_ASSERT_TRUE(ev & EV_PICKUP);
+  TEST_ASSERT_EQUAL_INT(0, heartsOnTheFloor(s));
+  for (int i = 0; i < SLOT_N; ++i) TEST_ASSERT_EQUAL_UINT8(slotWas[i], s.slot[i]);
+  for (int i = 0; i < world::B_COUNT; ++i)
+    TEST_ASSERT_EQUAL_UINT16(invWas[i], s.inv[i]);
+}
+
+// Full up, so it stays on the floor to be come back for. The same rule a full
+// bar follows for a material it cannot take.
+static void test_a_heart_is_left_where_it_lies_at_full_health(void) {
+  State s = fresh();
+  s.hp = s.maxHp;
+  dropHeartUnderfoot(s);
+  Input idle;
+  run(s, idle, 90);
+  TEST_ASSERT_EQUAL_INT(1, heartsOnTheFloor(s));
+
+  // ...and is there when it is finally wanted.
+  s.hp = (int16_t)(s.maxHp - 1);
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_HEAL)) { ev = tick(s, idle); TEST_ASSERT_TRUE(++guard < 120); }
+  TEST_ASSERT_EQUAL_INT16(s.maxHp, s.hp);      // and does not overheal
+  TEST_ASSERT_EQUAL_INT(0, heartsOnTheFloor(s));
 }
 
 // ---- tools, tiers and durability --------------------------------------------
@@ -1311,13 +1486,22 @@ static Mob& lone(State& s, uint8_t kind, float x, float y) {
   m.alive = true; m.kind = kind; m.hp = 99;
   m.x = x; m.y = y; m.z = world::groundAt(x, y);
   m.timer = 0; m.windup = 0; m.burn = 0; m.los = true; m.flowHold = 99; m.side = 0;
-  m.idle = 0; m.bestDist = 1e9f;
+  m.idle = 0; m.bestDist = 1e9f; m.seen = 0; m.state = MS_HUNT; m.attn = 0;
   return m;
 }
 static void holdTicks(State& s, Mob& m, float x, float y, int ticks) {
   Input idle;
   for (int k = 0; k < ticks; ++k) {
     m.x = x; m.y = y;                 // parked
+    // ...and looked at. Every test that uses this helper is about geometry --
+    // can it reach up a cliff, does a slab stop an arrow -- and none of them is
+    // about whether the player happened to be facing the right way. That was
+    // incidental right up until a mob outside the view cone started hesitating
+    // before it committed, at which point "where the camera points" became a
+    // hidden variable in all of them. Pinned here rather than in each test, so
+    // there is one place that says why.
+    s.angle = atan2f(y - s.cam.py, x - s.cam.px);
+    raycast::setAngle(s.cam, s.angle);
     s.phaseTick = 0;                  // never reach dusk
     s.cam.z = (float)world::groundAt(s.cam.px, s.cam.py) + raycast::EYE;
     tick(s, idle);
@@ -1365,6 +1549,264 @@ static void test_player_cannot_swing_down_a_pillar(void) {
     tick(s, act);
   }
   TEST_ASSERT_EQUAL_INT16(mhp, m.hp);
+}
+
+// A mob that has lost you stops pretending it has not.
+static void test_mobs_that_lose_you_stop_hunting(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  s.phase = PH_NIGHT;
+
+  Mob& m = lone(s, MOB_ZOMBIE, s.cam.px + 2.0f, s.cam.py);
+  m.state = MS_HUNT;
+  m.attn = 0;
+
+  // Blind it: no line of sight, and far enough that nothing else notices for
+  // it. lone() parks flowHold high, so it will not path its way back either.
+  for (int k = 0; k < 60 * 20; ++k) {
+    m.x = s.cam.px + 30.0f; m.y = s.cam.py;
+    m.los = false;
+    s.noise = 0;                        // and the player is being quiet
+    s.phaseTick = 0;
+    tick(s, idle);
+    if (m.state != MS_HUNT) break;
+  }
+  TEST_ASSERT_TRUE(m.state != MS_HUNT);
+}
+
+// ...and one that has not found you does not walk at you. Both halves matter:
+// asserting only that it moved passes on a beeline, and asserting only that it
+// did not close passes on a corpse.
+static void test_a_wandering_mob_does_not_beeline(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  s.phase = PH_NIGHT;
+
+  Mob& m = lone(s, MOB_ZOMBIE, s.cam.px + 15.0f, s.cam.py);
+  m.los = false;
+  m.flowHold = 0;
+  m.state = MS_WANDER;
+  m.repos = 0;
+
+  const float x0 = m.x, y0 = m.y;
+  const float d0 = sqrtf((x0 - s.cam.px) * (x0 - s.cam.px) +
+                         (y0 - s.cam.py) * (y0 - s.cam.py));
+  const float walk0 = m.walk;
+  for (int k = 0; k < 60 * 20; ++k) {
+    m.los = false;                      // never gets a look at the player
+    s.noise = 0;
+    s.phaseTick = 0;
+    tick(s, idle);
+    if (!m.alive) break;
+  }
+  TEST_ASSERT_TRUE(m.alive);            // and it was not culled for wandering
+  TEST_ASSERT_TRUE(m.walk - walk0 > 2.0f);   // it is alive and moving...
+  const float d1 = sqrtf((m.x - s.cam.px) * (m.x - s.cam.px) +
+                         (m.y - s.cam.py) * (m.y - s.cam.py));
+  TEST_ASSERT_TRUE(fabsf(d1 - d0) < 6.0f);   // ...and not converging
+}
+
+// The regression guard on the stuck counter. A wanderer makes no progress
+// toward the player by design, and the give-up rule used to read that as a mob
+// that had failed and cull it.
+static void test_a_wandering_mob_is_not_despawned_for_wandering(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  s.phase = PH_NIGHT;
+
+  Mob& m = lone(s, MOB_ZOMBIE, s.cam.px + 12.0f, s.cam.py);
+  m.los = false;
+  m.state = MS_WANDER;
+  m.repos = 0;
+  for (int k = 0; k < 60 * 25; ++k) {   // comfortably past STUCK_TICKS
+    m.los = false;
+    s.noise = 0;
+    s.phaseTick = 0;
+    tick(s, idle);
+  }
+  TEST_ASSERT_TRUE(m.alive);
+}
+
+// Noise is the only way to be noticed that the player chooses. A mob that
+// cannot see you still comes to look when you dig.
+static void test_a_mob_comes_to_look_when_you_are_loud(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  s.phase = PH_NIGHT;
+
+  Mob& m = lone(s, MOB_ZOMBIE, s.cam.px + 6.0f, s.cam.py);
+  m.los = false;
+  m.state = MS_WANDER;
+  m.repos = 100;
+
+  for (int k = 0; k < 60 * 3; ++k) {
+    m.los = false;
+    s.noise = NOISE_TICKS;              // as though the player were mining
+    s.phaseTick = 0;
+    tick(s, idle);
+    if (m.state == MS_HUNT) break;
+  }
+  TEST_ASSERT_EQUAL_UINT8(MS_HUNT, m.state);
+}
+
+// Parks a zombie at melee range and points the camera either at it or away,
+// then counts the ticks until it lands a blow. Returns -1 if it never does.
+static int ticksToFirstBlow(bool facing, bool& telegraphedFirst) {
+  State s = fresh();
+  survivable(s);
+  s.phase = PH_NIGHT;
+  Input idle;
+
+  const float mx = s.cam.px + 1.0f, my = s.cam.py;
+  Mob& m = lone(s, MOB_ZOMBIE, mx, my);
+  m.state = MS_HUNT;
+
+  // Straight at it, or straight away from it.
+  s.angle = atan2f(my - s.cam.py, mx - s.cam.px) + (facing ? 0.0f : 3.14159265f);
+  raycast::setAngle(s.cam, s.angle);
+
+  telegraphedFirst = false;
+  bool sawTelegraph = false;
+  for (int k = 0; k < 60 * 30; ++k) {
+    m.x = mx; m.y = my;                 // parked in reach
+    m.los = true;
+    s.phaseTick = 0;
+    const uint32_t ev = tick(s, idle);
+    if (ev & EV_TELEGRAPH) sawTelegraph = true;
+    if (ev & EV_HURT) { telegraphedFirst = sawTelegraph; return k; }
+  }
+  return -1;
+}
+
+// The numeric content of "forgiving": a blow from behind still arrives, and
+// still announces itself, but it takes longer to get there.
+static void test_a_mob_behind_you_is_slower_to_land_a_blow(void) {
+  bool warnedFacing = false, warnedAway = false;
+  const int facing = ticksToFirstBlow(true, warnedFacing);
+  const int away   = ticksToFirstBlow(false, warnedAway);
+
+  TEST_ASSERT_TRUE(facing >= 0);
+  TEST_ASSERT_TRUE(away >= 0);          // it is NOT a veto -- see below
+  TEST_ASSERT_TRUE(warnedFacing);
+  TEST_ASSERT_TRUE(warnedAway);         // and it is announced either way
+  TEST_ASSERT_TRUE(away > facing);
+}
+
+// The other half, and the reason the rule is a multiplier rather than a veto.
+// If turning your back made you immortal, the optimal way to survive a night
+// would be to face a wall and stop playing.
+static void test_looking_away_does_not_make_you_immortal(void) {
+  State s = fresh();
+  s.hp = s.maxHp = 500;
+  s.phase = PH_NIGHT;
+  Input idle;
+
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+  const float mx = s.cam.px + 1.0f, my = s.cam.py;
+  for (int i = 0; i < 3; ++i) {
+    Mob& m = s.mobs[i];
+    m = Mob{};
+    m.alive = true; m.kind = MOB_ZOMBIE; m.hp = 999;
+    m.x = mx; m.y = my; m.z = world::groundAt(mx, my);
+    m.bestDist = 99.0f; m.flowHold = 99; m.state = MS_HUNT;
+  }
+  // Facing squarely away for the whole window.
+  s.angle = atan2f(my - s.cam.py, mx - s.cam.px) + 3.14159265f;
+  raycast::setAngle(s.cam, s.angle);
+
+  const int16_t hp0 = s.hp;
+  for (int k = 0; k < 60 * 30; ++k) {
+    for (int i = 0; i < 3; ++i) { s.mobs[i].x = mx; s.mobs[i].y = my; s.mobs[i].los = true; }
+    s.phaseTick = 0;
+    tick(s, idle);
+  }
+  TEST_ASSERT_TRUE(s.hp < hp0 - 10);
+}
+
+// The heading the renderer picks a view from is smoothed toward the way the mob
+// is walking, and smoothing two vectors that disagree SHORTENS the result. Left
+// unnormalised it would shrink over a night until every mob quietly locked to
+// its front view -- which would look like the directional art not working
+// rather than like a bug with a cause.
+static void test_mob_headings_stay_normalised(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);
+  run(s, idle, 60 * 60);
+
+  int checked = 0;
+  for (int i = 0; i < MAX_MOBS; ++i) {
+    const Mob& m = s.mobs[i];
+    if (!m.alive) continue;
+    if (m.hx == 0 && m.hy == 0) continue;      // never moved; drawn front-on
+    const float len = sqrtf((float)m.hx * m.hx + (float)m.hy * m.hy);
+    TEST_ASSERT_TRUE(len > 119.0f && len < 135.0f);   // 127, give or take rounding
+    ++checked;
+  }
+  TEST_ASSERT_TRUE(checked > 0);
+}
+
+// ---- which way a mob is drawn facing ----------------------------------------
+//
+// This was wrong on the first attempt and there was no way to prove it from
+// here: every mob simply drew front-on and the only instrument was a photograph
+// of the device. The rule lives in facing.h now so it can be asked directly.
+static void test_a_mob_walking_at_you_is_drawn_front_on(void) {
+  bool flip = true;
+  // Camera at the origin, mob 5 cells north, heading south -- straight at us.
+  TEST_ASSERT_EQUAL_UINT8(facing::V_FRONT,
+                          facing::pickView(0, -127, 0.0f, 5.0f, flip));
+  TEST_ASSERT_FALSE(flip);
+}
+
+static void test_a_mob_walking_away_is_drawn_from_behind(void) {
+  bool flip = true;
+  // Same mob, heading north -- away from us.
+  TEST_ASSERT_EQUAL_UINT8(facing::V_BACK,
+                          facing::pickView(0, 127, 0.0f, 5.0f, flip));
+  TEST_ASSERT_FALSE(flip);
+}
+
+// ...and the two side cases, which have to pick opposite mirrors or the side
+// view is drawn walking backwards half the time.
+static void test_a_mob_crossing_is_drawn_in_profile_and_mirrored_by_side(void) {
+  bool leftFlip = false, rightFlip = false;
+  const facing::View a = facing::pickView(127, 0, 0.0f, 5.0f, rightFlip);
+  const facing::View b = facing::pickView(-127, 0, 0.0f, 5.0f, leftFlip);
+  TEST_ASSERT_EQUAL_UINT8(facing::V_SIDE, a);
+  TEST_ASSERT_EQUAL_UINT8(facing::V_SIDE, b);
+  TEST_ASSERT_TRUE(rightFlip != leftFlip);
+}
+
+// A mob that has never taken a step has no heading to draw from.
+static void test_a_mob_that_has_never_moved_is_drawn_front_on(void) {
+  bool flip = true;
+  TEST_ASSERT_EQUAL_UINT8(facing::V_FRONT,
+                          facing::pickView(0, 0, 3.0f, 4.0f, flip));
+  TEST_ASSERT_FALSE(flip);
+}
+
+// The quadrants have to tile the circle: sweeping a heading all the way round
+// must hit all three views and never fall through a gap.
+static void test_every_heading_picks_a_view(void) {
+  int seen[3] = {0, 0, 0};
+  for (int deg = 0; deg < 360; ++deg) {
+    const float a = (float)deg * 3.14159265f / 180.0f;
+    const int hx = (int)(cosf(a) * 127.0f), hy = (int)(sinf(a) * 127.0f);
+    if (hx == 0 && hy == 0) continue;
+    bool flip = false;
+    const facing::View v = facing::pickView(hx, hy, 0.0f, 5.0f, flip);
+    TEST_ASSERT_TRUE(v <= facing::V_BACK);
+    ++seen[v];
+  }
+  for (int i = 0; i < 3; ++i) TEST_ASSERT_TRUE(seen[i] > 0);
+  // The side view owns half the circle, front and back a quarter each.
+  TEST_ASSERT_TRUE(seen[facing::V_SIDE] > seen[facing::V_FRONT]);
 }
 
 // A creeper at the foot of a pillar must not blast the player on top of it.
@@ -2050,6 +2492,20 @@ int main(int, char**) {
   RUN_TEST(test_mobs_do_not_stack_on_each_other);
   RUN_TEST(test_attacks_are_telegraphed);
   RUN_TEST(test_walling_in_summons_creepers);
+  RUN_TEST(test_the_dark_still_finds_you);
+  RUN_TEST(test_mobs_that_lose_you_stop_hunting);
+  RUN_TEST(test_a_wandering_mob_does_not_beeline);
+  RUN_TEST(test_a_wandering_mob_is_not_despawned_for_wandering);
+  RUN_TEST(test_a_mob_comes_to_look_when_you_are_loud);
+  RUN_TEST(test_a_creeper_under_siege_never_wanders);
+  RUN_TEST(test_a_mob_behind_you_is_slower_to_land_a_blow);
+  RUN_TEST(test_looking_away_does_not_make_you_immortal);
+  RUN_TEST(test_mob_headings_stay_normalised);
+  RUN_TEST(test_a_mob_walking_at_you_is_drawn_front_on);
+  RUN_TEST(test_a_mob_walking_away_is_drawn_from_behind);
+  RUN_TEST(test_a_mob_crossing_is_drawn_in_profile_and_mirrored_by_side);
+  RUN_TEST(test_a_mob_that_has_never_moved_is_drawn_front_on);
+  RUN_TEST(test_every_heading_picks_a_view);
   RUN_TEST(test_mining_files_drops_by_material);
   RUN_TEST(test_hotbar_cycles_and_wraps);
   RUN_TEST(test_a_run_starts_with_empty_hands);
@@ -2085,6 +2541,10 @@ int main(int, char**) {
   RUN_TEST(test_a_drop_expires);
   RUN_TEST(test_the_drop_array_never_refuses_a_throw);
   RUN_TEST(test_patch_heals_without_overhealing);
+  RUN_TEST(test_a_creeper_killed_before_its_fuse_drops_a_heart);
+  RUN_TEST(test_a_creeper_that_detonates_leaves_nothing);
+  RUN_TEST(test_a_heart_heals_on_contact_and_takes_no_slot);
+  RUN_TEST(test_a_heart_is_left_where_it_lies_at_full_health);
   RUN_TEST(test_torches_keep_the_ground_clear);
   RUN_TEST(test_lava_burns_on_a_timer);
   RUN_TEST(test_hopeless_mobs_give_their_slot_back);

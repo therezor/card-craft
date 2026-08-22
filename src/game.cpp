@@ -75,8 +75,29 @@ constexpr float MIN_SPAWN_DIST= 11.0f;
 constexpr int   CREEPER_BLAST = 2;       // radius, in cells
 constexpr float KNOCKBACK     = 0.55f;   // cells a mob is shoved by a landed hit
 constexpr int   BURN_PERIOD   = 24;      // ticks between lava ticks, for anything standing in it
+
+// ---- the heart --------------------------------------------------------------
+// HEART_HEAL is in game.h, beside the item id: how much a heart is worth is a
+// fact about the item rather than about this file, and the host tests assert on
+// it directly.
+//
+// Ticks before it can be collected. Longer than a thrown item's DROP_ARM: the
+// player is usually standing on top of a creeper when it dies, and a heart that
+// vanishes on the same tick the corpse does is one the player never saw and
+// cannot learn to want.
+constexpr uint8_t HEART_ARM  = 12;      // 0.2 s
+constexpr float   HEART_LOFT = 2.0f;    // cells/second, popped up off the body
 constexpr uint16_t STUCK_TICKS = 15 * TICK_HZ;   // give up after this long going nowhere
 constexpr float STUCK_DIST     = 8.0f;           // ...but only this far out
+
+// How a mob spends a reposition. This is the whole of its personality on the
+// field, and it is a table column rather than three branches inside updateMob
+// because "what is a skeleton like" should be readable in one place.
+enum ReposMode : uint8_t {
+  RM_STAND,    // stands there and thinks about it -- the zombie's shamble
+  RM_STRAFE,   // sidesteps along its circling direction -- the skeleton, post-shot
+  RM_BACK,     // walks straight away -- the creeper, having thought better of it
+};
 
 struct MobInfo {
   int16_t  hp;
@@ -86,16 +107,29 @@ struct MobInfo {
   int16_t  damage;
   uint16_t cooldown;   // ticks between attacks, or fuse length
   uint16_t windup;     // ticks of committed telegraph before the blow lands
+  // ---- what it is like ------------------------------------------------------
+  float    sight;      // how far it can spot the player, given a clear line
+  float    kite;       // closer than this and it backs off; 0 = never
+  uint16_t aggroHold;  // ticks it keeps hunting after losing sight of them
+  uint8_t  hesitate;   // ticks one reposition lasts
+  uint8_t  balkOdds;   // per cent per SECOND of repositioning unprompted
+  uint8_t  reposMode;  // ReposMode
 };
 
 // standoff is deliberately just outside range: a mob that walks all the way
 // into the player fills the screen, hides what is behind it, and reads as a
 // bug. Holding at arm's length and circling reads as intent.
+// The skeleton has the longest sight because it has the longest range: a thing
+// that shoots from seven cells and cannot see seven cells never shoots. The
+// creeper holds a grudge longest, because a stalker that forgets you in four
+// seconds is not stalking anything. And the zombie is the only kind that balks
+// unprompted -- it is the only one whose hesitation is characterful rather than
+// tactical, because the other two stop for a reason.
 static const MobInfo kMob[MOB_COUNT] = {
-  //  hp  speed  range  stand  dmg  cooldown  windup
-  {   3,  1.35f, 1.35f, 1.25f,   1,  50,  16 },   // zombie   — the baseline pressure
-  {   2,  1.85f, 1.90f, 1.35f,   4,  75,   0 },   // creeper  — fuse is its own telegraph
-  {   2,  1.05f, 7.00f, 4.50f,   1, 130,  26 },   // skeleton — outranges you, draws first
+  //  hp  speed  range  stand  dmg  cool  wind | sight  kite   hold          hes balk repos
+  {   3,  1.35f, 1.80f, 1.60f,   1,  50,   16,   10.0f, 0.0f,  6 * TICK_HZ,  40,  25, RM_STAND  },
+  {   2,  1.85f, 2.15f, 1.75f,   4,  75,    0,   12.0f, 0.0f, 10 * TICK_HZ,  70,   0, RM_BACK   },
+  {   2,  1.05f, 7.00f, 5.20f,   1, 130,   26,   14.0f, 3.2f,  4 * TICK_HZ,  45,   0, RM_STRAFE },
 };
 
 constexpr float SEPARATION_R = 1.05f;   // how far mobs hold off each other
@@ -112,6 +146,53 @@ constexpr uint16_t CREEPER_PRESS_TICKS = 90;    // 1.5 s
 // A siege is a trickle, not a flood. Left uncapped it fills the mob array with
 // creepers that hold each OTHER at arm's length — see the same branch.
 constexpr int SIEGE_CAP = 4;
+
+// ---- awareness ---------------------------------------------------------------
+// Close enough to notice whatever the light is doing -- footsteps, or a body
+// blundering into yours in the dark. Without it a mob on the far side of a
+// doorway you are pressed against never reacts, which reads as blindness rather
+// than as stealth.
+constexpr float    AGGRO_NEAR   = 3.0f;
+// NOISE_TICKS is in game.h, beside the State::noise field it fills: how long
+// the player stays loud is part of that field's contract rather than a private
+// fact of this file, and the host tests set it directly.
+constexpr float    HEAR_DIST    = 10.0f;
+// Arrived at the cell it thought you were in. Loose, because the memory is a
+// cell and a cell is a whole block wide.
+constexpr float    ALERT_ARRIVE = 1.6f;
+constexpr float    ALERT_SPEED  = 0.85f;   // heading somewhere, not chasing
+
+// ---- being forgiving ---------------------------------------------------------
+// The camera plane is PLANE_LEN half-widths across at unit distance, so the
+// edge of the panel sits at atan(0.75) = 36.9 degrees off the look direction
+// and its cosine is 1/sqrt(1 + PLANE_LEN^2) = 0.800 exactly. This is
+// deliberately a little wider than that: a mob half off the edge of the screen
+// has still been seen, and a boundary drawn exactly at the panel edge would
+// flicker every time one straddled it.
+constexpr float    SEEN_COS   = 0.72f;    // ~44 degrees
+constexpr float    SEEN_DIST  = 12.0f;    // past the fog it is a shape, not a mob
+// What "forgiving" is worth, numerically. A blow from behind winds up almost
+// twice as slowly, comes round half again as rarely, and is abandoned outright
+// about half the time it is considered.
+constexpr uint32_t UNSEEN_BALK_PCT   = 45;
+constexpr uint16_t UNSEEN_BALK_TICKS = 25;
+constexpr float    UNSEEN_WINDUP_MUL = 1.75f;
+constexpr float    UNSEEN_COOL_MUL   = 1.60f;
+
+// ---- wandering ---------------------------------------------------------------
+constexpr int      WANDER_RADIUS = 6;      // cells, either axis
+constexpr int      WANDER_LEG    = 240;    // 4 s, and it has to fit in one byte
+static_assert(WANDER_LEG <= 255, "Mob::repos is one byte");
+constexpr float    WANDER_ARRIVE = 0.7f;
+constexpr float    WANDER_SPEED  = 0.55f;  // a drift, not a march
+
+// ---- facing ------------------------------------------------------------------
+// How fast a mob's drawn heading catches up with the way it is actually walking.
+// Smoothed rather than snapped to the step just taken: separation and the
+// standoff circle jitter the per-tick movement vector by tens of degrees, and a
+// sprite that swaps between its side view and its back view every other frame
+// reads as a flicker rather than as a turn. About a 0.14 s time constant.
+constexpr float    FACE_SMOOTH   = 0.12f;
 
 static uint32_t s_aiTick = 0;
 
@@ -433,7 +514,24 @@ static uint32_t updateDrops(State& s) {
     // stays exactly where it is and you walk over it again. Refusing quietly is
     // the right answer: the item is visible, so the player can already see that
     // something is not happening and why.
-    if (isTool(d.item)) {
+    // A heart is spent on contact rather than carried: no slot, no count,
+    // nothing to select. This has to come before both branches below, because
+    // giveItem's own bounds test would refuse an id this far past B_COUNT and
+    // the heart would simply lie there until it expired.
+    if (d.item == ITEM_HEART) {
+      // Refused at full health, and left exactly where it lies -- the same rule
+      // a full bar follows for a material it cannot take, and for the same
+      // reason: the item is visible, so the player can already see that nothing
+      // happened. It also makes a heart something you can leave banked for a
+      // minute and a half and come back for, which is worth more than two
+      // hearts of overheal that go nowhere.
+      if (s.hp >= s.maxHp) continue;
+      s.hp = (int16_t)(s.hp + HEART_HEAL);
+      if (s.hp > s.maxHp) s.hp = s.maxHp;
+      d.alive = false;
+      spark(s, SP_HEART, d.x, d.y, d.z, 0, 140);
+      ev |= EV_PICKUP | EV_HEAL;
+    } else if (isTool(d.item)) {
       for (int k = 0; k < SLOT_N; ++k) {
         if (s.slot[k] != SLOT_EMPTY) continue;
         s.slot[k] = d.item;
@@ -868,9 +966,15 @@ static uint8_t pickKind(State& s) {
   // from a counter rather than from the dark. Minecraft's night one has all
   // three in it, and what makes a later night harder is that you are further
   // from home and deeper in a hole.
+  // Weighted toward the zombie. It was 45/30/25, and the two rarer kinds were
+  // both doing more work than their share: a creeper's mistake compounds --
+  // it takes the floor with it, and the crater is still there at dawn -- and a
+  // skeleton at seven cells is pressure a player often has no answer to at all.
+  // The zombie is the one you can read, the one you can back away from, and
+  // now the only one you meet more often than not.
   const uint32_t r = nextRand(s) % 100u;
-  if (r < 45) return MOB_ZOMBIE;
-  if (r < 75) return MOB_SKELETON;
+  if (r < 60) return MOB_ZOMBIE;
+  if (r < 82) return MOB_SKELETON;
   return MOB_CREEPER;
 }
 
@@ -930,6 +1034,25 @@ static bool spawnMob(State& s) {
     // mobs would all moan on the same tick for the whole night.
     m.press = 0;
     m.voice = (uint16_t)(TICK_HZ + nextRand(s) % (uint32_t)(5 * TICK_HZ));
+
+    // Not a fresh Mob{} -- this slot held a corpse a moment ago, and every
+    // field not named here is whatever that corpse left behind.
+    //
+    // MS_ALERT, not MS_HUNT and not MS_WANDER. Spawned hunting, nothing has
+    // changed; spawned wandering, the night never arrives, because eleven cells
+    // at WANDER_SPEED is not a wave. ALERT is the shape that is actually true:
+    // it knows roughly where you are, it is walking there, and if you have
+    // moved by the time it gets there it will have to start looking.
+    m.state = MS_ALERT;
+    m.memX  = (uint8_t)s.cam.px;
+    m.memY  = (uint8_t)s.cam.py;
+    m.attn  = 0;
+    m.repos = 0;
+    m.seen  = 0;
+    m.hx = m.hy = 0;      // never moved; the renderer draws it front-on
+    // Was missing here before any of this: a recycled slot inherited the last
+    // occupant's stride and started mid-step.
+    m.walk  = 0.0f;
     return true;
   }
   return false;
@@ -1090,6 +1213,34 @@ static uint32_t updateArrows(State& s) {
   return ev;
 }
 
+// A place to go that is not the player.
+//
+// Deliberately NOT the flow field. That field is a BFS out of the player's own
+// cell, so descending it is by definition walking at the player; using it here
+// would make wandering a slower beeline and nothing else. Four tries at a
+// standable cell within WANDER_RADIUS, and if none of them is -- a mob at the
+// bottom of a crater, say -- it stands where it is for the leg, which is a
+// perfectly reasonable thing for a mob in a hole to do.
+//
+// Draws from State::rng, so a wandering night replays identically on the host.
+// It also shifts every downstream random in a seeded run, which is worth
+// knowing before re-baselining a test that used to pass.
+static void pickWander(State& s, Mob& m) {
+  m.state = MS_WANDER;
+  m.repos = (uint8_t)WANDER_LEG;
+  for (int t = 0; t < 4; ++t) {
+    const int span = 2 * WANDER_RADIUS + 1;
+    const int tx = (int)m.x + (int)(nextRand(s) % (uint32_t)span) - WANDER_RADIUS;
+    const int ty = (int)m.y + (int)(nextRand(s) % (uint32_t)span) - WANDER_RADIUS;
+    if ((unsigned)tx >= (unsigned)world::W) continue;
+    if ((unsigned)ty >= (unsigned)world::H) continue;
+    if (world::isBorder(tx, ty) || !world::standable(tx, ty)) continue;
+    m.memX = (uint8_t)tx; m.memY = (uint8_t)ty;
+    return;
+  }
+  m.memX = (uint8_t)m.x; m.memY = (uint8_t)m.y;
+}
+
 static uint32_t updateMob(State& s, int idx) {
   Mob& m = s.mobs[idx];
   uint32_t ev = 0;
@@ -1128,6 +1279,90 @@ static uint32_t updateMob(State& s, int idx) {
     m.los = lineOfSight(m.x, m.y, mz, s.cam.px, s.cam.py, s.cam.z);
   }
 
+  // Whether the player is looking back. (dx, dy) runs from the mob to the
+  // player, so the eye-to-mob direction is its negation.
+  //
+  // Every tick, unlike the line of sight above. That stagger is there because
+  // lineOfSight walks a segment and was the one piece of mob work that showed
+  // up in the frame time; this is two multiplies. It also has to be fresh: the
+  // player can spin a long way in six ticks, and a mob that commits to a blow
+  // on the tick it spawns would otherwise read a `seen` left behind by whatever
+  // last occupied the slot -- which is exactly how the first version of this
+  // came out identical whichever way the camera was pointed.
+  //
+  // Yaw only, deliberately. Pitch on this projection is a vertical shear, so
+  // folding it in would mean looking at the floor marked everything unseen -- a
+  // one-key exploit on a board that has pitch keys. What this measures is which
+  // way the player is FACING, which is the thing they have to choose to point.
+  {
+    const float look = (-dx * invD) * s.cam.dx + (-dy * invD) * s.cam.dy;
+    m.seen = (uint8_t)(m.los && dist < SEEN_DIST && look > SEEN_COS);
+  }
+
+  // -- what it thinks is going on ----------------------------------------------
+  //
+  // Mobs used to have exactly one idea, held from the tick they spawned to the
+  // tick they died: the player is over there. Everything below is the machinery
+  // for them to be wrong about that, which is what makes a night something you
+  // can hide from rather than a countdown.
+  const bool siege = s.sealedTicks > SEALED_TRIGGER;
+  {
+    if (m.los) m.attn = 0;
+    else if (m.attn < 0xFFF0) ++m.attn;
+    if (m.repos) --m.repos;
+
+    // A sealed-in player has opted out of all of this. The siege is the answer
+    // to turtling (see pickKind), and a creeper that wandered off to look at
+    // the scenery is not an answer to anything: it cannot see the player by
+    // construction, so every rule below that keys off sight would send it away
+    // from the wall it was sent to break. test_walling_in_summons_creepers is
+    // the guard on this line, and it is why the line is first.
+    if (siege) {
+      m.state = MS_HUNT;
+    } else if (m.windup) {
+      // Committed. Whatever it was thinking, it is hitting you.
+    } else if (m.state == MS_HUNT) {
+      if (m.attn > mi.aggroHold) {
+        m.state = MS_ALERT;
+        m.memX = (uint8_t)s.cam.px;      // where you were, not where you are
+        m.memY = (uint8_t)s.cam.py;
+      } else if (m.repos == 0 && mi.balkOdds &&
+                 (nextRand(s) % (100u * (uint32_t)TICK_HZ)) < mi.balkOdds) {
+        // The shamble. balkOdds is per cent per SECOND, so the roll is against
+        // 100 * TICK_HZ -- written any other way a 25 reads as 25-in-100 every
+        // tick, which is fifteen hesitations a second and a mob that never
+        // arrives.
+        m.state = MS_REPOSITION;
+        m.repos = mi.hesitate;
+      }
+    } else if (m.state == MS_REPOSITION) {
+      if (m.repos == 0) m.state = MS_HUNT;
+    } else {
+      // Heard, or seen. Noise is the interesting one: it is the only way to be
+      // noticed that the player controls, and it is why mining at night costs
+      // something now.
+      const bool heard  = s.noise && dist < HEAR_DIST;
+      const bool spotted = (m.los && dist < mi.sight) || dist < AGGRO_NEAR;
+      if (spotted || heard) {
+        m.state = MS_HUNT;
+        m.attn  = 0;
+        if (!spotted) {                  // heard but not seen: go and look
+          m.memX = (uint8_t)s.cam.px;
+          m.memY = (uint8_t)s.cam.py;
+        }
+      } else if (m.state == MS_ALERT) {
+        const float ax = ((float)m.memX + 0.5f) - m.x;
+        const float ay = ((float)m.memY + 0.5f) - m.y;
+        // Arrived where it thought you were, and you are not there. From here
+        // it has nothing to go on, so it looks around instead of continuing to
+        // walk at a player it cannot see -- which is the entire point.
+        if (ax * ax + ay * ay < ALERT_ARRIVE * ALERT_ARRIVE) pickWander(s, m);
+      } else if (m.repos == 0) {
+        pickWander(s, m);                // leg finished, or the target reached
+      }
+    }
+  }
+
   // -- committed blows ---------------------------------------------------------
   // A blow that lands the instant a mob is in range is unreadable and feels
   // unfair. Every attack is announced, holds the mob still while it commits,
@@ -1147,13 +1382,20 @@ static uint32_t updateMob(State& s, int idx) {
         const bool stillThere = reachOf(s, m, dist) <= mi.range + PLAYER_RADIUS;
         if (stillThere) ev |= hurtPlayer(s, mi.damage);
       }
-      m.timer = mi.cooldown;
+      m.timer = m.seen ? mi.cooldown
+                       : (uint16_t)(mi.cooldown * UNSEEN_COOL_MUL + 0.5f);
     }
     return ev;                      // committed: no steering this tick
   }
 
+  // Only a mob that has actually found you attacks. A wandering creeper that
+  // fused on proximity would make wandering the most dangerous state in the
+  // game, and an ALERT mob is by definition one that does not know where you
+  // are -- walking into it should be your mistake to make, not its ambush.
+  const bool engaged = (m.state == MS_HUNT);
+
   bool lunging = false;
-  if (m.kind == MOB_CREEPER) {
+  if (m.kind == MOB_CREEPER && engaged) {
     // How long it has been near the player without managing to arrive. In the
     // open this never matters: a creeper crosses the gap from PRESS_REACH to
     // its own range in under a second, so it fuses on range as it always did.
@@ -1178,14 +1420,56 @@ static uint32_t updateMob(State& s, int idx) {
       m.timer = mi.cooldown;
       ev |= EV_HISS;
     }
-  } else if (!m.timer && reach < mi.range && (m.kind != MOB_SKELETON || m.los)) {
-    m.windup = mi.windup;
-    ev |= EV_TELEGRAPH;
-    if (m.windup) return ev;
+  } else if (engaged && !m.timer && reach < mi.range &&
+             (m.kind != MOB_SKELETON || m.los)) {
+    if (!m.seen && (nextRand(s) % 100u) < UNSEEN_BALK_PCT) {
+      // Thought about it and did not. No event, because nothing happened.
+      //
+      // Written to `timer`, which for a zombie and a skeleton is the attack
+      // cooldown. It is NOT reachable for a creeper -- the branch above owns
+      // that kind -- and it must never become reachable, because a creeper's
+      // timer is its fuse and "hesitating" one would light it.
+      m.timer = UNSEEN_BALK_TICKS;
+    } else {
+      // Slower to swing when you are not looking. Not forbidden from swinging:
+      // a hard veto would make facing a wall the whole answer to a night, and
+      // it would disarm every siege creeper besides, since one on the far side
+      // of your wall cannot be seen by construction.
+      m.windup = m.seen ? mi.windup
+                        : (uint16_t)(mi.windup * UNSEEN_WINDUP_MUL + 0.5f);
+      // Announced whether or not it can be seen, and this line is load-bearing.
+      // The telegraph is a SOUND before it is an animation -- it is the only
+      // warning the player gets for something behind them -- so silencing it
+      // for exactly the mobs they cannot see would take the warning away from
+      // the one case that needs it. test_attacks_are_telegraphed is the guard,
+      // and nothing in this file may write `windup` without raising this on the
+      // same statement.
+      ev |= EV_TELEGRAPH;
+      if (m.windup) return ev;
+    }
   }
 
   // -- steering ----------------------------------------------------------------
   float wantX = 0.0f, wantY = 0.0f;
+  float speed = mi.speed;
+
+  if (m.state == MS_WANDER) {
+    const float tx = ((float)m.memX + 0.5f) - m.x;
+    const float ty = ((float)m.memY + 0.5f) - m.y;
+    const float tl = sqrtf(tx * tx + ty * ty);
+    if (tl > WANDER_ARRIVE) { wantX = tx / tl; wantY = ty / tl; }
+    else m.repos = 0;                      // arrived: a fresh leg next tick
+    speed *= WANDER_SPEED;
+  } else if (m.state == MS_REPOSITION) {
+    // What a beat looks like, per kind. See ReposMode.
+    if (mi.reposMode == RM_STRAFE) {
+      const float turn = m.side ? 1.0f : -1.0f;
+      wantX = -dy * invD * turn; wantY = dx * invD * turn;
+    } else if (mi.reposMode == RM_BACK) {
+      wantX = -dx * invD; wantY = -dy * invD;
+    }
+    // RM_STAND leaves want at zero: it simply stops, which is the shamble.
+  } else {
 
   // With a clear line, walk straight at the player. The flow field is a grid,
   // so following it in the open produces a four-directional stagger; it earns
@@ -1224,13 +1508,33 @@ static uint32_t updateMob(State& s, int idx) {
       wantX = dx * invD; wantY = dy * invD;
     }
   }
+  // Going somewhere it half-remembers, not running you down.
+  if (m.state == MS_ALERT) speed *= ALERT_SPEED;
+  }
+
+  // Backing off, not merely holding. The standoff push below eases outward
+  // while still circling; kiting drives straight away and drops the tangential
+  // term entirely, so a skeleton you have walked down actually regains its
+  // range instead of orbiting you at knife distance. mi.kite is 0 for anything
+  // that wants to be in your face.
+  if (mi.kite > 0.0f && dist < mi.kite && m.state == MS_HUNT) {
+    wantX = -dx * invD; wantY = -dy * invD;
+  }
 
   // Inside its standoff a mob circles instead of closing, easing outward if it
   // has been crowded in. A ring of them ends up surrounding the player rather
   // than queueing up in front — the same behaviour that makes them hard to
   // fight one at a time.
+  //
+  // `standoff` has to stay BELOW `range` for anything that means to land a
+  // blow: a mob holds at its standoff, so one set wider than its own reach
+  // orbits forever and never attacks. That is why the two moved together when
+  // the ring was pushed further out -- the GAP between them is the working
+  // margin, and it is the thing to preserve when either is retuned.
+  // Not while wandering: a mob that has not noticed you has no business
+  // orbiting you, and the circle would drag every wanderer into your lap.
   const float standoff = lunging ? mi.standoff * 0.55f : mi.standoff;
-  if (dist < standoff) {
+  if (dist < standoff && m.state != MS_WANDER) {
     const float turn = m.side ? 1.0f : -1.0f;
     const float tanX = -dy * invD * turn, tanY = dx * invD * turn;
     const float push = (standoff - dist) / standoff;
@@ -1246,7 +1550,6 @@ static uint32_t updateMob(State& s, int idx) {
   const float wl = sqrtf(wantX * wantX + wantY * wantY);
   if (wl > 0.001f) { wantX /= wl; wantY /= wl; }
 
-  float speed = mi.speed;
   if (lunging) speed *= CREEPER_LUNGE;
   const float v = speed / (float)TICK_HZ;
 
@@ -1263,6 +1566,30 @@ static uint32_t updateMob(State& s, int idx) {
   // timer. Kept on the mob rather than in the renderer because slots are
   // recycled, and a respawned mob would otherwise inherit a stale stride.
   m.walk += sqrtf((m.x - wasX) * (m.x - wasX) + (m.y - wasY) * (m.y - wasY));
+
+  // Which way it is facing, for the renderer to pick a view with.
+  {
+    float tx = m.x - wasX, ty = m.y - wasY;
+    // A committed blow, or a lit fuse, faces the player outright. Something
+    // winding up at you is looking at you, and it is standing still besides, so
+    // there is nothing else for the heading to follow.
+    if (m.windup || (m.kind == MOB_CREEPER && m.timer)) { tx = dx; ty = dy; }
+    const float tl = sqrtf(tx * tx + ty * ty);
+    if (tl > 1e-4f) {
+      const float nx = (float)m.hx * (1.0f - FACE_SMOOTH)
+                     + tx / tl * 127.0f * FACE_SMOOTH;
+      const float ny = (float)m.hy * (1.0f - FACE_SMOOTH)
+                     + ty / tl * 127.0f * FACE_SMOOTH;
+      // Re-normalised back out to the byte range. Smoothing two vectors that
+      // disagree shortens the result, and repeated over a night it would shrink
+      // to nothing and take all the resolution out of the facing test with it.
+      const float nl = sqrtf(nx * nx + ny * ny);
+      if (nl > 1e-4f) {
+        m.hx = (int8_t)(nx / nl * 127.0f);
+        m.hy = (int8_t)(ny / nl * 127.0f);
+      }
+    }
+  }
 
   // Made no real headway: something is in the way that steering cannot see.
   const float mx = m.x - wasX, my = m.y - wasY;
@@ -1282,7 +1609,14 @@ static uint32_t updateMob(State& s, int idx) {
   // themselves behind is doing exactly what it should be doing.
   const float post = sqrtf((s.cam.px - m.x) * (s.cam.px - m.x)
                          + (s.cam.py - m.y) * (s.cam.py - m.y));
-  if (post < m.bestDist - 0.5f) {
+  //
+  // Only while it is actually trying to arrive. A wandering mob makes no
+  // progress toward the player BY DESIGN, so counting its idleness would
+  // despawn every wanderer fifteen seconds after it spawned and turn the night
+  // into a churn of spawn and give-up.
+  if (m.state != MS_HUNT && m.state != MS_ALERT) {
+    m.idle = 0;
+  } else if (post < m.bestDist - 0.5f) {
     m.bestDist = post;
     m.idle = 0;
   } else if (post > STUCK_DIST && ++m.idle > STUCK_TICKS) {
@@ -1354,6 +1688,13 @@ static uint32_t placeAgainstFace(State& s, uint8_t held) {
 static uint32_t playerAct(State& s) {
   uint32_t ev = 0;
 
+  // Doing anything at all is loud. Every way the player acts on the world --
+  // swinging, mining, building -- comes through here, so this is the one place
+  // that has to say so, and it is what lets a mob notice a player it cannot
+  // see. Set rather than accumulated: what matters is how recently you made a
+  // noise, not how many you made.
+  s.noise = NOISE_TICKS;
+
   // A mob in the swing arc takes priority over the block behind it — otherwise
   // ACT would mine a wall while a zombie chews on you.
   if (!s.swingCooldown) {
@@ -1385,8 +1726,15 @@ static uint32_t playerAct(State& s) {
       // see the miss branch below, which never reaches this.
       if (sword) ev |= wearTool(s);
       m.hitFlash = HIT_FLASH;
+      // Hit, and now it knows exactly where you are. Nothing else in the state
+      // machine outranks being struck.
+      m.state = MS_HUNT;
+      m.attn  = 0;
+      m.repos = 0;
       kick(s, 5);
-      spark(s, SP_HIT, m.x, m.y, (float)m.z + 0.95f, 0, 120);
+      // Full magnitude: the count in render.cpp's emit() is scaled by this, and
+      // at 120 a hit spent less than half the particles it was written for.
+      spark(s, SP_HIT, m.x, m.y, (float)m.z + 0.95f, 0, 255);
       s.sfxHitKind = m.kind;
       ev |= EV_SWING | EV_MOB_HIT;
 
@@ -1407,9 +1755,25 @@ static uint32_t playerAct(State& s) {
         if (m.kind == MOB_CREEPER && m.timer) ev |= detonate(s, m);
         else {
           m.alive = false;
-          spark(s, SP_DEATH, m.x, m.y, (float)m.z + 0.8f, 0, 200);
+          spark(s, SP_DEATH, m.x, m.y, (float)m.z + 0.8f, 0, 255);
           s.sfxDiedKind = m.kind;
           ev |= EV_MOB_DIED;
+          // Cut down before the fuse caught, and that is what it pays for. This
+          // is the only way to get health back after dark -- PATCH wants leaves
+          // and wood, which is an errand for the daylight -- and it is
+          // deliberately payment for reading a creeper early rather than for
+          // killing one at all. One that detonates leaves a crater and nothing
+          // else; see the branch above.
+          //
+          // `m.timer` is what tells the two apart, and it can be trusted to
+          // because nothing in the program writes a creeper's timer except the
+          // fuse. That is an invariant worth keeping rather than a coincidence.
+          //
+          // Not on the lava path either (see updateMob): a heart is payment for
+          // a read, not for a corpse, and lava eats drops anyway.
+          if (m.kind == MOB_CREEPER)
+            spawnDrop(s, ITEM_HEART, 1, 0, m.x, m.y, (float)m.z + 0.8f,
+                      0.0f, 0.0f, HEART_LOFT, HEART_ARM);
         }
       }
       return ev;
@@ -1495,6 +1859,7 @@ uint32_t tick(State& s, const Input& in) {
   if (s.swingCooldown) --s.swingCooldown;
   if (s.hurtFlash)     --s.hurtFlash;
   if (s.iframes)       --s.iframes;
+  if (s.noise)         --s.noise;
   if (s.shake)         --s.shake;
   for (int i = 0; i < MAX_MOBS; ++i)
     if (s.mobs[i].hitFlash) --s.mobs[i].hitFlash;
@@ -1739,6 +2104,13 @@ uint32_t tick(State& s, const Input& in) {
     if (--m.voice) continue;
     m.voice = (uint16_t)(3 * TICK_HZ + nextRand(s) % (uint32_t)(7 * TICK_HZ));
     if (ev & EV_MOB_IDLE) continue;              // one voice a tick
+    // The creeper says nothing. There is no creeper idle cue and there never
+    // was -- sfx.cpp's kMobIdle quietly hands index 1 the ZOMBIE moan -- so
+    // until now a creeper in the dark announced itself in another mob's voice,
+    // which is worse than announcing itself not at all. Silence is also the
+    // right characterisation: the hiss should be the first thing you ever hear
+    // from one, and it should arrive far too late.
+    if (m.kind == MOB_CREEPER) continue;
     // Only within earshot. A moan from a mob on the far side of the map is a
     // sound with no information in it.
     const float dx = m.x - s.cam.px, dy = m.y - s.cam.py;
