@@ -174,7 +174,7 @@ static void test_the_selection_extent_brackets_the_selected_spans(void) {
   Camera c = atSpawn(0.4f);
 
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 6.0f, hit));
+  TEST_ASSERT_TRUE(pick(c, 7.0f, hit));
 
   int seen = 0;
   for (int x = 0; x < VIEW_W; ++x) {
@@ -499,7 +499,7 @@ static void test_selection_marks_only_the_top_block(void) {
   world::generate(88);
   Camera c = atSpawn(0.0f);
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 6.0f, hit));
+  TEST_ASSERT_TRUE(pick(c, 7.0f, hit));
 
   Span spans[MAX_SPANS];
   ColumnResult res;
@@ -527,11 +527,11 @@ static void test_aim_lands_within_reach_on_flat_ground(void) {
   world::generate(88);
   Camera c = atSpawn(0.0f);
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 6.0f, hit));
+  TEST_ASSERT_TRUE(pick(c, 7.0f, hit));
   TEST_ASSERT_TRUE((hit.face == F_TOP));                       // came down onto open ground
   const float d = sqrtf(((float)hit.x + 0.5f - c.px) * ((float)hit.x + 0.5f - c.px)
                       + ((float)hit.y + 0.5f - c.py) * ((float)hit.y + 0.5f - c.py));
-  TEST_ASSERT_TRUE(d < 6.0f);
+  TEST_ASSERT_TRUE(d < 7.0f);
   const float expected = EYE * PROJ / (float)TILT;
   TEST_ASSERT_TRUE(fabsf(d - expected) < 1.5f);
 }
@@ -546,7 +546,7 @@ static void test_pick_reports_a_side_when_facing_a_wall(void) {
   for (int i = 0; i < 4; ++i) world::place(wx, wy, world::B_PLANK);
 
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 6.0f, hit));
+  TEST_ASSERT_TRUE(pick(c, 7.0f, hit));
   TEST_ASSERT_EQUAL_INT(wx, hit.x);
   TEST_ASSERT_EQUAL_INT(wy, hit.y);
   TEST_ASSERT_FALSE((hit.face == F_TOP));
@@ -826,7 +826,7 @@ static void test_pick_returns_the_face_it_came_in_through(void) {
 
   Camera c = atSpawn(0.0f);       // +x
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 6.0f, hit));
+  TEST_ASSERT_TRUE(pick(c, 7.0f, hit));
   TEST_ASSERT_EQUAL_INT(wx, hit.x);
   TEST_ASSERT_EQUAL_INT(wy, hit.y);
   TEST_ASSERT_EQUAL_UINT8(F_NS, hit.face);
@@ -865,7 +865,7 @@ static void test_a_block_hanging_on_nothing_can_be_picked_and_mined(void) {
   // into the block's side.
   Camera c = atSpawn(0.0f);       // +x
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));
+  TEST_ASSERT_TRUE(pick(c, 6.6f, hit));
   TEST_ASSERT_EQUAL_INT(fx, hit.x);
   TEST_ASSERT_EQUAL_INT(fy, hit.y);
   TEST_ASSERT_EQUAL_INT(world::GROUND, hit.z);
@@ -899,7 +899,7 @@ static void test_looking_up_at_a_deck_reports_its_underside(void) {
   TEST_ASSERT_TRUE(c.aimSlope < -0.9f && c.aimSlope > -1.1f);
 
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));
+  TEST_ASSERT_TRUE(pick(c, 6.6f, hit));
   TEST_ASSERT_EQUAL_INT(deckZ, hit.z);
   TEST_ASSERT_EQUAL_UINT8(F_BOT, hit.face);
   TEST_ASSERT_EQUAL_INT(0,  hit.nx);
@@ -918,17 +918,17 @@ static void test_flat_ground_at_rest_is_within_reach(void) {
   init();
   world::generate(88);
   Camera c = atSpawn(0.0f);
-  const float expect = EYE / AIM_SLOPE;          // 5.05 cells, horizontally
-  TEST_ASSERT_TRUE(expect > 4.9f && expect < 5.2f);
+  const float expect = EYE / AIM_SLOPE;          // 6.40 cells, horizontally
+  TEST_ASSERT_TRUE(expect > 6.2f && expect < 6.6f);
 
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));          // the shipped REACH
+  TEST_ASSERT_TRUE(pick(c, 6.6f, hit));          // the shipped REACH
   TEST_ASSERT_EQUAL_UINT8(F_TOP, hit.face);
   TEST_ASSERT_EQUAL_INT(1, hit.nz);
   // dist is measured along the ray, so it is a little longer than the
   // horizontal distance the derivation above quotes.
   TEST_ASSERT_TRUE(hit.dist > expect);
-  TEST_ASSERT_TRUE(hit.dist < 5.5f);
+  TEST_ASSERT_TRUE(hit.dist < 6.6f);
 }
 
 // Reach is a distance from the eye, not a horizontal one. The bug this locks
@@ -939,14 +939,14 @@ static void test_reach_is_measured_along_the_ray(void) {
   world::generate(88);
   Camera c = atSpawn(0.0f);
   Hit hit;
-  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));
+  TEST_ASSERT_TRUE(pick(c, 6.6f, hit));
   const float dx = ((float)hit.x + 0.5f) - c.px;
   const float dy = ((float)hit.y + 0.5f) - c.py;
   const float horiz = sqrtf(dx * dx + dy * dy);
   // The ray drops EYE over that run, so the reported distance must exceed the
   // flat-map distance rather than equal it.
   TEST_ASSERT_TRUE(hit.dist > horiz - 1.0f);
-  TEST_ASSERT_TRUE(hit.dist <= 5.5f);
+  TEST_ASSERT_TRUE(hit.dist <= 6.6f);
 }
 
 

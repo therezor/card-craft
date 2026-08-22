@@ -1472,29 +1472,20 @@ void drawParticles(const raycast::Camera& cam) {
   }
 }
 
-// Metal for the tool head, darkest shade first, one ramp per tier.
-//
-// There were six of these once, one per mining upgrade, so buying one was
-// visible in the player's hand rather than only on a card the player had
-// already closed. The upgrades went away and this collapsed to a single iron
-// ramp; tiers are back, and they are back in the same place, because a tier
-// you cannot see in your own hand is a number in a menu.
-//
-// Wood is deliberately not the haft's brown: the haft is already 'e'..'g' in
-// the art, and a wooden head in the same brown would erase the silhouette that
-// says which end does the work. It is a paler, greyer wood instead.
-static const uint8_t kMetal[game::TT_COUNT][4][3] = {
-  { {  84,  60,  38 }, { 124,  92,  58 }, { 162, 126,  84 }, { 198, 166, 124 } },  // wood
-  { {  62,  64,  70 }, {  96, 100, 108 }, { 134, 138, 146 }, { 176, 180, 188 } },  // stone
-  { {  74,  78,  86 }, { 126, 131, 140 }, { 176, 181, 190 }, { 222, 226, 232 } },  // iron
-  { {  28, 118, 122 }, {  58, 176, 178 }, { 110, 226, 224 }, { 196, 250, 248 } },  // diamond
-};
-
 // ---- dropped items ----------------------------------------------------------
 
-// A small cube, billboarded. Not a sprite: at the size these are drawn -- a few
-// pixels a side past four or five cells -- the art would be one colour anyway,
-// and taking the block's own colour means a new material needs nothing here.
+// Billboarded, and what gets drawn depends on what the item is.
+//
+// A BLOCK is a small cube in its own colour. At the size these are drawn -- a
+// few pixels a side past four or five cells -- a 16x16 texture would average
+// out to one colour anyway, and taking the block's colour means a new material
+// needs nothing here.
+//
+// A TOOL is its own sprite, the same art the first-person view and the hotbar
+// use. It used to be a cube too, in the tier's mid metal, which meant a dropped
+// pickaxe and a dropped sword were the same grey box and the only way to tell
+// them apart was to walk over one. A silhouette is the whole point of a dropped
+// item: it says what is worth crossing the room for.
 //
 // It bobs. A stationary flat square on ground of a similar colour is genuinely
 // hard to find, and the bob is what separates "an item is lying there" from a
@@ -1538,17 +1529,47 @@ void drawDrops(const game::State& s, const raycast::Camera& cam) {
     if (band < 0) band = 0;
     const int lit = (int)world::light((int)d.x, (int)d.y);
 
-    // A tool takes its tier's mid metal; a block takes its own colour. Both go
-    // through the world's shading, or an item would sit at full daylight
-    // brightness after dark and read as a lamp.
-    uint8_t r, g, b;
+    // Everything goes through the world's shading, or an item would sit at full
+    // daylight brightness after dark and read as a lamp.
     if (game::isTool(d.item)) {
-      const uint8_t* m = kMetal[game::toolTier(d.item)][2];
-      r = m[0]; g = m[1]; b = m[2];
-    } else {
-      const world::BlockInfo& bi = world::info(d.item);
-      r = bi.r; g = bi.g; b = bi.b;
+      const bool sword = game::toolKind(d.item) == game::TK_SWORD;
+      const uint8_t* art = sword ? &sprites::kSword[0][0][0]
+                                 : &sprites::kPick[0][0][0];
+      const uint8_t tier = game::toolTier(d.item);
+      const uint8_t (*sp)[3] = sword ? sprites::kSwordTierPal[tier]
+                                     : sprites::kPickTierPal[tier];
+
+      // Shade the palette once, not once per pixel: eleven entries against up
+      // to 676 texels, and the shade is constant across the whole billboard.
+      uint16_t pal[sprites::PICK_COLOURS];
+      for (int k = 1; k < sprites::PICK_COLOURS; ++k)
+        pal[k] = shadeMob(sp[k][0], sp[k][1], sp[k][2], band, lit);
+
+      // The art is square and the billboard is square, so one fixed-point step
+      // walks both axes. Nearest-neighbour, like every other blit here.
+      const int step = (sprites::PICK_W << 16) / (sz > 0 ? sz : 1);
+      const int x0 = cx - sz / 2, y0 = cy - sz / 2;
+      for (int x = x0 < 0 ? 0 : x0; x < (x0 + sz > W ? W : x0 + sz); ++x) {
+        const int lim = (int)s_limit[x][bucket];
+        const int cut = y0 + sz > lim ? lim : y0 + sz;
+        const int hi = (int)s_slabHi[x][bucket];
+        const int lo = (int)s_slabLo[x][bucket];
+        const int sx = ((x - x0) * step) >> 16;
+        if ((unsigned)sx >= (unsigned)sprites::PICK_W) continue;
+        for (int y = y0 < 0 ? 0 : y0; y < cut; ++y) {
+          if (y >= H) break;
+          if (hi < lo && y >= hi && y < lo) continue;
+          const int sy = ((y - y0) * step) >> 16;
+          if ((unsigned)sy >= (unsigned)sprites::PICK_H) continue;
+          const uint8_t v = art[sy * sprites::PICK_W + sx];
+          if (v) base[y * W + x] = pal[v];
+        }
+      }
+      continue;
     }
+
+    const world::BlockInfo& bi = world::info(d.item);
+    const uint8_t r = bi.r, g = bi.g, b = bi.b;
     const uint16_t body = shadeMob(r, g, b, band, lit);
     // A lid two shades up, so the thing reads as a cube with a top rather than
     // as a flat chip standing on the ground.
@@ -1602,52 +1623,46 @@ static const SwingFrame kSwing[game::TOOL_ANIM] = {
 };
 
 
-// Both tools go through the same blit: same size, same palette layout, and the
-// art files agree that 'a'..'d' are the four metal steps. Only the texel array
-// differs, so the caller picks that and everything below is shared.
-// The shared blit below indexes both families through the pickaxe's constants,
-// which is only sound while the two agree. Say so here rather than discovering
-// it as a torn sprite: make-sprites.py is free to resize a family, and this is
-// the line that stops it doing so silently.
+// Both tools and the empty hand go through the same blit: same palette layout,
+// same swing arc, and the tool art agrees that 'a'..'d' are the four metal
+// steps. The texel array, its dimensions, the palette and the anchor all differ
+// per family, so the caller passes those and everything below is shared.
+//
+// The palette SIZE still has to agree, because the blit builds one fixed-length
+// table on the stack. Dimensions no longer do: the hand is 17x25 against the
+// tools' 16x16, which is the whole reason the width is a parameter. Say the
+// palette constraint here rather than discovering it as a stack overrun —
+// make-sprites.py is free to give a family more colours, and this is the line
+// that stops it doing so silently.
 static_assert(sprites::SWORD_W == sprites::PICK_W &&
               sprites::SWORD_H == sprites::PICK_H &&
-              sprites::SWORD_COLOURS == sprites::PICK_COLOURS,
-              "sword and pick art must share dimensions and palette size");
+              sprites::SWORD_COLOURS == sprites::PICK_COLOURS &&
+              sprites::HAND_COLOURS == sprites::PICK_COLOURS,
+              "held-item art must share a palette size, and the two tools a size");
 
-static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
+// The palette comes in whole. A tool's tier used to be four indices swapped
+// inside one palette; the art is a vanilla-style pack now and a tier is a
+// different palette end to end, so the caller picks it and this just packs it.
+//
+// The caller places it. This used to take a SwingFrame and work the arc out
+// itself, which meant the hand and the tool each rotated about their own centre
+// — and a rotation about two different centres is not one rigid body, so the
+// handle walked out of the fingers as the swing progressed. drawTool turns the
+// frame into an anchor and an angle for both, about the grip they share.
+static void blitHeld(const uint8_t* art, int aw, int ah,
+                     const uint8_t (*srcPal)[3], int cx, int cy,
+                     int SCALE, int angDeg) {
 
-  // Two panel pixels per texel, against three for the 24x24 art this replaced.
-  // The art is 32x32 now, so the same three would have put a 96-pixel tool on a
-  // 135-pixel panel and left the player looking at their own pickaxe. Two lands
-  // it at 64, slightly smaller than the 72 it used to be, and the extra eight
-  // texels a side carry the detail the bigger ones were standing in for.
-  //
-  // The swing offsets below are in panel pixels and do not scale, so the arc is
-  // exactly the size it was.
-  //
-  // The anchor is up and left of the corner: the head sits in frame and the
-  // haft runs off the bottom edge, which is where a handle should go — into the
-  // hand holding it.
-  constexpr int SCALE = 2;
-  const int ax = 168 + (int)f.dx * 3 / 2;   // where the art's centre lands
-  // Low on the panel. The head is in the top-left of the art, so the anchor
-  // sits well below where the head ends up: at 108 the art's centre is past the
-  // bottom edge and what is in frame is the head and the top of the haft, which
-  // is all a first-person tool should show. Lower than this and the downswing
-  // takes the head off the bottom of the screen entirely.
-  const int ay = 108 + (int)f.dy * 3 / 2;
+  // Panel pixels per texel, and the caller's, not a constant. The tools are
+  // 32x32 and take 2, for the 64 pixels a held item has always occupied; the
+  // hand is 10x21 and takes the same 2, so its texels are the same size as
+  // theirs and the sprite is simply smaller.
+  const int ax = cx, ay = cy;
 
-  // Palette for this frame: the art's own colours, with the four metal steps
-  // swapped for the head's. Twelve entries, built once per frame.
-  const bool sword = (kind == game::TK_SWORD);
-  const uint8_t (*art)[32] = sword ? sprites::kSword[0] : sprites::kPick[0];
-  const uint8_t (*srcPal)[3] = sword ? sprites::kSwordPal : sprites::kPickPal;
-
+  // Packed once per frame: eleven entries against up to a thousand texels.
   uint16_t pal[sprites::PICK_COLOURS];
   for (int i = 1; i < sprites::PICK_COLOURS; ++i)
     pal[i] = pack(srcPal[i][0], srcPal[i][1], srcPal[i][2]);
-  for (int k = 0; k < 4; ++k)                      // 'a'..'d' are the metal
-    pal[2 + k] = pack(kMetal[tier][k][0], kMetal[tier][k][1], kMetal[tier][k][2]);
 
   // The swing leans as well as moves, which it did not used to.
   //
@@ -1667,11 +1682,11 @@ static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
   // colour is invented and the palette stays exactly the nine entries above.
   //
   // f.ang was already in the table and had never been read.
-  const int hw = sprites::PICK_W / 2, hh = sprites::PICK_H / 2;
+  const int hw = aw / 2, hh = ah / 2;
 
   // The backwards rotation, in 16.16, with the texel-to-pixel scale folded in
   // so the inner loop divides by nothing.
-  const float rad = (float)f.ang * 0.017453292f;
+  const float rad = (float)angDeg * 0.017453292f;
   const int32_t cs = (int32_t)(cosf(rad) * (65536.0f / SCALE));
   const int32_t sn = (int32_t)(sinf(rad) * (65536.0f / SCALE));
 
@@ -1680,7 +1695,10 @@ static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
   // frames are barely leaned and the whole box is scanned — an upright tool
   // should not pay for the slack a fully leaned one needs.
   const int32_t acs = cs < 0 ? -cs : cs, asn = sn < 0 ? -sn : sn;
-  const int R = (int)(((int32_t)(sprites::PICK_W * SCALE / 2)
+  // From the art's LONGER side, so a family taller than it is wide — the hand —
+  // does not get its bottom clipped away by a box sized for its width.
+  const int longest = aw > ah ? aw : ah;
+  const int R = (int)(((int32_t)(longest * SCALE / 2)
                        * (acs + asn) * SCALE) >> 16) + 2;
 
   const int x0 = ax - R < 0 ? 0 : ax - R, x1 = ax + R > W ? W : ax + R;
@@ -1698,9 +1716,9 @@ static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
       // Unsigned compare catches negative and past-the-end in one test.
       const unsigned sx = (unsigned)((u >> 16) + hw);
       const unsigned sy = (unsigned)((v >> 16) + hh);
-      if (sx >= (unsigned)sprites::PICK_W || sy >= (unsigned)sprites::PICK_H)
+      if (sx >= (unsigned)aw || sy >= (unsigned)ah)
         continue;
-      const uint8_t val = art[sy][sx];
+      const uint8_t val = art[sy * aw + sx];
       if (val) row[px] = pal[val];
     }
   }
@@ -1710,7 +1728,11 @@ static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
 // three faces of it, on the same swing arc the pickaxe rides. Authoring thirteen
 // held-block sprites to say "you are holding dirt" would be thirteen things to
 // keep in step with the palette, and the palette is already the answer.
-static void drawHeldBlock(const SwingFrame& f, uint8_t mat) {
+// cx, cy is where the cube's centre goes and ang is the swing's angle — both
+// handed down by drawTool, so a held block orbits the grip and turns with the
+// arm exactly as a tool does. It used to take the SwingFrame and apply its own
+// translation, which left it the one held item that ignored the swing's turn.
+static void drawHeldBlock(uint8_t mat, int cx, int cy, int ang) {
   // The material's OWN texture, sampled the way a wall samples it, not a flat
   // fill of its average colour. A held block that is a plain orange square
   // while the wall in front of you is patterned brick reads as a different
@@ -1728,95 +1750,136 @@ static void drawHeldBlock(const SwingFrame& f, uint8_t mat) {
     return pack(lit(c[0], shift), lit(c[1], shift), lit(c[2], shift));
   };
 
-  // Low and to the right, the same corner the pickaxe's haft comes out of, so
-  // switching slots does not move the hand across the screen.
-  constexpr int N = 40, SKEW = 10;
-  const int x0 = 176 + (int)f.dx * 3 / 2;
-  const int y0 =  96 + (int)f.dy * 3 / 2;
-
-  // Three faces, each sampling the texture on its own two axes so the grain
-  // turns the corner instead of being painted flat across it. Face shading
-  // follows shadeFor's own ordering: the lid catches the sky, the front falls
-  // away from it, the right cheek falls further.
-  uint16_t* base = raw();
-
-  // The lid: a parallelogram sliding one pixel left per row, which is as much
-  // isometry as a forty-pixel cube needs.
-  for (int r = 0; r < SKEW; ++r) {
-    const int off = SKEW - r;
-    const int py = y0 + r;
-    if (py < 0 || py >= H) continue;
-    for (int c = 0; c < N; ++c) {
-      const int px = x0 + off + c;
-      if (px < 0 || px >= W) continue;
-      base[py * W + px] = texel(c * textures::TEX_N / N,
-                                r * textures::TEX_N / SKEW, 34);
-    }
-  }
-  for (int r = 0; r < N; ++r) {
-    const int py = y0 + SKEW + r;
-    if (py < 0 || py >= H) continue;
-    for (int c = 0; c < N; ++c) {
-      const int px = x0 + c;
-      if (px < 0 || px >= W) continue;
-      base[py * W + px] = texel(c * textures::TEX_N / N,
-                                r * textures::TEX_N / N, 0);
-    }
-  }
-  // The right cheek. A parallelogram of constant width, sheared upward by the
-  // same one pixel per column the lid slides by — the two share the edge from
-  // (x0+N, y0+SKEW) up to (x0+N+SKEW, y0), so they have to rise together.
+  // 28 across. It was 40 and anchored where the hand now is, which — once the
+  // hand started being drawn under everything — buried it completely.
   //
-  // Walked by COLUMN rather than by row, which is what fixes the shape: driving
-  // it from the front face's rows and shortening each one turned the side into
-  // a triangle tapering to nothing, so the cube had a lid and a face and then
-  // just stopped.
-  for (int c = 0; c < SKEW; ++c) {
-    const int px = x0 + N + c;
-    if (px < 0 || px >= W) continue;
-    const int yTop = y0 + SKEW - 1 - c;
-    for (int r = 0; r < N; ++r) {
-      const int py = yTop + r;
-      if (py < 0 || py >= H) continue;
-      base[py * W + px] = texel(c * textures::TEX_N / SKEW,
-                                r * textures::TEX_N / N, -44);
-    }
-  }
+  // The three faces are laid out in the cube's OWN axes, and the panel is
+  // walked BACKWARDS into them: every pixel the turned cube could cover asks
+  // which face texel it came from. Mapping forwards — rotating each source
+  // pixel onto the panel — drops destination pixels at 1:1 and punches holes
+  // through the cube at any angle off ninety degrees. Same reason blitHeld
+  // walks its destination rather than its source.
+  constexpr int N = 28, SKEW = 7;
+  constexpr int x0 = -(N + SKEW) / 2, y0 = -(N + SKEW) / 2;
+  const float rad = (float)ang * 0.017453292f;
+  const float rc = cosf(rad), rs = sinf(rad);
 
   // One dark rule where the lid meets the face. Without it the two planes read
   // as a gradient rather than as a corner.
   const world::BlockInfo& bi = world::info((uint8_t)m);
   auto dim = [](int v) { const int q = v - 80; return (uint8_t)(q < 0 ? 0 : q); };
-  rect(x0, y0 + SKEW, N, 1, pack(dim(bi.r), dim(bi.g), dim(bi.b)));
-}
+  const uint16_t edge = pack(dim(bi.r), dim(bi.g), dim(bi.b));
 
-// An empty hand. Also not art: a fist is a rounded block of skin with a darker
-// rule down it, and at this size that is all of one that survives anyway.
-static void drawHand(const SwingFrame& f) {
-  const uint16_t skin = pack(226, 174, 132);
-  const uint16_t shade = pack(178, 128,  92);
-  const uint16_t cuff  = pack( 96, 132, 196);
+  const int R = N + SKEW + 2;                 // half-diagonal, rounded up
+  uint16_t* base = raw();
+  const int py0 = cy - R < 0 ? 0 : cy - R, py1 = cy + R > H ? H : cy + R;
+  const int px0 = cx - R < 0 ? 0 : cx - R, px1 = cx + R > W ? W : cx + R;
+  for (int py = py0; py < py1; ++py) {
+    for (int px = px0; px < px1; ++px) {
+      const float fx = (float)(px - cx), fy = (float)(py - cy);
+      const int lx = (int)lrintf( fx * rc + fy * rs) - x0;
+      const int ly = (int)lrintf(-fx * rs + fy * rc) - y0;
 
-  const int x0 = 184 + (int)f.dx * 3 / 2;
-  const int y0 = 100 + (int)f.dy * 3 / 2;
-
-  rect(x0 + 3, y0,      26, 4,  skin);        // knuckles, tucked in a little
-  rect(x0,     y0 + 4,  32, 22, skin);
-  rect(x0,     y0 + 26, 32, H - (y0 + 26), cuff);   // sleeve, off the bottom
-  // The fingers, as three rules rather than three shapes.
-  for (int k = 0; k < 3; ++k) rect(x0 + 7 + k * 8, y0 + 4, 1, 14, shade);
+      // The lid slides one pixel left per row, which is as much isometry as a
+      // twenty-eight-pixel cube needs.
+      if (ly >= 0 && ly < SKEW) {
+        const int c = lx - (SKEW - ly);
+        if (c >= 0 && c < N) {
+          base[py * W + px] = texel(c * textures::TEX_N / N,
+                                    ly * textures::TEX_N / SKEW, 34);
+          continue;
+        }
+      }
+      if (ly >= SKEW && ly < SKEW + N && lx >= 0 && lx < N) {
+        base[py * W + px] = (ly == SKEW)
+            ? edge
+            : texel(lx * textures::TEX_N / N,
+                    (ly - SKEW) * textures::TEX_N / N, 0);
+        continue;
+      }
+      // The right cheek: a parallelogram of constant width, sheared upward by
+      // the same pixel per column the lid slides by, so the two share an edge.
+      const int c = lx - N;
+      if (c >= 0 && c < SKEW) {
+        const int r = ly - (SKEW - 1 - c);
+        if (r >= 0 && r < N)
+          base[py * W + px] = texel(c * textures::TEX_N / SKEW,
+                                    r * textures::TEX_N / N, -44);
+      }
+    }
+  }
 }
 
 // What is in the selected slot is what is in the hand. This is the item system
 // where the player actually reads it — the hotbar says what is selected, and
 // this says it again in the place they are already looking.
+// The grip: where the fist's PALM lands on the panel, and the point everything
+// held turns about. The tool anchors below are chosen so each tool's handle
+// crosses it.
+//
+// It is solved from the art rather than guessed. blitHeld anchors a sprite by
+// its centre, and the hand's centre is halfway down a 27-row cell — most of the
+// way into the forearm. Setting the grip to that centre put the handle across
+// the middle of the arm instead of through the fingers, which is exactly how it
+// looked. HAND_X/Y below are what place the palm texel (5,5), turned by
+// HAND_TILT, at GRIP_X/Y.
+constexpr int GRIP_X = 204, GRIP_Y = 120;
+// The hand's art stands straight up; a fist rising vertically out of the bottom
+// of the panel does not read as an arm, so it is tilted before anything else.
+constexpr int HAND_TILT = -35;
+constexpr int HAND_X = 212, HAND_Y = 133;
+
 void drawTool(const game::State& s) {
   const SwingFrame& f = kSwing[s.toolPhase % game::TOOL_ANIM];
   const uint8_t held = game::heldItem(s);
-  if (game::isTool(held))         drawToolArt(f, game::toolKind(held),
-                                              game::toolTier(held));
-  else if (held < world::B_COUNT) drawHeldBlock(f, held);
-  else                            drawHand(f);
+  const bool tool = game::isTool(held);
+  const bool sword = tool && game::toolKind(held) == game::TK_SWORD;
+
+  // The swing's reach, in eighths. 12 is the 3/2 every held item used to share;
+  // the sword takes more, because a sword is swung and a pickaxe is driven, and
+  // one table of offsets serving both made them the same gesture.
+  const int amp = sword ? 17 : 12;
+  const int ang = (int)f.ang * amp / 12;
+  const int dx  = (int)f.dx * amp / 8;
+  const int dy  = (int)f.dy * amp / 8;
+
+  // Hand and tool are ONE rigid body. Both turn about the grip rather than each
+  // about its own centre — rotate two sprites about two different points and
+  // they come apart, which is exactly what the handle did: it walked out of the
+  // fingers as the arc progressed.
+  const float rad = (float)ang * 0.017453292f;
+  const float cs = cosf(rad), sn = sinf(rad);
+  auto place = [&](int x, int y, int& ox, int& oy) {
+    const float vx = (float)(x - GRIP_X), vy = (float)(y - GRIP_Y);
+    ox = GRIP_X + (int)lrintf(vx * cs - vy * sn) + dx;
+    oy = GRIP_Y + (int)lrintf(vx * sn + vy * cs) + dy;
+  };
+
+  // The hand first, so the handle crosses the fingers rather than hiding behind
+  // them.
+  int hx, hy;
+  place(HAND_X, HAND_Y, hx, hy);
+  blitHeld(&sprites::kHand[0][0][0], sprites::HAND_W, sprites::HAND_H,
+           sprites::kHandPal, hx, hy, 2, HAND_TILT + ang);
+
+  if (tool) {
+    // One anchor per kind: the two tools do not have their handle in the same
+    // place, so one number cannot put both across the palm.
+    const uint8_t tier = game::toolTier(held);
+    int tx, ty;
+    place(sword ? 228 : 222, sword ? 98 : 104, tx, ty);
+    blitHeld(sword ? &sprites::kSword[0][0][0] : &sprites::kPick[0][0][0],
+             sprites::PICK_W, sprites::PICK_H,
+             sword ? sprites::kSwordTierPal[tier] : sprites::kPickTierPal[tier],
+             tx, ty, 2, ang);
+  } else if (held < world::B_COUNT) {
+    // Low and close: the cube's bottom corner rests in the fingers. It was
+    // placed where a tool's HEAD goes, which floated it a cube's height above
+    // the hand and left the fist hanging under it with nothing to hold.
+    int bx, by;
+    place(194, 110, bx, by);
+    drawHeldBlock(held, bx, by, ang);
+  }
 }
 
 void drawHurt(const game::State& s) {

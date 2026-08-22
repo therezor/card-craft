@@ -60,30 +60,45 @@ PALETTES = {
         ("d", (74, 52, 32)),     # bow, shadow
         ("e", (116, 84, 50)),    # bow, lit
     ],
-    # The tool. Metal gets four steps and wood three, which is what makes it
-    # read as two materials rather than as one shape in two colours.
+    # The 32x32 tool pack, exactly: all four tiers index identically.
     "pick": [
-        ("#", (14, 14, 16)),
-        ("a", (74, 78, 86)),     # metal, shadow
-        ("b", (126, 131, 140)),  # metal, mid
-        ("c", (176, 181, 190)),  # metal, lit
-        ("d", (222, 226, 232)),  # metal, highlight
-        ("e", (74, 48, 28)),     # haft, shadow
-        ("f", (118, 78, 42)),    # haft, mid
-        ("g", (156, 110, 62)),   # haft, lit
+        ("#", ( 32,  24,  10)),   # '#'
+        ("a", ( 40,  30,  11)),   # 'a'
+        ("b", ( 55,  41,  16)),   # 'b'
+        ("c", ( 73,  54,  21)),   # 'c'
+        ("d", (104,  78,  30)),   # 'd'
+        ("e", (107,  81,  31)),   # 'e'
+        ("f", (117,  88,  33)),   # 'f'
+        ("g", (134, 101,  38)),   # 'g'
+        ("h", (137, 103,  39)),   # 'h'
+        ("i", (137, 103,  39)),   # 'i'  (padding)
     ],
-    # The sword shares the pickaxe's ramp exactly, and it has to: render.cpp
-    # swaps 'a'..'d' for the tier on whichever tool is in the hand, so the two
-    # families have to agree on which four indices are the metal.
+    # The pack's sword. Its blade gains shades with the tier, so the diamond
+    # grid is canonical and the lower tiers take the majority colour of each
+    # slot -- one slot merges on wood and iron, two on stone.
     "sword": [
-        ("#", (14, 14, 16)),
-        ("a", (74, 78, 86)),     # metal, shadow
-        ("b", (126, 131, 140)),  # metal, mid
-        ("c", (176, 181, 190)),  # metal, lit
-        ("d", (222, 226, 232)),  # metal, highlight
-        ("e", (74, 48, 28)),     # grip, shadow
-        ("f", (118, 78, 42)),    # grip, mid
-        ("g", (156, 110, 62)),   # grip, lit
+        ("#", ( 40,  30,  11)),   # '#'
+        ("a", ( 32,  24,  10)),   # 'a'
+        ("b", ( 55,  41,  16)),   # 'b'
+        ("c", ( 73,  54,  21)),   # 'c'
+        ("d", ( 71,  54,  20)),   # 'd'
+        ("e", ( 71,  54,  20)),   # 'e'
+        ("f", (137, 103,  39)),   # 'f'
+        ("g", ( 71,  54,  20)),   # 'g'
+        ("h", ( 89,  67,  25)),   # 'h'
+        ("i", ( 89,  67,  25)),   # 'i'
+    ],
+    "hand": [
+        ("#", ( 79,  52,  32)),    # outline -- the source's brown, not black
+        ("a", ( 79,  52,  32)),    # (unused)
+        ("b", ( 79,  52,  32)),    # (unused)
+        ("c", (236, 192, 154)),    # skin, shaded
+        ("d", (251, 207, 169)),    # skin
+        ("e", (236, 192, 154)),    # (unused)
+        ("f", (251, 207, 169)),    # (unused)
+        ("g", (251, 207, 169)),    # (unused)
+        ("h", (251, 207, 169)),    # (unused)
+        ("i", (251, 207, 169)),    # (unused)
     ],
 }
 
@@ -307,121 +322,198 @@ SKELETON = ["""
 ................
 """]
 
-# ---- the pickaxe: 24 x 24 ---------------------------------------------------
-#
-# Head across the top with a curved bit at each end, haft running down to the
-# right. Every surface is outlined and shaded dark-to-light, which is the whole
-# difference between pixel art and a diagram: the old tool was drawn at runtime
-# from rotated squares and read as a silhouette with no material in it.
+# The tier palettes. The art is one grid per kind and the tier is a whole
+# palette swap, not a swap of four indices inside one -- which is what the old
+# hand-written kMetal table in render.cpp was, and it is gone.
+TIER_PALETTES = {
+    "pick": [
+        # wooden
+        [( 32,  24,  10), ( 40,  30,  11), ( 55,  41,  16), ( 73,  54,  21), (104,  78,  30), (107,  81,  31), (117,  88,  33), (134, 101,  38), (137, 103,  39), (137, 103,  39)],
+        # stone
+        [( 24,  24,  24), ( 40,  30,  11), ( 73,  73,  73), ( 73,  54,  21), (104,  78,  30), (127, 127, 127), (137, 137, 137), (154, 154, 154), (137, 103,  39), (137, 103,  39)],
+        # iron
+        [( 24,  24,  24), ( 40,  30,  11), ( 68,  68,  68), ( 73,  54,  21), (104,  78,  30), (193, 193, 193), (216, 216, 216), (255, 255, 255), (137, 103,  39), (137, 103,  39)],
+        # diamond
+        [( 23,  23,  45), ( 40,  30,  11), ( 14,  63,  54), ( 73,  54,  21), (104,  78,  30), ( 39, 178, 154), ( 43, 199, 172), ( 51, 235, 203), (137, 103,  39), (137, 103,  39)],
+    ],
+    "sword": [
+        # wooden
+        [( 40,  30,  11), ( 32,  24,  10), ( 55,  41,  16), ( 73,  54,  21), ( 71,  54,  20), ( 71,  54,  20), (137, 103,  39), ( 71,  54,  20), ( 89,  67,  25), ( 89,  67,  25)],
+        # stone
+        [( 40,  30,  11), ( 33,  33,  33), ( 73,  73,  73), ( 73,  54,  21), ( 90,  90,  90), ( 90,  90,  90), (137, 103,  39), ( 90,  90,  90), (120, 119, 119), (120, 119, 119)],
+        # iron
+        [( 40,  30,  11), ( 24,  24,  24), ( 68,  68,  68), ( 73,  54,  21), (150, 150, 150), (150, 150, 150), (137, 103,  39), (190, 190, 190), (216, 216, 216), (255, 255, 255)],
+        # diamond
+        [( 40,  30,  11), (  9,  45,  47), ( 14,  63,  54), ( 73,  54,  21), ( 21,  99,  85), ( 30, 138, 119), (137, 103,  39), ( 43, 199, 172), ( 51, 235, 203), (164, 253, 240)],
+    ],
+}
 
-# A pickaxe: one continuous head sweeping from a point at the upper right down
-# to a point at the lower left, with the haft leaving its middle for the bottom
-# corner. The open V between the head's lower arm and the haft is the whole
-# silhouette; fill it in and what is left reads as a bent stick.
+# ---- the held items: 16 x 16 ------------------------------------------------
 #
-# Laid out from its geometry rather than typed in by hand — placing sloped runs
-# a row at a time produced off-by-one edges every time — then pasted here so the
-# art stays reviewable in a diff, which is the point of this file.
+# Three 16x16 cells, mirrored and recoloured into the tier palettes.
 #
-# Two things it went wrong on first, both visible from across the room:
+# These three are the reference sheet's own pixels, mirrored and recoloured.
+# Nothing is redrawn. An earlier pass laid the pickaxe out from geometry and a
+# later one doubled the cells to 32x32 with scale2x; both drifted off the
+# source -- the shading stopped following the form and started following the
+# curve -- and both were thrown away. Recolouring is the whole job here.
 #
-#   * The head is in *front* of the handle it is fixed to. Drawing the haft last
-#     punched a hole clean through the blade where the two cross, and the tool
-#     looked snapped.
-#   * The head has to taper to a point at both ends. At constant thickness it
-#     stops being a pickaxe head and becomes a blade.
-# The head is arched and its two ends are different: a point on one arm, a blunt
-# chisel on the other. That asymmetry is the whole difference between a pickaxe
-# and a hammer — a straight bar with matching tapers, which is what this was,
-# reads as a mallet no matter how it is shaded. The collar under the eye is what
-# stops the haft from looking like a stick passing behind the head.
+# Mirrored because the sheet holds tips up-RIGHT with handles off the
+# bottom-LEFT, and render.cpp anchors held items head-top-left with the handle
+# leaving by the bottom-right corner, which is where the hand is.
 #
-# Redrawn into this palette rather than used as-is, because 'a'..'d' are not
-# free colours: render.cpp swaps exactly those four for the tool tier, so the
-# head has to be all four of them and the haft none. The import classified
-# metal from wood on saturation, ranked each into its own ramp, and put the
-# outline ring back the way the house style wants it.
+# 16x16, not 32x32, so render.cpp's SCALE is 4 rather than 2: same 64 pixels on
+# the panel either way. It also means ui.cpp's hotbar icon stops decimating
+# every other texel and blits the art as it is.
+#
+# The pickaxe's two head arms differ -- a blunt chisel up-right and a long taper
+# to a point down-left -- which is the difference between a pickaxe and a
+# mallet, and it comes from the sheet rather than from this file's own earlier
+# and repeated failures to draw it.
+
+# The pickaxe and the sword: 32 x 32, from a vanilla-style tool pack, one grid
+# per kind with the tier carried entirely by the palette.
+#
+# NOT mirrored. The pack draws both tools head up-RIGHT with the handle running
+# down-LEFT, and that is the way they are held: the handle crosses the palm and
+# the head stands up out of the fist. An earlier pass mirrored them, from back
+# when there was no hand and the handle had to leave by the bottom-right corner
+# of the panel instead of entering something.
+#
+# The slots are ordered darkest-first, so "#" is the outline the way the rest of
+# this file's art reads. The order is taken from one tier and used for all four,
+# because a single grid indexes them all.
+#
+# The pickaxe is exact: its four tiers index identically, pixel for pixel. The
+# sword is not, quite. Its blade gains shades as the tier rises -- seven colours
+# on wood against ten on diamond -- so the diamond grid is canonical and the
+# lower tiers take the majority colour of each slot. That merges one slot on
+# wood and iron and two on stone, which is the price of one grid instead of
+# four, and it is invisible at 64 panel pixels.
 PICK = ["""
-.............####...............
-............#cccc#..............
-...........#ccdddc#.............
-..........#abcdddc#.............
-.........#aabccdc#..............
-.......##aaaa####...............
-......#aaaaa#...................
-.....#aaaaa#....................
-.....#bbbag#....................
-....#bbbaeeg#...................
-...#bbbbgeeeg#..................
-..#bbbb##geeeg#.................
-.#cbbb#..#geefg#................
-#cdcc#....#geeeg#...............
-#cddc#.....#geefg#..............
-#dddd#......#gfeeg#.............
-#dddc#.......#geefg#............
-.#dd#.........#gfefg#...........
-..##...........#gfefg#..........
-................#gfefg#.........
-.................#gfefg#........
-..................#gfefg#.......
-...................#gfefg#......
-....................#gfeff#.....
-.....................#gfeff#....
-......................#ffegf#...
-.......................#fgeff#..
-........................#ffeff#.
-.........................#fgeee#
-..........................#fefg#
-...........................#eg#.
-............................##..
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+.........bbbb...................
+........bggggbbb................
+.........bbbggfgbb#.ca..........
+............bbbffgg#da..........
+...............bbegg#...........
+.................begg#..........
+................ad#eg#..........
+...............cha.#e#..........
+..............cha..#ee#.........
+.............cda....#f#.........
+............cda.....#f#.........
+...........cha......#f#.........
+..........cha.......#ff#........
+.........cda.........#f#........
+........cda..........#g#........
+.......cha...........#g#........
+......cha.............#.........
+.....cha........................
+....cda.........................
+...cda..........................
+..cda...........................
+..aa............................
+................................
+................................
 """]
 
-# ---- the sword: 32 x 32 -----------------------------------------------------
-#
-# Laid out from its geometry, like the pickaxe, and for the same reason: a
-# blade on the diagonal cannot be typed in a row at a time. Placing it as
-# points along the diagonal was tried first and produced a lattice with a hole
-# between every pair of texels -- 45 degrees at unit steps does not join up.
-# What works is treating it as a REGION: rasterise the band where |row - col|
-# falls inside the blade's thickness, which is solid by construction.
-#
-# The tip is up and to the left because that is where the panel shows it. The
-# anchor in render.cpp puts the art's centre below the bottom edge, so what is
-# in frame is the top-left corner of the art and the grip runs off-screen into
-# the hand -- exactly the arrangement the pickaxe's head and haft use.
 SWORD = ["""
 ................................
-..####..........................
-..#bc###........................
-..##bcd##.......................
-...##bcd##......................
-....##bcd##.....................
-.....#abcd##....................
-.....##abcd##...................
-......##abcd##..................
-.......##abcd##.................
-........##abcd##................
-.........##abcd##...............
-..........##abcd##..............
-...........##abcd##.............
-............##abcd##............
-.............##abcd##...........
-..............##abcd##...###....
-...............##abcd##.##a##...
-................##abcd###aaa#...
-.................##abcd#aaaa#...
-..................##ab#baaa##...
-...................###ccba##....
-...................##abcc##.....
-..................##aaab#e##....
-..................#aaaa##fe##...
-..................#aaa####fe##..
-..................##a##..##fe##.
-...................###....##fe##
-...........................##fgf
-............................#fgg
-............................##fg
-.............................###
+................................
+................................
+................................
+................................
+................................
+................................
+.....................bbbb.......
+....................biiia.......
+...................biigia.......
+..................biigiia.......
+.................biigiia........
+................biigiia.........
+...............biighia..........
+..............biighha...........
+.............bhighha............
+............bhhghha.............
+...........bhhghha..............
+..........bhhghha...............
+....bb...bhhghha................
+....bdb.bhhehha.................
+.....beahhehha..................
+.....beahehha...................
+......bdahha....................
+......cadaa.....................
+.....cf#abba....................
+....cf#..aaba...................
+..bbf#.....aa...................
+.bdda...........................
+.bdda...........................
+..aa............................
+................................
+"""]
+
+# The empty hand: 10 x 21, and the only one of the three that is not the weapon
+# sheet's.
+#
+# It is a pixel-for-pixel transcription of a supplied 16x28 sprite -- every
+# texel sampled and snapped to the four colours actually in that file, then
+# cropped to its content. Eleven hand-drawn attempts came before it and every
+# one was a mitten or a potato; reading the source's own texels took one pass.
+#
+# Mirrored, so the thumb is on the side of the hand the player holds a pickaxe
+# with. The source's bottom edge -- it is a complete icon, closed off with an
+# outline -- is dropped: the wrist has to run off the panel, not stop on it.
+#
+# And the wrist is EXTENDED, its last row repeated to 27 rows in all. The source
+# is 21 texels tall and ends in a closed outline, because it was drawn as an
+# icon; held, the swing lifts the whole hand and then turns it about the grip,
+# which throws the far end of the forearm sideways as well as up, and at the
+# source length that end came back onto the panel and the arm read as severed.
+#
+# 27 is the shortest that clears all sixteen swing frames at both amplitudes.
+# Nothing of the fist is invented -- only the last row of wrist repeats -- and
+# 15 pixels of arm show below the palm at rest.
+#
+# It draws at the tools' SCALE. Two sprites on one panel with different texel
+# sizes read as a mistake, so the hand is a smaller SPRITE rather than the same
+# sprite in smaller pixels: 10x21 against their 16x16, which is why render.cpp's
+# blit takes the art's dimensions instead of assuming the pickaxe's.
+HAND = ["""
+.#######..
+#c#c#c#c#.
+#d#d#d#d#.
+#d#d#d#d#.
+#c#c#c###.
+######ddd#
+#ccccc##d#
+#dddddcdd#
+#dddddddd#
+#cdddcdd#.
+.#cddcc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
+.#cdddc#..
 """]
 
 SPRITES = {
@@ -430,6 +522,7 @@ SPRITES = {
     "skeleton": SKELETON,
     "pick": PICK,
     "sword": SWORD,
+    "hand": HAND,
 }
 
 MOB_ORDER = ["zombie", "creeper", "skeleton"]
@@ -475,7 +568,7 @@ def emit(path):
 
     # Order is the emit order, and it is fixed here rather than taken from
     # SPRITES so that adding a family is a deliberate edit in two places.
-    for fam in ["zombie", "creeper", "skeleton", "pick", "sword"]:
+    for fam in ["zombie", "creeper", "skeleton", "pick", "sword", "hand"]:
         pal = PALETTES[fam]
         legend = {ch: i + 1 for i, (ch, _) in enumerate(pal)}
         frames = SPRITES[fam]
@@ -500,6 +593,23 @@ def emit(path):
         for ch, (r, g, b) in pal:
             parts.append(f"  {{ {r:3d}, {g:3d}, {b:3d} }},   // '{ch}'\n")
         parts.append("};\n\n")
+
+        # A family whose tier is a whole-palette swap carries one palette per
+        # tier as well. render.cpp indexes this by game::ToolTier, and the
+        # order here is that enum's order.
+        if fam in TIER_PALETTES:
+            tp = TIER_PALETTES[fam]
+            if any(len(t) != len(pal) for t in tp):
+                sys.exit(f"{fam}: a tier palette is not {len(pal)} entries long")
+            parts.append(f"static const uint8_t k{fam.capitalize()}TierPal"
+                         f"[{len(tp)}][{len(pal) + 1}][3] = {{\n")
+            for name, t in zip(["wood", "stone", "iron", "diamond"], tp):
+                parts.append(f"  {{  // {name}\n")
+                parts.append("    {   0,   0,   0 },\n")
+                for (r, g, b) in t:
+                    parts.append(f"    {{ {r:3d}, {g:3d}, {b:3d} }},\n")
+                parts.append("  },\n")
+            parts.append("};\n\n")
 
         parts.append(
             f"static const uint8_t k{fam.capitalize()}[{len(grids)}][{h}][{w}] = {{\n")

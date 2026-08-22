@@ -46,10 +46,15 @@ constexpr float PROJ = 160.0f;
 // and look up at an overhang or down into a pit.
 //
 // TILT and EYE are the two numbers that decide how far ahead the crosshair
-// meets flat ground at rest: EYE * PROJ / TILT, about 5 cells as set. Steeper
+// meets flat ground at rest: EYE * PROJ / TILT, about 6.4 cells as set. Steeper
 // puts the target closer but eats the sky a six-block tower has to show
 // against; shallower pushes it out of reach.
-constexpr int TILT = 38;
+//
+// It was 38 — 5 cells — and the view sat noticeably down at the floor. Every
+// pixel of tilt removed pushes the ground contact further out, and REACH in
+// game.cpp has to move with it or open ground stops being mineable at rest;
+// the two numbers are a pair and neither can be retuned alone.
+constexpr int TILT = 30;
 constexpr int HORIZON = VIEW_H / 2 - TILT;
 
 // How far the horizon may shear from its resting place, in pixels.
@@ -73,10 +78,10 @@ constexpr int HORIZON = VIEW_H / 2 - TILT;
 // symmetric around the direction the player is actually facing; these are
 // symmetric about level, which is what the control has to feel like.
 //
-// As horizon rows, with VIEW_H 135 and HORIZON 29: level is 67, fully up is
+// As horizon rows, with VIEW_H 135 and HORIZON 37: level is 67, fully up is
 // 347 and fully down is -213.
-constexpr int PITCH_UP   = 318;   // level (67) + 280, less HORIZON
-constexpr int PITCH_DOWN = 242;   // HORIZON, less (level (67) - 280)
+constexpr int PITCH_UP   = 310;   // level (67) + 280, less HORIZON
+constexpr int PITCH_DOWN = 250;   // HORIZON, less (level (67) - 280)
 
 // Eye height above whatever surface the body is standing on. A little over one
 // block, so a one-block step is waist height and a two-block wall is over your

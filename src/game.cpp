@@ -50,13 +50,18 @@ constexpr float TURN_SPEED    = 2.7f;    // radians/second
 //
 // The floor under this is not taste, it is geometry. At the resting tilt the
 // aim ray leaves the eye at EYE = 1.2 above the ground and descends
-// TILT / PROJ = 0.2375 per cell, so the crosshair meets flat ground at
-// 1.2 / 0.2375 = 5.05 cells out, which is 5.19 away from the eye. A board with
-// no pitch keys never leaves that tilt (see hal.h), so a reach below 5.19 would
+// TILT / PROJ = 0.1875 per cell, so the crosshair meets flat ground at
+// 1.2 / 0.1875 = 6.40 cells out, which is 6.51 away from the eye. A board with
+// no pitch keys never leaves that tilt (see hal.h), so a reach below 6.51 would
 // make open ground unmineable on it — Minecraft's own 4.5 is not available to
-// us. 5.5 is the tightest round number that clears it, and the 0.31 of margin
+// us. 6.6 is the tightest round number that clears it, and the 0.09 of margin
 // it leaves is what would break first if TILT or EYE were ever retuned.
-constexpr float REACH         = 5.5f;
+//
+// It was 5.5, against TILT 38. Raising the camera to look ahead rather than at
+// the floor is what moved it: a shallower tilt pushes the ground contact out,
+// and this has to follow or the player cannot dig at their feet. It is the same
+// number for placement, so the raise also lets you build a little further away.
+constexpr float REACH         = 6.6f;
 constexpr float MELEE_REACH   = 1.9f;
 constexpr float MELEE_DOT     = 0.55f;   // roughly a 110 degree swing arc
 constexpr int   SWING_TICKS   = 18;

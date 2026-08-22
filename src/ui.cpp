@@ -106,27 +106,20 @@ static void blockIcon(int x, int y, int n, uint8_t mat, int mul = 256) {
                pack(sc(bi.r - drop), sc(bi.g - drop), sc(bi.b - drop)));
 }
 
-// Tier metal, the same four ramps render.cpp paints the held tool with. Kept
-// in step by eye rather than shared, because the two live on opposite sides of
-// the Arduino line and one small table is cheaper than a header to carry it.
-static const uint8_t kIconMetal[game::TT_COUNT][4][3] = {
-  { {  84,  60,  38 }, { 124,  92,  58 }, { 162, 126,  84 }, { 198, 166, 124 } },
-  { {  62,  64,  70 }, {  96, 100, 108 }, { 134, 138, 146 }, { 176, 180, 188 } },
-  { {  74,  78,  86 }, { 126, 131, 140 }, { 176, 181, 190 }, { 222, 226, 232 } },
-  { {  28, 118, 122 }, {  58, 176, 178 }, { 110, 226, 224 }, { 196, 250, 248 } },
-};
-
-// A tool, from the same 32x32 art the first-person view uses, taken every other
-// texel. The art is chunky enough to survive it, and a second hand-drawn icon
-// would be a second thing to keep in step with the first.
+// A tool, from the same art the first-person view uses, taken every other
+// texel: the art is 32x32 and the icon is 16x16. The art is chunky enough to
+// survive it, and a second hand-drawn icon would be a second thing to keep in
+// step with the first.
 //
-// Palette entries 2..5 are 'a'..'d', the metal, and are swapped for the tier —
-// so a wooden pickaxe and a diamond one are the same silhouette in different
-// metal, which is exactly how they read in the hand.
+// The tier is a whole palette rather than four swapped indices, so this picks
+// one and reads it straight — the hand-kept kIconMetal twin of render.cpp's
+// table is gone with it.
 static void toolIcon(int x, int y, uint8_t kind, uint8_t tier, int mul = 256) {
   const bool sword = (kind == game::TK_SWORD);
-  const uint8_t (*art)[32] = sword ? sprites::kSword[0] : sprites::kPick[0];
-  const uint8_t (*srcPal)[3] = sword ? sprites::kSwordPal : sprites::kPickPal;
+  const uint8_t (*art)[sprites::PICK_W] =
+      sword ? sprites::kSword[0] : sprites::kPick[0];
+  const uint8_t (*srcPal)[3] = sword ? sprites::kSwordTierPal[tier]
+                                     : sprites::kPickTierPal[tier];
   auto sc = [mul](int v) {
     const int q = v * mul / 256;
     return (uint8_t)(q < 0 ? 0 : (q > 255 ? 255 : q));
@@ -136,7 +129,7 @@ static void toolIcon(int x, int y, uint8_t kind, uint8_t tier, int mul = 256) {
     for (int c = 0; c < 16; ++c) {
       const uint8_t k = art[r * 2][c * 2];
       if (!k) continue;
-      const uint8_t* rgb = (k >= 2 && k <= 5) ? kIconMetal[tier][k - 2] : srcPal[k];
+      const uint8_t* rgb = srcPal[k];
       render::rect(x + c, y + r, 1, 1, pack(sc(rgb[0]), sc(rgb[1]), sc(rgb[2])));
     }
 }

@@ -1,5 +1,133 @@
 # Changelog
 
+## 1.7.0 — the hand you swing with
+
+### Three held items, one hand
+
+The pick, the sword and the empty hand had three different origins. The pick was
+a stock icon, redrawn; the sword was laid out from geometry a
+row at a time; and the empty hand was never art at all — four rectangles, skin, a
+blue cuff and three one-pixel finger rules. Three origins is why the set never
+read as a set.
+
+The tools are a vanilla-style 32x32 pack now, and **the hand is always drawn**,
+underneath whatever is held, so a pickaxe is something a fist is holding rather
+than an object floating at the bottom of the screen. It is drawn first and the
+tool over it, which puts the handle in front of the fingers.
+
+The tools are **not mirrored**. The pack draws them head up-RIGHT with the
+handle running down-LEFT, and that is how they are held: the handle crosses the
+palm and the head stands out of the fist. An earlier pass flipped them, from back
+when there was no hand and a handle had to leave by the corner of the panel
+rather than enter something.
+
+Anchors are placed off the FIST, not off the panel, and one per kind — the two
+tools do not carry their handle in the same place, so one number cannot put both
+across the palm.
+
+**Hand and tool are one rigid body.** `blitHeld` used to take a `SwingFrame` and
+work the arc out itself, which meant each sprite rotated about its own centre;
+rotate two things about two different points and they are not one object, and the
+handle walked out of the fingers as the swing progressed. `drawTool` turns the
+frame into an anchor and an angle for both, about the grip they share, and
+`blitHeld` just draws where it is told.
+
+The forearm is extended to 27 rows, its last row repeated. The source sprite is
+21 texels tall and ends in a closed outline, because it was drawn as an icon;
+held, the swing lifts the hand and then turns it about the grip, which throws
+the far end sideways as well as up, and at the source length that end came back
+onto the panel and read as severed. 27 is the shortest that clears all sixteen
+frames at both amplitudes. None of the fist is invented, and 15 pixels of arm
+show below the palm at rest.
+
+The grip is solved from the art rather than guessed. `blitHeld` anchors a sprite
+by its centre, and the hand's centre is halfway down its cell — most of the way
+into the forearm. Taking that centre as the grip put the handle across the middle
+of the arm instead of through the fingers, which is exactly how it looked;
+`HAND_X/Y` are now whatever places the palm texel on `GRIP_X/Y`.
+
+A held block turns with the arm too. It used to take the `SwingFrame` and apply
+its own translation, which made it the one held item that ignored the swing's
+rotation. Its three faces are laid out in the cube's own axes now and the panel
+is walked backwards into them — mapping forwards drops destination pixels at 1:1
+and punches holes through the cube at any angle off ninety degrees, the same
+reason `blitHeld` walks its destination.
+
+### The camera looked at the floor
+
+`TILT` was 38 pixels of resting downward tilt, and the view sat noticeably down
+at the ground. It is 30 now, and `HORIZON` moves 29 -> 37.
+
+`REACH` had to move with it, 5.5 -> 6.6. The two are a pair: the aim ray leaves
+the eye at `EYE` and descends `TILT / PROJ` per cell, so a shallower tilt pushes
+the point where the crosshair meets flat ground further out — 5.05 cells at 38,
+6.40 at 30 — and reach has to clear that or a board with no pitch keys cannot
+dig at its own feet. `test_flat_ground_at_rest_is_within_reach` is the test that
+said so, and it failed on the first attempt exactly as its comment promised it
+would. `PITCH_UP` and `PITCH_DOWN` are re-derived so the range stays symmetric
+about level rather than about the rest pose.
+
+Reach is the same number for placing, so the raise also lets you build a little
+further out.
+
+### A tier is a whole palette, not four swapped indices
+
+`kMetal` in render.cpp and its hand-kept twin `kIconMetal` in ui.cpp are gone,
+and so is the rule that palette entries 2..5 are the metal — a contract that was
+asserted in one place and hardcoded in three others.
+
+`make-sprites.py` emits one grid per kind plus `kPickTierPal[4]` and
+`kSwordTierPal[4]`, and the caller passes a palette rather than a tier. The
+pickaxe is exact: its four tiers index identically, pixel for pixel. The sword is
+not, quite — its blade gains shades as the tier rises, seven colours on wood
+against ten on diamond — so the diamond grid is canonical and the lower tiers
+take the majority colour of each slot. One slot merges on wood and iron, two on
+stone, and at 64 panel pixels none of it shows.
+
+### The empty hand is drawn from something now
+
+`drawHand` calls the same blit the tools do, with the hand's own palette.
+
+The art is a pixel-for-pixel transcription of a supplied 10x21 fist — every texel
+sampled and snapped to the colours actually in that file. Eleven hand-drawn
+attempts came first and every one of them was a mitten or a potato; reading the
+source's own texels took one pass.
+
+Three things fell out of it. The blit takes the art's dimensions rather than
+assuming the pickaxe's, because the hand is 10x21 against the tools' 32x32 — and
+both draw at SCALE 2, so the hand is a smaller sprite rather than the same sprite
+in smaller pixels; two texel sizes on one panel read as a mistake. It carries a
+constant `tilt` the swing's lean is added to, because the source sprite stands
+straight up and a fist coming vertically out of the bottom of the panel does not
+read as an arm. And it does not lean: the tools' handles run off the edge of
+their own art so the panel cuts them wherever the lean puts them, but leaning the
+hand swings its forearm away from the bottom edge and leaves a severed arm over
+the terrain on the recovery frames.
+
+The held block shrank from 40 pixels to 28 and moved up and left. At its old size
+and anchor it covered the hand completely.
+
+### The sword swings wider than the pickaxe
+
+One offset table drove every held item, so a sword and a pickaxe made the same
+gesture. `blitHeld` takes the swing's reach as a parameter now, in eighths: the
+pickaxe keeps 12, which is the 3/2 everything used to share, and the sword takes
+17. A sword is swung; a pickaxe is driven.
+
+### A dropped pickaxe and a dropped sword were the same grey box
+
+Dropped items were all one shape: a small billboarded cube, tinted the block's
+colour or, for a tool, its tier's mid metal. Two tools of the same tier were
+pixel-identical on the ground and the only way to tell them apart was to walk
+over one.
+
+A dropped tool draws its own sprite now — the same art the first-person view and
+the hotbar use, shaded through `shadeMob` like everything else in the world, and
+clipped by the same ground cut and slab band the cubes were. The palette is
+shaded once per drop rather than per texel: eleven entries against up to 676.
+Blocks keep the cube, because at a few pixels a side a 16x16 texture averages out
+to the colour it already had.
+
 ## 1.6.0 — a column is a bitmask, and the view stays where you put it
 
 ### There were places the world would not let you dig
