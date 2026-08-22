@@ -244,25 +244,57 @@ const ToolInfo& toolInfo(uint8_t kind, uint8_t tier) {
   return kTool[kind < TK_COUNT ? kind : 0][tier < TT_COUNT ? tier : 0];
 }
 
-// Twelve recipes over four cells. Two things hold the table together.
+// Fifteen recipes over four cells, as SHAPES. Three things hold the table
+// together.
 //
 // Every tool takes a plank as its handle, so the chain out of an empty spawn is
 // always wood -> planks -> tool, and the first pickaxe is three planks from one
 // log. That is the only bootstrap the game has now, and it wants to be short.
 //
-// No two rows are the same multiset. Worth checking by eye when adding one:
-// matching is order-blind, so "2 plank" and "3 plank" are a sword and a
-// pickaxe, and a fourth plank recipe would have to find a fourth count.
+// The shapes are pictures of the thing. A pickaxe is a wide head over a handle,
+// a sword is a blade over a handle, a torch is coal over wood -- so the grid
+// teaches the recipe rather than merely accepting it, and the recipe book can
+// draw a recipe as the arrangement it actually is.
+//
+// No two rows are the same NORMALISED PATTERN. That is the invariant now, and
+// it is weaker than the old one -- it used to be "no two rows are the same
+// multiset", which is what left BRICKS and STONE PICK competing for "3 stone"
+// and what kept every recipe under four cells. Shape is what buys the room for
+// MASONRY, TORCHES and SALVE below to exist at all.
+//
+// Every row here is stored already shifted to the top-left, which is what makes
+// fillGrid() lay out a grid matchGrid() is guaranteed to recognise.
 static const RecipeInfo kRecipe[R_COUNT] = {
-  { "PLANKS",  { world::B_WOOD,  CELL_EMPTY,     CELL_EMPTY, CELL_EMPTY },
+  //  [W][ ]
+  //  [ ][ ]
+  { "PLANKS",  { world::B_WOOD,  CELL_EMPTY, CELL_EMPTY, CELL_EMPTY },
     world::B_PLANK, 3, 0 },
-  { "TORCH",   { world::B_WOOD,  world::B_COAL,  CELL_EMPTY, CELL_EMPTY },
+  //  [C][ ]   coal over wood: a torch, drawn the way a torch looks.
+  //  [W][ ]
+  { "TORCH",   { world::B_COAL,  CELL_EMPTY, world::B_WOOD, CELL_EMPTY },
     world::B_TORCH, 4, 0 },
+  //  [C][C]   the same thing at width. Ten for four rather than eight, because
+  //  [W][W]   the whole point is stocking up before dusk rather than at it.
+  { "TORCHES", { world::B_COAL,  world::B_COAL, world::B_WOOD, world::B_WOOD },
+    world::B_TORCH, 10, 0 },
+  //  [S][S]
+  //  [S][ ]
   { "BRICKS",  { world::B_STONE, world::B_STONE, world::B_STONE, CELL_EMPTY },
     world::B_BRICK, 3, 0 },
+  //  [S][S]   a full square of stone. Masonry had no recipe at all before this
+  //  [S][S]   -- it existed only in the structures the generator puts down.
+  { "MASONRY", { world::B_STONE, world::B_STONE, world::B_STONE, world::B_STONE },
+    world::B_MASONRY, 4, 0 },
+  //  [L][L]
+  //  [W][ ]
   { "PATCH",   { world::B_LEAVES, world::B_LEAVES, world::B_WOOD, CELL_EMPTY },
     ITEM_NONE, 0, 2 },
+  //  [L][L]   the same shape filled out: more of both, and worth more than two
+  //  [W][W]   patches, so there is a reason to carry the wood for it.
+  { "SALVE",   { world::B_LEAVES, world::B_LEAVES, world::B_WOOD, world::B_WOOD },
+    ITEM_NONE, 0, 5 },
 
+  // Picks: a head across the top, a handle under it.
   { "WOOD PICK",    { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY },
     toolId(TK_PICK, TT_WOOD), 1, 0 },
   { "STONE PICK",   { world::B_STONE, world::B_STONE, world::B_PLANK, CELL_EMPTY },
@@ -272,13 +304,15 @@ static const RecipeInfo kRecipe[R_COUNT] = {
   { "DIAMOND PICK", { world::B_DIAMOND, world::B_DIAMOND, world::B_PLANK, CELL_EMPTY },
     toolId(TK_PICK, TT_DIAMOND), 1, 0 },
 
-  { "WOOD SWORD",    { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+  // Swords: a blade over a handle. One column, which is what makes them
+  // different from the picks rather than merely cheaper than them.
+  { "WOOD SWORD",    { world::B_PLANK, CELL_EMPTY, world::B_PLANK, CELL_EMPTY },
     toolId(TK_SWORD, TT_WOOD), 1, 0 },
-  { "STONE SWORD",   { world::B_STONE, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+  { "STONE SWORD",   { world::B_STONE, CELL_EMPTY, world::B_PLANK, CELL_EMPTY },
     toolId(TK_SWORD, TT_STONE), 1, 0 },
-  { "IRON SWORD",    { world::B_IRON, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+  { "IRON SWORD",    { world::B_IRON, CELL_EMPTY, world::B_PLANK, CELL_EMPTY },
     toolId(TK_SWORD, TT_IRON), 1, 0 },
-  { "DIAMOND SWORD", { world::B_DIAMOND, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+  { "DIAMOND SWORD", { world::B_DIAMOND, CELL_EMPTY, world::B_PLANK, CELL_EMPTY },
     toolId(TK_SWORD, TT_DIAMOND), 1, 0 },
 };
 
@@ -584,10 +618,51 @@ static void sortCells(uint8_t out[GRID_N], const uint8_t in[GRID_N]) {
   }
 }
 
+// Shifts a pattern up and left until it touches both edges of the grid, which
+// is what makes matching translatable: the same two cells stacked in the right
+// column come out identical to the same two cells stacked in the left one, and
+// the player only has to get the SHAPE right rather than the corner as well.
+//
+// A 2x2 makes this cheap enough to write out. The column offset is 1 only when
+// nothing is in the left column, and the row offset is 1 only when nothing is
+// in the top row; both are at most one, because a pattern that is empty in both
+// halves of an axis is empty altogether.
+static void normalise(uint8_t out[GRID_N], const uint8_t grid[GRID_N]) {
+  const bool anyLeft = grid[0] != CELL_EMPTY || grid[2] != CELL_EMPTY;
+  const bool anyTop  = grid[0] != CELL_EMPTY || grid[1] != CELL_EMPTY;
+  const bool anyAt   = anyLeft || grid[1] != CELL_EMPTY || grid[3] != CELL_EMPTY;
+  const int dc = (anyAt && !anyLeft) ? 1 : 0;
+  const int dr = (anyAt && !anyTop)  ? 1 : 0;
+  for (int r = 0; r < 2; ++r)
+    for (int c = 0; c < 2; ++c) {
+      const int sr = r + dr, sc = c + dc;
+      out[r * 2 + c] = (sr < 2 && sc < 2) ? grid[sr * 2 + sc] : CELL_EMPTY;
+    }
+}
+
 uint8_t matchGrid(const uint8_t grid[GRID_N]) {
   uint8_t a[GRID_N];
+  normalise(a, grid);
+  bool any = false;
+  for (int i = 0; i < GRID_N; ++i) any = any || (a[i] != CELL_EMPTY);
+  if (!any) return R_NONE;                     // nothing laid out at all
+  for (uint8_t r = 0; r < R_COUNT; ++r) {
+    // kRecipe rows are stored normalised, so this is a straight compare.
+    bool same = true;
+    for (int i = 0; i < GRID_N && same; ++i) same = (a[i] == kRecipe[r].cells[i]);
+    if (same) return r;
+  }
+  return R_NONE;
+}
+
+// The old shapeless match, kept for exactly one job: saying WRONG SHAPE instead
+// of NO RECIPE. Being told you have the right materials in the wrong
+// arrangement is the whole answer to the objection that shaped recipes give a
+// player with no pointer four ways to be silently wrong.
+uint8_t matchLoose(const uint8_t grid[GRID_N]) {
+  uint8_t a[GRID_N];
   sortCells(a, grid);
-  if (a[0] == CELL_EMPTY) return R_NONE;       // nothing laid out at all
+  if (a[0] == CELL_EMPTY) return R_NONE;
   for (uint8_t r = 0; r < R_COUNT; ++r) {
     uint8_t b[GRID_N];
     sortCells(b, kRecipe[r].cells);
@@ -722,6 +797,16 @@ void gridMove(State& s, int dx, int dy) {
 // Cycles one cell through the materials the player actually holds, plus empty.
 // Only what is held: a grid that can name a material you have none of is a grid
 // that spends most of its keypresses on things you cannot make.
+bool gridSetFromSlot(State& s, uint8_t slot) {
+  if (!gridOnCell(s)) return false;
+  if (slot < 1 || slot > SLOT_N) return false;
+  const uint8_t held = s.slot[slot - 1];
+  if (held == SLOT_EMPTY || held >= world::B_COUNT) return false;  // empty, or a tool
+  if (s.inv[held] == 0) return false;
+  s.grid[s.gridSel] = held;
+  return true;
+}
+
 void gridCycle(State& s, int delta) {
   // Only a cell holds a material. On the result slot or the book row there is
   // nothing to cycle, and quietly editing cell 0 from the far side of the card
@@ -906,6 +991,7 @@ void begin(State& s, uint32_t seed) {
   s.cam.px = (float)(world::W / 2) + 0.5f;
   s.cam.py = (float)(world::H / 2) + 0.5f;
   s.feetZ  = world::groundAt(s.cam.px, s.cam.py);
+  s.footZ  = (float)s.feetZ;       // grounded, and agreeing before the first tick
   s.cam.z  = (float)s.feetZ + raycast::EYE;
   s.eyeZ   = s.cam.z;              // start settled, not falling into the world
   s.eyeVel = 0.0f;
@@ -1674,6 +1760,13 @@ static uint32_t placeAgainstFace(State& s, uint8_t held) {
 
   if (tz < 0 || tz >= world::MAX_H)      return EV_CANT_PLACE;
   if (world::isBorder(tx, ty))           return EV_CANT_PLACE;
+  // Nothing gets built from mid-air. The body-volume test below is what stops
+  // pillaring straight up out of a wave, and it measures from feetZ — which the
+  // jump deliberately stops updating while the player is off the ground. At the
+  // top of an arc the volume has risen with them and the cell they took off
+  // over is no longer covered, so without this a jump-and-place would put that
+  // pillar back. Refusing outright is also the honest rule to explain.
+  if (s.airborne)                        return EV_CANT_PLACE;
 
   // Not inside the player, and not inside anything alive. This replaces an
   // older test that refused only the cell the player was standing in — which
@@ -1907,14 +2000,45 @@ uint32_t tick(State& s, const Input& in) {
     raycast::setPitch(s.cam, (int)(s.pitch + 0.5f));
   }
 
+  // -- take-off
+  //
+  // The latch, not an edge from the HAL: one Input covers up to MAX_CATCHUP
+  // ticks, so testing in.jump alone would launch the player once per tick. See
+  // Input::jump. Refusing while already airborne is what makes this a jump and
+  // not a flight control.
+  if (in.jump && !s.jumpHeld && !s.airborne) {
+    s.airborne = true;
+    s.footZ    = (float)s.feetZ;
+    s.jumpVel  = JUMP_VEL / (float)TICK_HZ;
+    // Fixed here and never re-read: the arc carries forward on its own, which
+    // is the whole point of one key meaning up AND forward.
+    s.airDX    = s.cam.dx * JUMP_FWD / (float)TICK_HZ;
+    s.airDY    = s.cam.dy * JUMP_FWD / (float)TICK_HZ;
+    ev |= EV_JUMP;
+  }
+  s.jumpHeld = in.jump;
+
+  // The height every movement test is measured from. On the ground this is
+  // feetZ, as it always was; in the air it is the arc, which is what lets a
+  // jump clear a ledge the walker would have been stopped by.
+  const int fromH = s.airborne ? (int)floorf(s.footZ) : (int)s.feetZ;
+
   float fwd = 0.0f;
   if (in.fwd)  fwd += 1.0f;
   if (in.back) fwd -= STRAFE_SCALE;
+  // Steering in mid-air is damped rather than removed. Removed entirely, a jump
+  // that started a hair off line could not be saved and read as the game taking
+  // the controls away; at full strength the arc is not an arc at all.
+  const float ctl = s.airborne ? AIR_CONTROL : 1.0f;
+  float mx = 0.0f, my = 0.0f;
   if (fwd != 0.0f) {
-    const float v = fwd * MOVE_SPEED / (float)TICK_HZ;
-    slide(s.cam.px, s.cam.py, s.cam.dx * v, s.cam.dy * v, PLAYER_RADIUS,
-          (int)s.feetZ);
+    const float v = fwd * ctl * MOVE_SPEED / (float)TICK_HZ;
+    mx += s.cam.dx * v;
+    my += s.cam.dy * v;
   }
+  if (s.airborne) { mx += s.airDX; my += s.airDY; }
+  if (mx != 0.0f || my != 0.0f)
+    slide(s.cam.px, s.cam.py, mx, my, PLAYER_RADIUS, fromH);
 
   // The eye chases the ground under it instead of being pinned to it. A step up
   // is already automatic — world::STEP_UP lets a body walk onto a one-block
@@ -1922,7 +2046,52 @@ uint32_t tick(State& s, const Input& in) {
   // a whole world unit between two frames, and what the player saw was a jump
   // cut, not a step. The spring below is that same automatic step with the
   // motion put back into it.
-  {
+  //
+  // A body in mid-air is the one case where the ground under it is NOT where it
+  // is, so the reassignment below is gated rather than sitting beside the arc.
+  if (s.airborne) {
+    // Same integrator, same gravity, same units as a dropped item — see the
+    // DROP_GRAVITY block in stepDrops(). There is one gravity in this world.
+    constexpr float G = DROP_GRAVITY / (float)TICK_HZ / (float)TICK_HZ;
+    s.jumpVel -= G;
+    s.footZ   += s.jumpVel;
+
+    const int cx = (int)s.cam.px, cy = (int)s.cam.py;
+    if (s.jumpVel > 0.0f) {
+      // Bonking a ceiling is a test on the cell the HEAD is entering, not the
+      // one the feet are in: the body spans [footZ, footZ + HEADROOM), and with
+      // a fractional height those are different cells. Getting this wrong is
+      // how a player rises through a floor by a fraction of a block.
+      const float head = s.footZ + (float)world::HEADROOM;
+      const int   hz   = (int)floorf(head);
+      if (world::solidAt(cx, cy, hz)) {
+        s.footZ   = (float)hz - (float)world::HEADROOM;
+        s.jumpVel = 0.0f;
+      }
+      // Note what this does for someone who has walled themselves in: a block
+      // directly over the head means footZ cannot exceed where it started, so
+      // they do not leave the ground at all. Jumping is not a way out of a box.
+    } else {
+      const uint8_t sfc = world::surfaceUnder(cx, cy, (int)floorf(s.footZ));
+      if (sfc != world::NO_SURFACE && s.footZ <= (float)sfc) {
+        s.footZ    = (float)sfc;
+        s.feetZ    = sfc;
+        s.airborne = false;
+        // Hand the impact to the spring rather than stopping dead. eyeZ is
+        // about to sit exactly on its target, so d is zero and the only thing
+        // left moving is this velocity — the view dips and recovers, and a
+        // landing crouch falls out of machinery that already exists.
+        s.eyeVel   = s.jumpVel;
+        s.jumpVel  = 0.0f;
+        ev |= EV_LAND;
+      }
+    }
+
+    // No spring while airborne. The arc is real physics and is already smooth;
+    // easing the eye toward it would only lag it behind the body.
+    s.eyeZ  = s.footZ + raycast::EYE;
+    s.cam.z = s.eyeZ;
+  } else {
     // Where the feet are is a fact about the world and is resolved first; the
     // eye then chases it. Keeping the two separate is what lets a bridge deck
     // be walked onto — the surface can jump a block while the view does not.
@@ -1936,6 +2105,11 @@ uint32_t tick(State& s, const Input& in) {
     s.feetZ = (sfc == world::NO_SURFACE)
                 ? world::groundAt(s.cam.px, s.cam.py)
                 : sfc;
+    // Walking off a ledge stays here, on the instant reassignment it has always
+    // had. `airborne` is set by the jump key and by nothing else: this is a
+    // jump, not a fall-physics rewrite, and stepping off a cliff should read
+    // exactly as it did before.
+    s.footZ = (float)s.feetZ;
     const float target = (float)s.feetZ + raycast::EYE;
     const float d = target - s.eyeZ;
     if (d * d < EYE_SNAP * EYE_SNAP && s.eyeVel * s.eyeVel < EYE_SNAP * EYE_SNAP) {

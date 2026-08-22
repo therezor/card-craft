@@ -8,12 +8,13 @@
 //  define, implement the functions below, and add a matching [env:...] in
 //  platformio.ini with -D BOARD_<X>. No game code changes.
 //
-//  The input contract is eight held flags and nine edges, and the game is
+//  The input contract is nine held flags and nine edges, and the game is
 //  playable with only four of them — see Buttons. That ceiling is deliberate:
 //  it is what lets this run on a board with three buttons and no keyboard.
 //  Everything past the core degrades to less game, never to a broken one: no
-//  pitch keys means the fixed downward tilt the game shipped with, and no
-//  speaker means silence, not a crash.
+//  pitch keys means the fixed downward tilt the game shipped with, no jump key
+//  means a player who walks everywhere, and no speaker means silence, not a
+//  crash.
 // =============================================================================
 #pragma once
 
@@ -36,6 +37,10 @@ struct Buttons {
   // stack is paced by the simulation, not here. A board with no key to spare
   // leaves it false and simply cannot throw anything away.
   bool drop = false;
+  // Held, and latched into a single take-off inside the simulation rather than
+  // edged here. The frame builds one Input and feeds it to up to four catch-up
+  // ticks, so an edge in this struct would launch the player four times.
+  bool jump = false;
 
   // Down-edges, true for exactly one frame. Menus read these, so a held key
   // cannot rip through a three-item card in one press.
@@ -78,14 +83,15 @@ struct Buttons {
 struct Caps {
   const char* kTurn;    // e.g. "< >"
   const char* kMove;    // e.g. "^ v"
-  const char* kAct;     // e.g. "E"
-  const char* kBuild;   // e.g. "D"
+  const char* kAct;     // e.g. "W"
+  const char* kBuild;   // e.g. "A"
   const char* kConfirm; // e.g. "ENTER"
   const char* kBack;    // e.g. "ESC"
-  const char* kCycle;   // e.g. "S"
-  const char* kCraft;   // e.g. "W"
+  const char* kCycle;   // e.g. "D"
+  const char* kCraft;   // e.g. "TAB"
   const char* kDrop;    // e.g. "Q", or nullptr where the board has no drop key
-  const char* kLook;    // e.g. "R F", or nullptr where the board has no pitch
+  const char* kLook;    // e.g. "E S", or nullptr where the board has no pitch
+  const char* kJump;    // e.g. "SPACE", or nullptr where the board has no jump
 };
 
 void          begin();

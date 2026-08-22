@@ -1,5 +1,193 @@
 # Changelog
 
+## 1.8.0 — a hand you can play without looking, and a recipe you can read
+
+### The left hand gets a shape
+
+The bindings had accreted rather than been laid out. Mining was `E`, building
+`D`, hotbar `S`, crafting `W`, pitch `R`/`F` — five keys across two rows with no
+spatial logic between them, and `A` was not bound to anything at all. Nothing
+about the layout told your fingers where anything was.
+
+The four things you do constantly are now a square under one hand:
+
+```
+   [W][E]     W mines, A builds — the two verbs that touch the world, down
+   [A][S]     the left. E and S look up and down, down the right, so the
+              camera pair is one finger apart and up is above down.
+```
+
+`D` falls just off the square and steps the hotbar, `TAB` opens crafting, and
+`SPACE` jumps. `R` and `F` are unbound rather than kept as aliases: a key that
+means two things is the thing this layout exists to remove.
+
+Which is also why **`ENTER` alone confirms now**. Confirm used to be aliased onto
+the act key — harmless while acting was `E`, and not harmless at all once acting
+is `W`, because every card in the game would have been confirmed by the mine key.
+`TAB` likewise stops being a second name for `ESC`; it means craft.
+
+Nothing outside `src/hal/` names a physical key, so all of this is a table in
+`hal_cardputer.cpp` plus one new field. The hints were already generated from
+`hal::Caps` and needed no changes to tell the truth about the new layout.
+
+### A jump, and the one number in it that is not a feel knob
+
+There was no vertical movement of any kind: the player's height was reassigned
+from the terrain every tick and a spring dragged the eye after it. There is now
+a real arc — same integrator, same gravity constant, and the same units as a
+dropped item, because a world should only have one gravity in it.
+
+**One key does up and forward together.** Chording jump with the move key on a
+Cardputer is precisely the problem, so the forward carry is fixed at take-off
+from the facing direction and the arc carries you whether or not anything else
+is held. About 2.3 cells: a gap, a lava pit, or getting off a ledge on purpose.
+
+The apex is 0.89 of a block, and that number is load-bearing rather than tuned.
+`world::surfaceUnder()` answers for a body at `fromZ` by looking as high as
+`fromZ + STEP_UP`, and everything airborne passes `floorf(footZ)` as that
+`fromZ`. Let the apex reach a whole block and `floorf` returns 1 at the top of
+the arc — that `+1` stacks with the `+1` already allowed for stepping up, and
+the player steps off their own jump onto a two-high wall. Which `world.h` says
+outright must not happen, because an unclimbable two-high wall is what makes
+walling yourself in worth doing. Under 1.0 the floor never leaves the take-off
+level, every world query during the arc sees exactly what walking sees, and the
+invariant holds with no extra machinery at all. **A jump grants no height that
+walking did not already grant.** There is a host test that says so, and it is
+the one that will catch the next person who raises the constant to make the
+jump feel snappier.
+
+Two smaller consequences. Jumping is refused, not clamped, while sealed in —
+a block over your head means the feet never leave the floor, so a box is still a
+box. And **building is refused in mid-air**: the body-volume test that stops
+pillaring measures from a height the jump deliberately stops updating, so
+without this, jump-and-place would put the pillar straight back.
+
+The take-off edge lives in the simulation rather than in the HAL, which is not
+where an edge belongs until you notice that one `Input` is built per *frame* and
+handed to as many as four catch-up ticks. As an edge in the HAL it launched the
+player four times.
+
+### A recipe is a shape
+
+Twelve recipes over a 2×2 grid, and the most any of them used was three cells.
+Matching sorted both sides into a multiset, so where a material sat was not part
+of the recipe: the grid was four boxes meaning "up to four of these", and
+nothing the player learned about layout ever paid off.
+
+Recipes are **shaped** now, and the shapes are pictures of the thing. A pickaxe
+is a wide head over a handle; a sword is a blade over a handle; a torch is coal
+over wood. Matching is **translatable** — a pattern is shifted to the top-left
+before it is compared, so only the shape has to be right and not the corner it
+was built in, and a sword works in either column.
+
+The old invariant was "no two recipes are the same multiset", and it was what
+kept every recipe under four cells: `BRICKS` and `STONE PICK` were already
+competing for "3 stone". The new one is "no two recipes are the same normalised
+pattern", which is weaker, and the slack pays for three recipes that genuinely
+fill the grid — **`MASONRY`**, which had no recipe at all and existed only in
+the structures the generator puts down; **`TORCHES`**, ten for four, worth making
+before dusk rather than at it; and **`SALVE`**, a bigger heal than a patch. A
+host test proves no two rows collide, because that is exactly what a sixteenth
+recipe would quietly break.
+
+The obvious objection to shaped recipes on a keyboard with no pointer is that
+they fail silently — and the old design comment said so, which is why the
+order-blind matcher is still in the source rather than deleted. It answers a
+different question now: when the materials are right and the arrangement is not,
+the card says **`WRONG SHAPE`** and names the recipe you nearly made. Two more
+things blunt the same edge: `1`–`9` fill the cell under the cursor outright from
+that hotbar slot, so laying out a shape costs four keypresses rather than four
+laps of a cycling list, and the book draws every recipe as the 2×2 it actually
+goes into, holes and all, instead of a run of icons with the empty cells
+skipped — which was fine while matching was shapeless and threw away precisely
+the information that now decides whether the grid crafts.
+
+### Block art everywhere a block is shown
+
+Inventory icons were three flat rectangles off each material's single average
+colour, while the game had 16×16 art for every one of those blocks already
+resident in RAM for the walls to sample. Grass on the hotbar was a green square.
+
+It is grass now: the block's own art, scaled down, and nothing else.
+
+There was briefly a lit top lip and a shaded right edge over it, carried across
+from the flat-colour version where they were the two rectangles that made a
+swatch read as a cube. They do not survive contact with a real texture. Three
+pixels cannot hold a face at any brightness, and stretching all sixteen rows of
+the top tile into them averages the texture away to nothing and then brightens
+the mush toward white — so it read as a pale line stuck on top of the block,
+which is precisely what it looked like. Both are gone. The texture is the thing
+worth showing, so it is the only thing shown.
+
+Two new primitives carry it, and they write into the framebuffer directly rather
+than emitting one clipped `rect()` per texel the way the tool icons do. That
+pattern does not scale past an icon: the title background as one-pixel calls is
+thirty-four thousand of them. As stores it is what `fill()` already costs every
+frame. No new data, no flash duplicate, no RAM — only a different way of reading
+what was already there.
+
+### Cards
+
+The title screen was a flat fill with six flat swatches and four lines of
+control hints crammed under the logo. It is **tiled dirt with a course of grass
+on top**, drawn from the same texels as everything else, and it has a two-stop
+menu — `START` and `CONTROLS` — driven the way every other card is driven.
+
+The line under the logo said `SURVIVE THE NIGHT`, which is the kind of slogan
+that describes the game to someone already looking at it. Both of this game's
+parents solved that the same way and neither played it straight: Futurama puts a
+deadpan caption under its logo every episode, Minecraft puts a splash line next
+to its own, and in both the joke is that the line is not selling anything. So
+there is a table of thirty-seven captions now, one picked per visit to the
+title: product-disclaimer deadpan (`VOID WHERE PROHIBITED`) and lines about the
+game itself (`PUNCH A TREE. IT IS TRADITION.`). A third group boasting about the
+hardware — clock speeds, byte counts, how little RAM there is — was written and
+cut: the player holding the thing does not need telling what it is, and it read
+as a spec sheet wearing a joke.
+
+The font is uppercase and has no comma, apostrophe or question mark — those
+slots in `font5x7.h` are all zero and would print as holes — which is a real
+constraint on writing them, and the reason not one line has a comma in it.
+Thirty-eight characters is the width limit: a glyph advances 6px, so 38 comes to
+227 of the 240 available and leaves a margin, where 40 reaches 239 and touches
+both edges.
+
+**A different one every time the board is switched on**, which took two
+independent mechanisms because either alone can let you down. `micros()` at that
+point in `setup()` is boot time and lands within a few hundred microseconds of
+the same value on every cold start — mixing it produced the same caption every
+reset, which was the bug. `esp_random()` is the real source, but with the RF
+subsystem down, which it always is here, the IDF docs are explicit that it is
+not guaranteed random. So the last caption is also remembered in NVS and the
+roll draws from the other thirty-six: even with a constant seed the line still
+has to change. Verified over six hard resets — no two consecutive boots alike.
+
+**Sound is on by default now.** It shipped silent, which is the wrong default
+for a game whose mobs announce themselves before they arrive — a creeper hisses
+and a zombie winds up, and a player who never opens the pause card never learns
+that either of those makes a noise. Flipping the default was the whole change:
+the key is written only by the toggle, so a board that never touched the setting
+picks up the new default while anyone who deliberately switched sound off keeps
+their stored `false`. Unlike the last change here, nothing needed retiring.
+
+**A frame counter you can switch on**, from a new row on the pause card, off by
+default and kept in NVS beside the sound setting. Just the number, top-left,
+while playing. It is sampled every frame whether or not it is shown, so
+switching it on reads the rate you are already getting rather than counting up
+from nothing — and it sits a row above the dev build's overlay rather than on
+top of it, so a dev build with the setting on shows both.
+
+The hints moved to a **`CONTROLS` card**, reachable from the title and from the
+pause menu, where they can be laid out properly instead of squeezed into a
+footer. Every row on it comes from `hal::Caps`, so a board with three buttons
+prints its own three buttons and does not lie about the rest; the row pitch is
+derived from how many bindings the board actually has, so the card fills itself
+either way.
+
+The pause menu gained `CONTROLS` and `FPS` rows and is six items in a four-row
+window — `Menu` has had scrolling and margin chevrons all along and nothing was
+using them.
+
 ## 1.7.0 — the hand you swing with
 
 ### Three held items, one hand

@@ -52,7 +52,30 @@ void recipeBook(const game::State& s, int sel, const char* footer);
 // needs the same number to clamp against.
 constexpr int BOOK_ROWS = 4;
 
-void title(const char* board, uint32_t best);
+// The title card. `sel` is which of its two rows the cursor is on; the caller
+// owns that cursor, the same way it owns the book's.
+void title(const char* board, uint32_t best, int sel);
+
+// Picks a new caption for the title. Called when the title is entered rather
+// than every frame -- see kSplash in ui.cpp for why. Never repeats the caption
+// currently showing, so `seed` only has to decide WHICH other one; it does
+// still have to vary, or every boot opens on the same joke.
+void rerollSplash(uint32_t seed);
+
+// The caption showing, and a way to put one back. Together these let the boot
+// remember what the last boot ended on, so the first title of a new session
+// avoids repeating it too. -1 is "nothing shown yet".
+int  splashIndex();
+void setSplashIndex(int i);
+
+// How many stops the title menu has. The caller wraps against this.
+constexpr int TITLE_ROWS = 2;
+
+// Every binding the board has, drawn from hal::Caps. Reachable from the title
+// and from the pause card, which is why it is a card of its own rather than
+// something either of them draws inline.
+void controlsCard(const char* footer);
+
 void deathCard(const game::State& s, uint32_t best, bool isRecord);
 
 // ---- menus ------------------------------------------------------------------

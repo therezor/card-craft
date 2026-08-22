@@ -294,6 +294,67 @@ void textCentred(int cx, int y, const char* s, uint16_t c, int scale) {
   text(cx - textWidth(s, scale) / 2, y, s, c, scale);
 }
 
+// ---- block art outside the 3D pass ------------------------------------------
+
+// Both of the public entry points below. `zoom` of 0 means stretch one tile
+// over the whole rectangle; anything else repeats the tile at that many pixels
+// per texel.
+//
+// Written as a direct pixel loop rather than one rect() per texel, which is the
+// way the tool icons are drawn and does not scale past an icon: a full-screen
+// tiling that way is thirty-four thousand clipped one-pixel calls. This is
+// thirty-four thousand stores, which is what fill() already costs every frame.
+//
+// Two lookups are hoisted out of the inner loop -- the palette, which lives in
+// flash, and the per-column texel index, which would otherwise be a divide per
+// pixel. What is left is a load and a store.
+static void texFill(int x, int y, int w, int h, uint8_t mat, bool top,
+                    int zoom, int mul) {
+  if (mat >= world::B_COUNT || w <= 0 || h <= 0) return;
+  buildTextures();
+
+  int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+  int x1 = x + w > W ? W : x + w, y1 = y + h > H ? H : y + h;
+  if (x0 >= x1 || y0 >= y1) return;
+
+  uint16_t lut[textures::TEXELS];
+  for (int i = 0; i < textures::TEXELS; ++i) {
+    int r = (textures::kTexPal[mat][i][0] * mul) >> 8;
+    int g = (textures::kTexPal[mat][i][1] * mul) >> 8;
+    int b = (textures::kTexPal[mat][i][2] * mul) >> 8;
+    lut[i] = pack((uint8_t)(r > 255 ? 255 : r), (uint8_t)(g > 255 ? 255 : g),
+                  (uint8_t)(b > 255 ? 255 : b));
+  }
+
+  // s_tex is [material][u][v] -- column-major, so a texel is tex[u * TEX_N + v].
+  const uint8_t* tex = top ? s_topFor[mat] : &s_tex[mat][0][0];
+
+  uint8_t ucol[W];
+  for (int px = x0; px < x1; ++px) {
+    const int lx = px - x;
+    ucol[px] = (uint8_t)(zoom > 0 ? ((lx / zoom) & (textures::TEX_N - 1))
+                                  : ((lx * textures::TEX_N) / w));
+  }
+
+  for (int py = y0; py < y1; ++py) {
+    const int ly = py - y;
+    const int v = zoom > 0 ? ((ly / zoom) & (textures::TEX_N - 1))
+                           : ((ly * textures::TEX_N) / h);
+    uint16_t* p = raw() + py * W;
+    for (int px = x0; px < x1; ++px)
+      p[px] = lut[tex[ucol[px] * textures::TEX_N + v]];
+  }
+}
+
+void stretchTex(int x, int y, int w, int h, uint8_t mat, bool top, int mul) {
+  texFill(x, y, w, h, mat, top, 0, mul);
+}
+
+void tileTex(int x, int y, int w, int h, uint8_t mat, bool top, int zoom,
+             int mul) {
+  texFill(x, y, w, h, mat, top, zoom < 1 ? 1 : zoom, mul);
+}
+
 // ---- shading ----------------------------------------------------------------
 
 // The selection lift. A share of the headroom left above the colour, not a

@@ -31,31 +31,38 @@ static bool s_prevCraft = false;
 static uint16_t s_prevSlot = 0;
 
 // Two-handed: the arrow cluster (; . , /) sits under the right hand and does
-// all the moving and menu navigation, while E and D sit under the left and do
-// all the acting. They never share a key, which is why WASD is not also bound
-// to movement — D has to mean build, and a key cannot mean two things.
+// all the moving and menu navigation, while the left hand rests on a four-key
+// square and does all the acting.
 //
-// SPACE and ENTER stay bound as aliases for act and confirm: they are what
-// anyone tries first, and they cost nothing to keep.
+//     [W][E]     W mines, A builds -- the two verbs that touch the world, on
+//     [A][S]     the left of the square. E and S look up and down, on the
+//                right of it, so the camera pair is one finger apart and up
+//                is above down under the hand as well as on the panel.
+//
+// D falls just off the square and cycles the hotbar; SPACE, under the thumb,
+// jumps. No key means two things, which is the rule this layout is built on --
+// and it is why ENTER alone confirms now. Confirm used to be aliased onto the
+// act key, which was harmless while act was E and is not harmless at all now
+// that act is W: every card would be confirmed by the mine key.
 static const Caps s_caps = {
   /*kTurn */ "\x1B\x1A",   // left/right arrows, drawn from the HUD font
   /*kMove */ "\x18\x19",   // up/down
-  /*kAct  */ "E",
-  /*kBuild*/ "D",
+  /*kAct  */ "W",
+  /*kBuild*/ "A",
   /*kConfirm*/ "ENTER",
-  // ESC rather than TAB or ` . All three are the same key to this game, and
-  // two of them are bad labels: the HUD font has no backtick, and TAB names
-  // the wrong one of the two physical keys that work. The Cardputer has no key
-  // engraved ESC, but the one under the player's left thumb at the top-left
-  // corner is where ESC lives on every keyboard they have ever used, and that
-  // is what a hint is for.
+  // ESC rather than ` -- the HUD font has no backtick, and the Cardputer has
+  // no key engraved ESC either, but the one under the player's left thumb at
+  // the top-left corner is where ESC lives on every keyboard they have ever
+  // used, and that is what a hint is for. TAB is no longer an alias for it:
+  // TAB opens the crafting card now.
   /*kBack*/ "ESC",
-  /*kCycle*/ "S",
-  /*kCraft*/ "W",
+  /*kCycle*/ "D",
+  /*kCraft*/ "TAB",
   /*kDrop*/  "Q",
-  // R sits directly above F on this keyboard, so up is up and down is down
+  // E sits directly above S on this keyboard, so up is up and down is down
   // under the fingers as well as on the panel.
-  /*kLook */ "RF",
+  /*kLook */ "E S",
+  /*kJump */ "SPACE",
 };
 
 void begin() {
@@ -82,23 +89,29 @@ void update() {
   b.right = kb.isKeyPressed('/');
   b.fwd   = kb.isKeyPressed(';');
   b.back  = kb.isKeyPressed('.');
-  // Left hand: E swings, D builds.
-  b.act   = kb.isKeyPressed('e') || kb.isKeyPressed(' ');
-  b.build = kb.isKeyPressed('d');
+  // Left hand, left column of the square: W swings, A builds.
+  b.act   = kb.isKeyPressed('w');
+  b.build = kb.isKeyPressed('a');
   // Q throws the selected item on the floor. Minecraft's key, and the one free
   // letter next to the movement hand -- held rather than edged, because the
   // simulation paces the repeat that empties a stack.
   b.drop  = kb.isKeyPressed('q');
-  // R over F, one row apart, so the pair reads as up and down without a hint.
-  // Both together recentres the view; the game handles that, not the HAL.
-  b.lookUp   = kb.isKeyPressed('r');
-  b.lookDown = kb.isKeyPressed('f');
+  // Right column of the square: E over S, one row apart, so the pair reads as
+  // up and down without a hint. Both together recentres the view; the game
+  // handles that, not the HAL.
+  b.lookUp   = kb.isKeyPressed('e');
+  b.lookDown = kb.isKeyPressed('s');
+  // Held, not edged. The frame builds one Input and hands it to as many as four
+  // catch-up ticks, so an edge computed here would take off four times; the
+  // rising edge is latched in the simulation instead, where it is seen once.
+  b.jump  = kb.isKeyPressed(' ');
 
-  const bool pause = kb.isKeyPressed('`') || st.tab;
-  // W and S finish the left-hand cluster: craft and mine on the top row,
-  // cycle and build on the bottom, all under one hand.
-  const bool cyc = kb.isKeyPressed('s');
-  const bool crf = kb.isKeyPressed('w');
+  // ` alone. TAB used to be an alias for it and now opens the craft card, which
+  // is the one place a second key for "back" would have been actively wrong.
+  const bool pause = kb.isKeyPressed('`');
+  // D falls just off the square and steps the hotbar; TAB opens crafting.
+  const bool cyc = kb.isKeyPressed('d');
+  const bool crf = st.tab;
 
   b.leftEdge  = b.left  && !s_prev.left;
   b.rightEdge = b.right && !s_prev.right;
@@ -106,12 +119,11 @@ void update() {
   b.backEdge  = b.back  && !s_prev.back;
   b.actEdge   = b.act   && !s_prev.act;
   b.buildEdge = b.build && !s_prev.build;
-  // Enter confirms but never acts, so dismissing a card cannot also swing.
-  // E stays bound alongside ENTER, the way SPACE stays bound alongside E: it
-  // is what a hand already resting on the mine key will try first, and it
-  // costs nothing. ENTER is what the hints name, because it is the one that
-  // means only this.
-  b.confirmEdge = (b.act || st.enter) && !(s_prev.act || s_prevEnter);
+  // ENTER, and only ENTER. The act key used to be aliased onto confirm because
+  // act was E and a hand on E would try it first; act is W now, and leaving the
+  // alias would mean the mine key confirms every card in the game. One meaning,
+  // one key -- which is what the hints have always named anyway.
+  b.confirmEdge = st.enter && !s_prevEnter;
   b.cancelEdge  = pause && !s_prevPause;
 
   // One cluster, two vocabularies. Up the panel is up the list.

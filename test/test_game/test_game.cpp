@@ -921,31 +921,145 @@ static void test_bare_hands_can_chop_wood(void) {
   TEST_ASSERT_EQUAL_UINT16(3, s.inv[world::B_WOOD]);
 }
 
-// Matching is a multiset, so where in the grid a material sits is not part of
-// the recipe. The bug this guards: comparing the cells position by position,
-// which makes a two-cell recipe unmakeable in three of its four layouts.
-static void test_grid_matching_ignores_where_things_sit(void) {
+// Matching is shaped, and a shape may sit anywhere it fits.
+//
+// This test used to assert the opposite -- that a multiset was the whole
+// recipe -- and it is inverted rather than merely repaired, because the
+// property it guarded is the one that was deliberately given up. What survives
+// is its real point: a player must not have to hit one exact corner.
+static void test_a_shape_matches_wherever_it_fits(void) {
   State s = fresh();
-  layGrid(s, { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY });
+  // A sword is a blade over a handle. Left column...
+  layGrid(s, { world::B_PLANK, CELL_EMPTY, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
+  // ...and the right column is the same sword, shifted.
+  layGrid(s, { CELL_EMPTY, world::B_PLANK, CELL_EMPTY, world::B_PLANK });
   TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
 
-  layGrid(s, { CELL_EMPTY, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
-  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
-
-  layGrid(s, { CELL_EMPTY, CELL_EMPTY, world::B_PLANK, world::B_PLANK });
-  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
-
-  // A third plank is a different recipe, not a near-enough one. Count is the
-  // only thing separating the sword from the pickaxe.
-  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
-  TEST_ASSERT_EQUAL_UINT8(R_PICK_WOOD, matchGrid(s.grid));
-
-  // And a fourth is nothing at all.
-  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, world::B_PLANK });
-  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+  // A single cell is the same recipe in all four corners.
+  for (int i = 0; i < GRID_N; ++i) {
+    layGrid(s, { CELL_EMPTY, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
+    s.grid[i] = world::B_WOOD;
+    TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
+  }
 
   layGrid(s, { CELL_EMPTY, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
   TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+}
+
+// ...but the shape itself has to be right. Two planks side by side are not a
+// sword, and that is the whole of what changed.
+static void test_the_same_materials_in_the_wrong_shape_do_not_craft(void) {
+  State s = fresh();
+  layGrid(s, { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+
+  // Diagonals are a shape of their own, and no recipe spells one.
+  layGrid(s, { world::B_PLANK, CELL_EMPTY, CELL_EMPTY, world::B_PLANK });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+
+  // A pickaxe is a head over a handle; the handle cannot be on top.
+  layGrid(s, { world::B_PLANK, CELL_EMPTY, world::B_PLANK, world::B_PLANK });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_PICK_WOOD, matchGrid(s.grid));
+}
+
+// A grid that spells nothing but holds the right materials says so, rather than
+// leaving the player to guess which of the two things is wrong. This is the
+// answer to the objection that shaped recipes fail silently.
+static void test_the_right_materials_in_the_wrong_shape_are_named(void) {
+  State s = fresh();
+  layGrid(s, { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchLoose(s.grid));
+
+  // Materials that spell nothing in any arrangement stay unnamed.
+  layGrid(s, { world::B_SAND, world::B_SNOW, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchLoose(s.grid));
+}
+
+// All four cells are finally worth something. A full grid used to be, by
+// construction, nothing at all -- no recipe reached past three.
+static void test_the_four_cell_recipes_craft(void) {
+  State s = fresh();
+
+  s.inv[world::B_STONE] = 40; s.slot[0] = world::B_STONE;
+  layGrid(s, { world::B_STONE, world::B_STONE, world::B_STONE, world::B_STONE });
+  TEST_ASSERT_EQUAL_UINT8(R_MASONRY, matchGrid(s.grid));
+  TEST_ASSERT_TRUE(craftGrid(s));
+  TEST_ASSERT_EQUAL_UINT16(4, s.inv[world::B_MASONRY]);
+
+  State t = fresh();
+  t.inv[world::B_COAL] = 40; t.slot[0] = world::B_COAL;
+  t.inv[world::B_WOOD] = 40; t.slot[1] = world::B_WOOD;
+  layGrid(t, { world::B_COAL, world::B_COAL, world::B_WOOD, world::B_WOOD });
+  TEST_ASSERT_EQUAL_UINT8(R_TORCHES, matchGrid(t.grid));
+  TEST_ASSERT_TRUE(craftGrid(t));
+  TEST_ASSERT_EQUAL_UINT16(10, t.inv[world::B_TORCH]);
+
+  State u = fresh();
+  u.maxHp = 20; u.hp = 10;
+  u.inv[world::B_LEAVES] = 40; u.slot[0] = world::B_LEAVES;
+  u.inv[world::B_WOOD]   = 40; u.slot[1] = world::B_WOOD;
+  layGrid(u, { world::B_LEAVES, world::B_LEAVES, world::B_WOOD, world::B_WOOD });
+  TEST_ASSERT_EQUAL_UINT8(R_SALVE, matchGrid(u.grid));
+  TEST_ASSERT_TRUE(craftGrid(u));
+  TEST_ASSERT_EQUAL_INT16(15, u.hp);
+}
+
+// No two recipes may spell the same normalised pattern -- the invariant that
+// replaced "no two rows are the same multiset". Checked here rather than by eye,
+// because it is exactly the thing a sixteenth recipe would quietly break.
+static void test_no_two_recipes_share_a_shape(void) {
+  for (uint8_t a = 0; a < R_COUNT; ++a)
+    for (uint8_t b = (uint8_t)(a + 1); b < R_COUNT; ++b) {
+      bool same = true;
+      for (int i = 0; i < GRID_N && same; ++i)
+        same = (recipeInfo(a).cells[i] == recipeInfo(b).cells[i]);
+      if (same) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "%s and %s are the same shape",
+                 recipeInfo(a).name, recipeInfo(b).name);
+        TEST_FAIL_MESSAGE(msg);
+      }
+    }
+}
+
+// Every recipe is stored already shifted to the top-left, which is what makes
+// the book's "lay this out for me" round-trip through matchGrid.
+static void test_every_recipe_is_stored_normalised(void) {
+  for (uint8_t r = 0; r < R_COUNT; ++r)
+    TEST_ASSERT_EQUAL_UINT8(r, matchGrid(recipeInfo(r).cells));
+}
+
+// The number row fills a cell outright. Cycling is still there, but a shaped
+// recipe is up to four cells of it and the number row is the gesture the player
+// already knows from the hotbar.
+static void test_the_number_row_fills_a_grid_cell(void) {
+  State s = fresh();
+  hold(s, world::B_PLANK, 8);
+  const uint8_t slot = (uint8_t)(s.sel + 1);
+
+  s.gridSel = 2;
+  TEST_ASSERT_TRUE(gridSetFromSlot(s, slot));
+  TEST_ASSERT_EQUAL_UINT8(world::B_PLANK, s.grid[2]);
+  TEST_ASSERT_EQUAL_UINT8(CELL_EMPTY, s.grid[0]);   // only the focused cell
+
+  // An empty slot puts nothing anywhere.
+  uint8_t empty = 0;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == SLOT_EMPTY) { empty = (uint8_t)(i + 1); break; }
+  TEST_ASSERT_TRUE(empty != 0);
+  TEST_ASSERT_FALSE(gridSetFromSlot(s, empty));
+
+  // Neither does a tool: tools are made from ingredients, not out of them.
+  giveTool(s, TK_PICK, TT_WOOD);
+  TEST_ASSERT_FALSE(gridSetFromSlot(s, (uint8_t)(s.sel + 1)));
+
+  // ...and it does nothing at all off a cell.
+  s.gridSel = GRID_FOCUS_OUT;
+  TEST_ASSERT_FALSE(gridSetFromSlot(s, slot));
 }
 
 // A tool arrives on the bar at full durability, and the cells are spent.
@@ -2033,6 +2147,180 @@ static void test_pitch_holds_where_it_is_left(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, rest, s.pitch);
 }
 
+// ---- the jump ---------------------------------------------------------------
+
+// Terrain is generated, so a test about standing on flat ground has to go and
+// find some. Turns the player to face a cardinal direction whose neighbouring
+// column stands at exactly the height they do, and reports that cell.
+static bool faceFlatNeighbour(State& s, int& nx, int& ny) {
+  const int px = (int)s.cam.px, py = (int)s.cam.py;
+  static const float kAng[4] = { 0.0f, 1.5707963f, 3.1415927f, 4.7123890f };
+  for (int d = 0; d < 4; ++d) {
+    s.angle = kAng[d];
+    raycast::setAngle(s.cam, s.angle);
+    tick(s, Input{});                       // let feetZ settle at the new facing
+    const int ax = px + (int)lroundf(s.cam.dx);
+    const int ay = py + (int)lroundf(s.cam.dy);
+    if ((uint8_t)world::groundAt((float)ax + 0.5f, (float)ay + 0.5f) != s.feetZ)
+      continue;
+    nx = ax; ny = ay;
+    return true;
+  }
+  return false;
+}
+
+// Stacks blocks on a column until its surface reaches `target`.
+static void raiseTo(int x, int y, uint8_t target) {
+  for (int guard = 0; guard < 64; ++guard) {
+    if ((uint8_t)world::groundAt((float)x + 0.5f, (float)y + 0.5f) >= target) return;
+    world::place(x, y, world::B_STONE);
+  }
+}
+
+// The feet leave the ground and come back to it.
+static void test_a_jump_leaves_the_ground_and_lands(void) {
+  State s = fresh();
+  run(s, Input{}, 30);                       // settle
+  const uint8_t ground = s.feetZ;
+  const float   rest   = s.footZ;
+
+  Input jump; jump.jump = true;
+  const uint32_t took = tick(s, jump);
+  TEST_ASSERT_TRUE(took & EV_JUMP);
+  TEST_ASSERT_TRUE(s.airborne);
+
+  float apex = s.footZ;
+  bool landed = false;
+  uint32_t ev = 0;
+  // Airtime is about 31 ticks; give it well over that before calling it stuck.
+  for (int i = 0; i < 200 && !landed; ++i) {
+    ev = tick(s, Input{});                   // key released mid-air
+    if (s.footZ > apex) apex = s.footZ;
+    if (ev & EV_LAND) landed = true;
+  }
+  TEST_ASSERT_TRUE(landed);
+  TEST_ASSERT_FALSE(s.airborne);
+  TEST_ASSERT_TRUE(apex > rest + 0.5f);      // it was a jump, not a twitch
+  // ...and the apex is under a block. This is the whole safety property; see
+  // the test below for what goes wrong when it is not.
+  TEST_ASSERT_TRUE(apex < rest + 1.0f);
+  TEST_ASSERT_EQUAL_UINT8(ground, s.feetZ);  // flat ground: back where it started
+}
+
+// THE invariant. world.h promises a two-high wall is unclimbable, which is what
+// stops walling yourself in from being solved by walking; a jump must not solve
+// it either.
+//
+// This is the test that catches someone raising JUMP_VEL to make the jump feel
+// snappier. Let the apex reach a whole block and (int)floorf(footZ) becomes 1
+// at the top of the arc -- and that +1 stacks with the +1 that world::
+// surfaceUnder already allows for STEP_UP, so the player steps off their own
+// jump onto a wall two blocks high.
+static void test_a_jump_cannot_climb_a_two_high_wall(void) {
+  State s = fresh();
+  run(s, Input{}, 30);
+  int wx = 0, wy = 0;
+  if (!faceFlatNeighbour(s, wx, wy)) TEST_IGNORE_MESSAGE("no flat ground at spawn");
+
+  const uint8_t ground = s.feetZ;
+  raiseTo(wx, wy, (uint8_t)(ground + 2));
+  TEST_ASSERT_EQUAL_UINT8(ground + 2,
+      (uint8_t)world::groundAt((float)wx + 0.5f, (float)wy + 0.5f));
+
+  // Jump at it repeatedly, holding forward too -- every way a player would try.
+  Input go; go.jump = true; go.fwd = true;
+  for (int attempt = 0; attempt < 12; ++attempt) {
+    for (int i = 0; i < 60; ++i) {
+      tick(s, go);
+      TEST_ASSERT_TRUE(s.feetZ < ground + 2);      // never on top of it
+      TEST_ASSERT_TRUE(s.footZ < (float)ground + 2.0f);
+    }
+    run(s, Input{}, 5);                            // release, let the latch reset
+  }
+  TEST_ASSERT_TRUE(s.feetZ < ground + 2);
+}
+
+// One press, one jump. Holding the key must not fire again on landing, and --
+// the reason the latch is in State rather than in the HAL -- must not fire once
+// per catch-up tick while the same Input is replayed.
+static void test_holding_jump_does_not_repeat(void) {
+  State s = fresh();
+  run(s, Input{}, 30);
+
+  Input held; held.jump = true;
+  int takeoffs = 0;
+  for (int i = 0; i < 240; ++i) if (tick(s, held) & EV_JUMP) ++takeoffs;
+  TEST_ASSERT_EQUAL_INT(1, takeoffs);
+
+  // Releasing and pressing again is what arms it, and that must still work.
+  run(s, Input{}, 10);
+  TEST_ASSERT_TRUE(tick(s, held) & EV_JUMP);
+}
+
+// A jump cannot be started from mid-air, however the key is worked.
+static void test_no_second_jump_in_mid_air(void) {
+  State s = fresh();
+  run(s, Input{}, 30);
+  Input jump; jump.jump = true;
+  TEST_ASSERT_TRUE(tick(s, jump) & EV_JUMP);
+
+  int extra = 0;
+  for (int i = 0; i < 20; ++i) {
+    if (!s.airborne) break;
+    tick(s, Input{});                       // release
+    if (!s.airborne) break;
+    if (tick(s, jump) & EV_JUMP) ++extra;   // ...and press again, mid-arc
+  }
+  TEST_ASSERT_EQUAL_INT(0, extra);
+}
+
+// One key means up AND forward. The move key is never touched here, because on
+// a Cardputer holding both is exactly what the player cannot comfortably do.
+static void test_a_jump_carries_forward_on_its_own(void) {
+  State s = fresh();
+  run(s, Input{}, 30);
+  int nx = 0, ny = 0;
+  if (!faceFlatNeighbour(s, nx, ny)) TEST_IGNORE_MESSAGE("no flat ground at spawn");
+
+  const float x0 = s.cam.px, y0 = s.cam.py;
+  Input jump; jump.jump = true;
+  tick(s, jump);
+  for (int i = 0; i < 200 && s.airborne; ++i) tick(s, Input{});
+  TEST_ASSERT_FALSE(s.airborne);
+
+  const float dx = s.cam.px - x0, dy = s.cam.py - y0;
+  const float travelled = sqrtf(dx * dx + dy * dy);
+  TEST_ASSERT_TRUE(travelled > 1.0f);       // it genuinely goes somewhere
+}
+
+// Building from mid-air is refused. Without this the body-volume test that
+// stops pillaring measures from a feetZ the jump has stopped updating, and the
+// cell the player took off over is left uncovered -- so jump-and-place would
+// put the pillar straight back.
+static void test_building_is_refused_in_mid_air(void) {
+  State s = fresh();
+  run(s, Input{}, 30);
+  hold(s, world::B_STONE, 40);
+
+  Input jump; jump.jump = true;
+  tick(s, jump);
+  TEST_ASSERT_TRUE(s.airborne);
+
+  Input build; build.build = true;
+  uint32_t ev = 0;
+  int ticksAir = 0;
+  for (int i = 0; i < 60 && s.airborne; ++i) {
+    const uint32_t e = tick(s, build);
+    // The landing tick resolves the ground before it resolves the build key, so
+    // a block placed on it is placed by someone standing up -- which is allowed,
+    // and is not what this test is about. Only count the ticks spent in the air.
+    if (s.airborne) { ev |= e; ++ticksAir; }
+  }
+  TEST_ASSERT_TRUE(ticksAir > 0);
+  TEST_ASSERT_FALSE(ev & EV_PLACE);
+  TEST_ASSERT_TRUE(ev & EV_CANT_PLACE);
+}
+
 // Looking down has to reach as far as looking up. The old range stopped at
 // twelve degrees below level, on the theory that down is where the frame time
 // is; it is not, because a steep down ray meets the floor within a cell.
@@ -2519,7 +2807,13 @@ int main(int, char**) {
   RUN_TEST(test_a_refused_placement_costs_nothing);
   RUN_TEST(test_crafting_consumes_and_produces);
   RUN_TEST(test_bare_hands_can_chop_wood);
-  RUN_TEST(test_grid_matching_ignores_where_things_sit);
+  RUN_TEST(test_a_shape_matches_wherever_it_fits);
+  RUN_TEST(test_the_same_materials_in_the_wrong_shape_do_not_craft);
+  RUN_TEST(test_the_right_materials_in_the_wrong_shape_are_named);
+  RUN_TEST(test_the_four_cell_recipes_craft);
+  RUN_TEST(test_no_two_recipes_share_a_shape);
+  RUN_TEST(test_every_recipe_is_stored_normalised);
+  RUN_TEST(test_the_number_row_fills_a_grid_cell);
   RUN_TEST(test_crafting_a_tool_spends_the_grid);
   RUN_TEST(test_a_grid_you_cannot_pay_for_makes_nothing);
   RUN_TEST(test_a_tool_needs_a_free_slot);
@@ -2556,6 +2850,12 @@ int main(int, char**) {
   RUN_TEST(test_slab_blocks_line_of_sight);
   RUN_TEST(test_score_rewards_survival_most);
   RUN_TEST(test_a_swing_at_nothing_still_swings);
+  RUN_TEST(test_a_jump_leaves_the_ground_and_lands);
+  RUN_TEST(test_a_jump_cannot_climb_a_two_high_wall);
+  RUN_TEST(test_holding_jump_does_not_repeat);
+  RUN_TEST(test_no_second_jump_in_mid_air);
+  RUN_TEST(test_a_jump_carries_forward_on_its_own);
+  RUN_TEST(test_building_is_refused_in_mid_air);
   RUN_TEST(test_pitch_holds_where_it_is_left);
   RUN_TEST(test_looking_down_reaches_the_full_stop);
   RUN_TEST(test_a_whiff_does_not_lock_out_a_real_swing);

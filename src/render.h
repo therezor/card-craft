@@ -55,6 +55,23 @@ void text(int x, int y, const char* s, uint16_t c, int scale = 1);
 int  textWidth(const char* s, int scale = 1);
 void textCentred(int cx, int y, const char* s, uint16_t c, int scale = 1);
 
+// ---- block art outside the 3D pass ------------------------------------------
+//
+// The same 16x16 material art the walls and floors are drawn from, available to
+// the UI. It already lives in RAM for the renderer's sake, so an icon drawn
+// from it costs no data and no flash -- only a different way of reading what is
+// there. `top` picks the top-face tile where a material has one (grass), `mul`
+// is the 0..256 fixed-point darkening the UI already uses for things you cannot
+// afford, and both write straight into the framebuffer rather than going
+// through rect() per texel, which is what makes a full-screen tiling affordable.
+
+// One tile stretched to fill w x h. This is what a block preview is.
+void stretchTex(int x, int y, int w, int h, uint8_t mat, bool top, int mul = 256);
+
+// The tile repeated at `zoom` pixels per texel. This is what a background is.
+void tileTex(int x, int y, int w, int h, uint8_t mat, bool top, int zoom,
+             int mul = 256);
+
 // ---- the 3D pass ------------------------------------------------------------
 
 // Rebuilds the sky, ground and block shade tables for this instant of the

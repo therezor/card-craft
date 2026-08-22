@@ -13,6 +13,7 @@
 #include "raycast.h"
 #include "render.h"
 #include "sprites.h"
+#include "textures.h"
 #include "world.h"
 
 namespace ui {
@@ -47,6 +48,11 @@ constexpr uint16_t C_PROG     = pack(250, 214,  96);   // #FAD660  mining progre
 constexpr uint16_t C_TITLE_BG = pack( 10,  14,  24);   // #0A0E18
 constexpr uint16_t C_DEAD     = pack(226,  74,  74);   // #E24A4A
 constexpr uint16_t C_FAINT    = pack( 58,  64,  80);   // #3A4050
+// The title caption. Minecraft's splash line is yellow and this is that yellow,
+// which is also the one colour on the title that the dirt behind it is nowhere
+// near -- the panel is all browns up there, so the joke has to sit off the
+// material palette entirely to be readable at all.
+constexpr uint16_t C_SPLASH   = pack(252, 226,  80);   // #FCE250
 
 constexpr int W = render::W;
 constexpr int H = render::H;
@@ -86,24 +92,29 @@ static void heart(int x, int y, bool full) {
     }
 }
 
-// A block as an item: the flat swatch plus a lit top edge and a shaded right
-// edge. Two extra rectangles, and they are the difference between a coloured
-// square and something that reads as a cube you could pick up.
-// mul is a 0..256 fixed-point scale on the whole swatch. Greying an icon by
+// A block as an item: the block's own art, scaled down. Nothing else.
+//
+// These used to be three flat rectangles off the material's single average
+// colour, while the game had 16x16 art for every one of these blocks sitting in
+// RAM for the walls to sample. Grass on the hotbar was a green square; it is
+// grass now.
+//
+// There was briefly a lit top lip and a shaded right edge over it, carried over
+// from the flat-colour version where they were what made a swatch read as a
+// cube. They do not survive contact with a real texture. The lip stretched all
+// sixteen rows of the top tile into three pixels, which averages the texture
+// away to nothing and then brightens the mush toward white -- so it read as a
+// pale line stuck on top of the block rather than as a face, which is exactly
+// what it looked like. Three pixels is too few to read as a face at any
+// brightness. The texture is the thing worth showing, so it is the only thing
+// shown.
+//
+// mul is a 0..256 fixed-point scale on the whole icon. Greying an icon by
 // darkening it rather than by drawing it in one flat grey is what keeps an
 // unaffordable recipe still *readable* as the material it wants -- the player
 // needs to know they are short of stone, not merely that they are short.
 static void blockIcon(int x, int y, int n, uint8_t mat, int mul = 256) {
-  const world::BlockInfo& bi = world::info(mat);
-  const int lift = 60, drop = 55;
-  auto sc = [mul](int v) {
-    const int q = v * mul / 256;
-    return (uint8_t)(q < 0 ? 0 : (q > 255 ? 255 : q));
-  };
-  render::rect(x, y, n, n, pack(sc(bi.r), sc(bi.g), sc(bi.b)));
-  render::rect(x, y, n, 3, pack(sc(bi.r + lift), sc(bi.g + lift), sc(bi.b + lift)));
-  render::rect(x + n - 3, y + 3, 3, n - 3,
-               pack(sc(bi.r - drop), sc(bi.g - drop), sc(bi.b - drop)));
+  render::stretchTex(x, y, n, n, mat, false, mul);
 }
 
 // A tool, from the same art the first-person view uses, taken every other
@@ -257,46 +268,191 @@ static void cardGround(int x, int y, int w, int h) {
   render::frameRect(x, y, w, h, 1, C_CARD_ED);
 }
 
-void title(const char* board, uint32_t best) {
-  render::fill(C_TITLE_BG);
+// The line under the logo.
+//
+// It used to read SURVIVE THE NIGHT, which is the kind of slogan that describes
+// the game to someone who is already looking at it. Both of this game's parents
+// solved that the same way and neither of them played it straight: Futurama
+// puts a deadpan caption under its logo every episode, Minecraft puts a splash
+// line next to its own, and in both the joke is that the line is not selling
+// anything. So: a caption, deadpan, about the game or about nothing in
+// particular. There was a third group boasting about the hardware -- clock
+// speeds, byte counts, how little RAM there is -- and it was cut: the player
+// holding the thing does not need telling what it is, and it read as a spec
+// sheet wearing a joke.
+//
+// Constrained by the font, which is uppercase and has no comma, apostrophe,
+// question mark or bracket -- see font5x7.h, where those slots are all zero and
+// would print as holes, which is why not one line here has a comma in it. Full
+// stops, colons, hyphens, slashes, percent signs, digits and exclamation marks
+// are all real glyphs.
+//
+// 38 characters is the limit. A glyph advances 6px, so 38 comes to 227px and
+// leaves a margin either side of the 240px panel; 40 characters reaches 239 and
+// touches both edges. Four of these were written a word too long and trimmed
+// rather than dropped.
+static const char* const kSplash[] = {
+  // -- product disclaimer
+  "CONTAINS 0% VOXELS BY VOLUME",
+  "BATTERIES NOT INCLUDED. NOR IS RAM.",
+  "SOME ASSEMBLY REQUIRED. ALL OF IT.",
+  "ACCEPT NO SUBSTITUTES. THERE ARE NONE.",
+  "OBJECTS ARE CLOSER THAN THEY APPEAR",
+  "VOID WHERE PROHIBITED",
+  "PLEASE DO NOT EAT THE BEDROCK",
+  "MADE ON EARTH BY HUMANS",
+  "NO ADS. NO NETWORK. NO NOTHING.",
+  "WORKS OFFLINE. HAS TO.",
+  "NOT A TECH DEMO. A GAME.",
+  "100% PURE DIRT",
+  // -- the game itself
+  "NOW WITH GRAVITY!",
+  "JUMP GOES FORWARD. YOU ARE WELCOME.",
+  "SHAPED RECIPES. LAYOUT MATTERS NOW.",
+  "MASONRY FINALLY HAS A RECIPE!",
+  "NOW WITH 16 WHOLE MATERIALS!",
+  "YOU START WITH NOTHING AT ALL.",
+  "PUNCH A TREE. IT IS TRADITION.",
+  "MINE DOWN. THAT IS WHERE IT GETS GOOD.",
+  "DIAMONDS ARE DOWN. ALWAYS DOWN.",
+  "BUILD A WALL 2 HIGH. TRUST ME.",
+  "A TWO-HIGH WALL IS UNCLIMBABLE. STILL.",
+  "CREEPERS REMOVE YOUR ARCHITECTURE",
+  "NO CREEPERS WERE HARMED. THEY BLEW UP.",
+  "ZOMBIES TELEGRAPH. WATCH THE ARMS.",
+  "SKELETONS FROM NIGHT FOUR. SORRY.",
+  "MOBS PATHFIND. SLOWLY. WITH FEELING.",
+  "LAVA EATS WHAT YOU DROP IN IT.",
+  "BEDROCK IS NOT MINEABLE. STOP TRYING.",
+  "TORCHES SOLD SEPARATELY. MAKE THEM.",
+  "NIGHT IS 2 MINUTES. IT FEELS LONGER.",
+  "9 SLOTS. CHOOSE WISELY.",
+  "SCORE IS NIGHTS SURVIVED. THAT IS ALL.",
+  "SAVED TO NVS. SURVIVES A REBOOT.",
+  "THE PICKAXE IS HELD BY AN ACTUAL HAND",
+  "PRESS ENTER. THAT IS THE TUTORIAL.",
+};
+constexpr int SPLASH_N = (int)(sizeof(kSplash) / sizeof(kSplash[0]));
 
-  // A strip of the actual block palette as the logo: it says what the game is
-  // made of before a single frame of world has been drawn.
-  static const uint8_t kStrip[6] = { world::B_GRASS, world::B_DIRT, world::B_STONE,
-                                     world::B_WOOD,  world::B_COAL, world::B_IRON };
-  for (int i = 0; i < 6; ++i) {
-    const world::BlockInfo& bi = world::info(kStrip[i]);
-    render::rect(48 + i * 24, 16, 22, 14, pack(bi.r, bi.g, bi.b));
+// Picked once per visit to the title rather than per frame -- a caption that
+// resampled sixty times a second would be a strobe, not a joke.
+//
+// -1 means nothing has been shown yet, which is a real state and not just a
+// null: the very first pick of a boot has nothing to avoid, every later one
+// does.
+static int s_splash = -1;
+static const char* splash() { return kSplash[s_splash < 0 ? 0 : s_splash]; }
+
+int  splashIndex() { return s_splash; }
+void setSplashIndex(int i) { s_splash = (i >= 0 && i < SPLASH_N) ? i : -1; }
+
+void rerollSplash(uint32_t seed) {
+  seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+  if (s_splash < 0) {
+    s_splash = (int)(seed % (uint32_t)SPLASH_N);
+    return;
   }
+  // Drawn from the OTHER captions rather than from all of them, so a reroll
+  // always changes the line instead of merely probably changing it. Picking
+  // from N-1 and stepping over the current index is the whole trick; rejecting
+  // and re-rolling would do the same job and could in principle spin.
+  int pick = (int)(seed % (uint32_t)(SPLASH_N - 1));
+  if (pick >= s_splash) ++pick;
+  s_splash = pick;
+}
 
-  render::textCentred(W / 2, 40, "CARD CRAFT", C_TEXT, 2);
-  render::textCentred(W / 2, 58, "SURVIVE THE NIGHT", C_ACCENT, 1);
+void title(const char* board, uint32_t best, int sel) {
+  // Ground, not a fill: dirt with grass on top, tiled the way the genre's own
+  // menu is. The art is the same 16x16 the walls are drawn from, at two pixels
+  // a texel, so a block reads as a block at 32px -- and it costs no new data,
+  // because those texels are already in RAM for the renderer.
+  //
+  // Darkened hard. This is a backdrop for text, and undimmed dirt is far too
+  // busy to read "CARD CRAFT" over.
+  constexpr int ZOOM  = 2;
+  constexpr int BLOCK = textures::TEX_N * ZOOM;    // 32px to a block
+  constexpr int SOIL  = BLOCK;                     // one course of grass on top
+  render::tileTex(0, 0, W, SOIL, world::B_GRASS, false, ZOOM, 112);
+  render::tileTex(0, SOIL, W, H - SOIL, world::B_DIRT, false, ZOOM, 88);
+  // No rule between the two courses. There was one, and it read as a scratch
+  // across the logo rather than as a horizon: the grass tile is a SIDE face --
+  // a green lip over dirt -- so the colour change is already at the top of the
+  // course, and a line drawn at the bottom of it lands in the middle of nothing.
+
+  render::textCentred(W / 2, 26, "CARD CRAFT", C_TEXT, 2);
+  render::textCentred(W / 2, 44, splash(), C_SPLASH, 1);
 
   char buf[40];
   snprintf(buf, sizeof(buf), "BEST %u", (unsigned)best);
-  render::textCentred(W / 2, 72, buf, C_DIM, 1);
+  render::textCentred(W / 2, 58, buf, C_DIM, 1);
 
-  // Right hand on the arrows, left hand on E and D — the hints are laid out
-  // the way the hands are, so the split reads at a glance.
+  // Two stops, driven the way every other card in the game is driven: the
+  // arrows move and ENTER does the thing. The four lines of control hints that
+  // used to be printed here have moved to the card behind CONTROLS, where they
+  // can be laid out properly instead of squeezed into a footer.
+  static const char* kRows[TITLE_ROWS] = { "START", "CONTROLS" };
+  const int rowW = 108, rowH = 16, rowX = (W - rowW) / 2;
+  for (int i = 0; i < TITLE_ROWS; ++i) {
+    const int ry = 76 + i * (rowH + 4);
+    const bool on = (i == sel);
+    render::rect(rowX, ry, rowW, rowH, on ? C_SEL : C_CARD);
+    render::frameRect(rowX, ry, rowW, rowH, 1, on ? C_ACCENT : C_CARD_ED);
+    render::textCentred(W / 2, ry + 5, kRows[i], on ? C_TEXT : C_DIM, 1);
+  }
+
+  // On its own plate. Dim text over tiled dirt is unreadable, and the board name
+  // is the one thing here a player might actually need to check.
+  const int bw2 = render::textWidth(board) + 6;
+  render::rect(1, 1, bw2, 11, C_CARD);
+  render::text(4, 3, board, C_DIM, 1);
+}
+
+// Every binding the board actually has, named by hal::Caps rather than by a
+// hardcoded keycap -- so a board with three buttons and no keyboard prints its
+// own three buttons here and does not lie about the rest.
+//
+// Two columns, because twelve rows down one column does not fit in 135px and
+// splitting them is better than scrolling something the player opened in order
+// to read all of at once.
+void controlsCard(const char* footer) {
   const hal::Caps& c = hal::caps();
-  snprintf(buf, sizeof(buf), "%s MOVE  %s TURN", c.kMove, c.kTurn);
-  render::textCentred(W / 2, 88, buf, C_DIM, 1);
-  if (c.kLook)
-    snprintf(buf, sizeof(buf), "%s MINE  %s BUILD  %s LOOK", c.kAct, c.kBuild, c.kLook);
-  else
-    snprintf(buf, sizeof(buf), "%s MINE  %s BUILD", c.kAct, c.kBuild);
-  render::textCentred(W / 2, 98, buf, C_DIM, 1);
-  snprintf(buf, sizeof(buf), "%s CRAFT  %s SLOT  %s MENU", c.kCraft, c.kCycle, c.kBack);
-  render::textCentred(W / 2, 107, buf, C_DIM, 1);
-  if (c.kDrop)
-    snprintf(buf, sizeof(buf), "1-9 PICK ITEM  %s DROP", c.kDrop);
-  else
-    snprintf(buf, sizeof(buf), "1-9 PICK ITEM");
-  render::textCentred(W / 2, 116, buf, C_DIM, 1);
+  cardGround(4, 2, W - 8, H - 4);
+  render::textCentred(W / 2, 7, "CONTROLS", C_ACCENT, 1);
 
-  snprintf(buf, sizeof(buf), "PRESS %s", c.kConfirm);
-  render::textCentred(W / 2, 126, buf, C_GOOD, 1);
-  render::text(3, 3, board, C_FAINT, 1);
+  struct Row { const char* key; const char* what; };
+  Row rows[14];
+  int n = 0;
+  rows[n++] = { c.kMove,    "MOVE" };
+  rows[n++] = { c.kTurn,    "TURN" };
+  rows[n++] = { c.kAct,     "MINE" };
+  rows[n++] = { c.kBuild,   "BUILD" };
+  if (c.kJump) rows[n++] = { c.kJump, "JUMP" };
+  if (c.kLook) rows[n++] = { c.kLook, "LOOK" };
+  rows[n++] = { c.kCycle,   "SLOT" };
+  rows[n++] = { "1-9",      "PICK SLOT" };
+  if (c.kDrop) rows[n++] = { c.kDrop, "DROP" };
+  rows[n++] = { c.kCraft,   "CRAFT" };
+  rows[n++] = { c.kConfirm, "OK" };
+  rows[n++] = { c.kBack,    "BACK" };
+
+  // Split down the middle, filling the left column first so a short list does
+  // not leave a gap in the middle of the card. The row pitch is derived from
+  // what is actually in the list rather than fixed, so the card fills itself
+  // whether a board offers twelve bindings or five.
+  const int perCol = (n + 1) / 2;
+  const int top = 22, bottom = H - 18;
+  int rowH = perCol > 0 ? (bottom - top) / perCol : 12;
+  if (rowH > 16) rowH = 16;
+  if (rowH < 9)  rowH = 9;
+  for (int i = 0; i < n; ++i) {
+    const int col = i / perCol, row = i % perCol;
+    const int x = 12 + col * ((W - 24) / 2);
+    const int y = top + row * rowH;
+    render::text(x, y, rows[i].key, C_GOOD, 1);
+    render::text(x + 40, y, rows[i].what, C_DIM, 1);
+  }
+
+  if (footer) render::textCentred(W / 2, H - 12, footer, C_FAINT, 1);
 }
 
 // ---- menus ------------------------------------------------------------------
@@ -433,12 +589,26 @@ void craftCard(const game::State& s, const char* footer) {
     render::frameRect(rx - 1, ry - 1, CELL + 2, CELL + 2, 1, C_SLOT_SEL);
 
   // What the grid currently spells, under it.
+  //
+  // The third case is the one that earns its keep. Recipes are shaped now, so a
+  // player can hold exactly the right materials and still spell nothing -- and
+  // being told "NO RECIPE" when the only thing wrong is the arrangement is the
+  // failure mode the whole shapeless design existed to avoid. matchLoose asks
+  // the old order-blind question, and the answer becomes a different message.
   const int ny = gy + 2 * CELL + CGAP + 3;
-  if (r != game::R_NONE)
+  if (r != game::R_NONE) {
     render::textCentred(W / 2, ny, game::recipeInfo(r).name,
                         afford ? C_GOOD : C_DIM, 1);
-  else
-    render::textCentred(W / 2, ny, "NO RECIPE", C_FAINT, 1);
+  } else {
+    const uint8_t loose = game::matchLoose(s.grid);
+    if (loose != game::R_NONE) {
+      char msg[28];
+      snprintf(msg, sizeof(msg), "%s: WRONG SHAPE", game::recipeInfo(loose).name);
+      render::textCentred(W / 2, ny, msg, C_ACCENT, 1);
+    } else {
+      render::textCentred(W / 2, ny, "NO RECIPE", C_FAINT, 1);
+    }
+  }
 
   // The book row, a cursor stop like everything else.
   const int by = ny + 10;
@@ -492,13 +662,22 @@ void recipeBook(const game::State& s, int sel, const char* footer) {
     render::rect(bx, y, bw, ROWH - 1, cur ? C_SEL : C_CARD);
     if (cur) render::frameRect(bx, y, bw, ROWH - 1, 1, C_ACCENT);
 
-    // Ingredients, left to right, in the order they go into the grid.
-    int ix = bx + 4;
+    // The recipe as its SHAPE: a little 2x2 with its holes left in. This used
+    // to be a run of ingredient icons with the empty cells skipped, which was
+    // fine while matching was shapeless and is exactly the wrong picture now --
+    // it threw away the one piece of information that decides whether the grid
+    // will craft. A player reading this row has to be able to copy it.
+    const int MINI = 8;
     for (int c = 0; c < game::GRID_N; ++c) {
-      if (ri.cells[c] == game::CELL_EMPTY) continue;
-      blockIcon(ix, y + 1, ICON, ri.cells[c], mul);
-      ix += ICON + 2;
+      const int mx = bx + 4 + (c % 2) * (MINI + 1);
+      const int my = y + 1 + (c / 2) * (MINI + 1);
+      if (ri.cells[c] == game::CELL_EMPTY) {
+        render::frameRect(mx, my, MINI, MINI, 1, C_CARD_ED);   // a hole, drawn
+        continue;
+      }
+      blockIcon(mx, my, MINI, ri.cells[c], mul);
     }
+    int ix = bx + 4 + 2 * (MINI + 1) + 3;
 
     render::text(ix + 2, y + 6, "\x1a", can ? C_TEXT : C_FAINT, 1);
     itemIcon(ix + 12, y + 1, ri.outItem, mul);

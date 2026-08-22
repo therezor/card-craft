@@ -141,13 +141,24 @@ constexpr int16_t HAND_DAMAGE = 1;
 
 // ---- crafting ---------------------------------------------------------------
 
-// Twelve recipes over a 2x2 grid. Shapeless: what a recipe wants is a multiset
-// of up to four materials, and where in the grid they sit is not part of it.
-// Shape would buy nothing at this size -- with four cells there is exactly one
-// interesting shaped recipe per multiset -- and it would cost the player four
-// chances to get a layout subtly wrong on a keyboard with no pointer.
+// Fifteen recipes over a 2x2 grid. SHAPED: a recipe is an arrangement, not a
+// multiset, and where a material sits is part of what it spells. A pickaxe is a
+// wide head over a handle; a sword is a blade over a handle; a torch is coal
+// over wood. The grid finally draws the recipe rather than just holding it.
+//
+// Matching is shaped but TRANSLATABLE: a pattern is shifted to the top-left
+// before it is compared, so a two-cell vertical recipe works in either column
+// and only the shape has to be right, not the corner it was built in. This is
+// what the genre trains players to expect, and it removes three of the four
+// ways to get a layout subtly right-but-rejected.
+//
+// The old design was shapeless, and the argument for it was that a player on a
+// keyboard with no pointer would lay things out wrong and be told nothing. That
+// argument is answered rather than ignored: matchLoose() below still does the
+// old multiset compare, and the craft card says WRONG SHAPE -- not NO RECIPE --
+// when the materials are right and the arrangement is not.
 enum Recipe : uint8_t {
-  R_PLANK, R_TORCH, R_BRICK, R_PATCH,
+  R_PLANK, R_TORCH, R_TORCHES, R_BRICK, R_MASONRY, R_PATCH, R_SALVE,
   R_PICK_WOOD, R_PICK_STONE, R_PICK_IRON, R_PICK_DIAMOND,
   R_SWORD_WOOD, R_SWORD_STONE, R_SWORD_IRON, R_SWORD_DIAMOND,
   R_COUNT
@@ -172,7 +183,11 @@ constexpr uint8_t ITEM_NONE = 254;
 
 struct RecipeInfo {
   const char* name;
-  uint8_t cells[GRID_N];   // materials or CELL_EMPTY; order is not significant
+  // The pattern, read as  [0][1]
+  //                       [2][3]
+  // and stored already shifted to the top-left, so a recipe laid out by
+  // fillGrid() is by construction a grid that matchGrid() recognises.
+  uint8_t cells[GRID_N];   // materials or CELL_EMPTY; POSITION IS SIGNIFICANT
   uint8_t outItem;
   uint8_t outQty;
   uint8_t heal;            // hearts restored, for the ones that are not items
@@ -184,8 +199,15 @@ const RecipeInfo& recipeInfo(uint8_t r);
 // until the craft commits. See canAfford.
 uint8_t matchGrid(const uint8_t grid[GRID_N]);
 
-// Held-button state, filled by the HAL. Six flags is the whole input surface —
-// see hal.h for how boards with fewer buttons reach it.
+// Which recipe the grid's MATERIALS spell, ignoring where they sit -- the old
+// shapeless match, kept for one purpose: telling a player holding the right
+// things in the wrong arrangement that that is what has happened. Returns
+// R_NONE if the materials are wrong too, and is only meaningful when matchGrid
+// has already returned R_NONE.
+uint8_t matchLoose(const uint8_t grid[GRID_N]);
+
+// Held-button state, filled by the HAL. Six flags is the whole playable input
+// surface — see hal.h for how boards with fewer buttons reach it.
 struct Input {
   bool left = false, right = false, fwd = false, back = false;
   bool act = false, build = false;
@@ -195,8 +217,15 @@ struct Input {
   // throw anything away, which costs it nothing else.
   bool drop = false;
   // Optional, and deliberately last: a board with only the six above leaves
-  // these false and plays exactly as it always has, at the fixed tilt.
+  // these false and plays exactly as it always has, at the fixed tilt and on
+  // the ground.
   bool lookUp = false, lookDown = false;
+  // Held, not an edge -- for a reason worth stating, because "jump" reads like
+  // an edge. main.cpp builds one Input per FRAME and feeds it to as many as
+  // MAX_CATCHUP ticks, so an edge stored here would take off once per tick and
+  // launch the player four times off one press. The rising edge is latched in
+  // State::jumpHeld instead, which the simulation sees exactly once.
+  bool jump = false;
 };
 
 // One-shot things that happened during a tick. main.cpp turns these into
@@ -243,6 +272,8 @@ enum Event : uint32_t {
   // a heal IS a pickup -- whoever turns these into sound has to pick one, see
   // playEvents.
   EV_HEAL       = 1u << 24,
+  EV_JUMP       = 1u << 25,   // feet left the ground
+  EV_LAND       = 1u << 26,   // ...and found it again
 };
 
 // ---- effects ----------------------------------------------------------------
@@ -321,6 +352,33 @@ constexpr int DROP_PERIOD = 8;
 constexpr float DROP_TOSS    = 3.6f;  // cells/second, thrown forward
 constexpr float DROP_LOFT    = 2.4f;  // cells/second, thrown up
 constexpr float DROP_GRAVITY = 26.0f; // cells/second/second
+
+// ---- the jump ----------------------------------------------------------------
+//
+// One key, one arc, up and forward together: chording jump with the move key on
+// a Cardputer is the thing this exists to avoid, so the forward carry is part
+// of the jump rather than something the player has to add to it.
+//
+// JUMP_VEL is not a feel knob, and raising it breaks the world. The apex must
+// stay BELOW ONE BLOCK, and the reason is arithmetic rather than taste:
+// world::surfaceUnder() answers for a body at `fromZ` by looking as high as
+// fromZ + STEP_UP, so fromZ 0 reaches a surface top of 1 and fromZ 1 reaches a
+// top of 2. Everything airborne passes (int)floorf(footZ) as that fromZ. Let
+// the apex reach 1.0 and floorf() returns 1 at the top of the arc, the +1 from
+// the floor stacks with the +1 STEP_UP already allows, and the player steps off
+// their own jump onto a two-high wall -- which world.h:"keeps a two-high wall
+// unclimbable" says outright must not happen, and which is what stops walling
+// yourself in from being solved by jumping out.
+//
+// At 6.8 the apex is 6.8*6.8/(2*26) = 0.89 of a block, floorf() never leaves
+// the take-off level, and every surfaceUnder() and slide() call made during the
+// arc sees precisely what walking sees. The jump grants no height a walk does
+// not already grant. All of its value is the forward carry: 2*6.8/26 = 0.52s of
+// airtime at 4.5 cells/s is about 2.3 cells, which clears a gap, a lava pit, or
+// the edge you are trying to get off.
+constexpr float JUMP_VEL     = 6.8f;  // cells/second, up -- see above before changing
+constexpr float JUMP_FWD     = 4.5f;  // cells/second, along the facing direction
+constexpr float AIR_CONTROL  = 0.35f; // how much of normal move input still steers
 constexpr float DROP_REACH   = 1.10f; // how close you have to be to collect one
 
 struct Drop {
@@ -494,6 +552,25 @@ struct State {
   // can stand rather than scenery.
   uint8_t  feetZ = 0;
 
+  // ---- the jump ----
+  //
+  // feetZ above is a whole block and is reassigned from the world every tick,
+  // which is exactly what a body in mid-air must not have done to it. footZ is
+  // the same height as a continuous value, and `airborne` is what gates that
+  // reassignment. On the ground the two agree and none of this runs.
+  float    footZ = 0.0f;
+  // Cells per TICK, not per second -- the same units DROP integrates in.
+  float    jumpVel = 0.0f;
+  bool     airborne = false;
+  // Fixed at take-off from the facing direction, and not re-read afterwards.
+  // This is what makes one key mean "up and forward": the arc carries the
+  // player whether or not they are also holding the move key, which on a
+  // Cardputer they very often cannot be.
+  float    airDX = 0.0f, airDY = 0.0f;
+  // Rising-edge latch for Input::jump. See the comment on that field: the edge
+  // cannot live in Input, so it lives here.
+  bool     jumpHeld = false;
+
   // Eye height, eased toward the ground the body is standing on rather than
   // snapped to it. The snap was a teleport: step up one block and the whole
   // view jumped a full world unit in a single frame, which reads as a glitch
@@ -587,6 +664,15 @@ void gridCycle(State& s, int delta);
 // True while the cursor is on one of the four cells, rather than on the result
 // slot or the book row. What ENTER means depends on it.
 inline bool gridOnCell(const State& s) { return s.gridSel < GRID_N; }
+
+// Puts the material in hotbar slot `slot` (1..9) straight into the focused
+// cell. Cycling a cell through everything you are carrying is fine for two
+// materials and tedious for eight, and a shaped recipe is several cells of it;
+// the number row already picks a hotbar slot everywhere else in the game, so
+// this is the same gesture rather than a new one. False if the cursor is not on
+// a cell, the slot is empty, or the slot holds a tool -- tools are not
+// ingredients.
+bool gridSetFromSlot(State& s, uint8_t slot);
 
 // Consumes the inputs and grants the output. No-op if unaffordable.
 bool craft(State& s, uint8_t recipe);

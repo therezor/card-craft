@@ -33,7 +33,7 @@
 namespace {
 
 enum Screen : uint8_t { SCR_TITLE, SCR_PLAY, SCR_PAUSE, SCR_CRAFT, SCR_RECIPES,
-                        SCR_DEAD };
+                        SCR_CONTROLS, SCR_DEAD };
 
 constexpr uint32_t TICK_US   = 1000000u / game::TICK_HZ;
 constexpr int      MAX_CATCHUP = 4;    // never simulate more than this per frame
@@ -47,10 +47,12 @@ bool             s_record = false;
 bool             s_sound = false;                 // the pause-card setting, kept in NVS
 ui::Menu         s_menu;
 // The pause card is the only Menu left: the recipe book draws itself now, and
-// draws pictures rather than rows. Four is what openPauseMenu() writes.
-ui::MenuItem     s_items[4];
+// draws pictures rather than rows. Five is what openPauseMenu() writes -- one
+// more than fits at once, which is what Menu's scrolling window is for.
+ui::MenuItem     s_items[6];
 char             s_title[28];                     // menu heading, rebuilt per open
 char             s_soundRow[16];                  // "SOUND: ON", rebuilt on toggle
+char             s_fpsRow[16];                    // "FPS: ON", rebuilt on toggle
 uint32_t         s_tickAccum = 0;
 uint32_t         s_lastUs = 0;
 int              s_lockout = 0;
@@ -110,12 +112,52 @@ void playEvents(uint32_t ev) {
   }
 }
 
-// ---- frame-time overlay -----------------------------------------------------
+// ---- the frame counter a player can switch on -------------------------------
+//
+// Just the number, and off by default. A number burnt into the corner of a game
+// is hard to stop reading once you have started, which is why it is opt-in
+// rather than opt-out -- and it is the only thing drawn on the panel now: the
+// dev build's frame-time figures go over the wire instead. See below.
+//
+// Sampled every frame whether or not it is shown, so switching it on reads the
+// rate you are actually getting rather than counting up from nothing.
+bool     s_showFps = false;
+uint32_t s_fpsPrevUs = 0, s_fpsAccUs = 0;
+int      s_fpsFrames = 0;
+char     s_fpsText[12] = "FPS: --";
+
+void fpsCount() {
+  const uint32_t now = micros();
+  if (s_fpsPrevUs) {
+    s_fpsAccUs += now - s_fpsPrevUs;
+    ++s_fpsFrames;
+    // Twice a second. Any faster and the last digit is a flicker to be squinted
+    // at rather than a reading.
+    if (s_fpsAccUs >= 500000u) {
+      const unsigned fps =
+          (unsigned)((uint64_t)s_fpsFrames * 1000000ull / s_fpsAccUs);
+      snprintf(s_fpsText, sizeof(s_fpsText), "FPS: %u", fps > 999 ? 999u : fps);
+      s_fpsAccUs = 0;
+      s_fpsFrames = 0;
+    }
+  }
+  s_fpsPrevUs = now;
+}
+
+// ---- frame-time telemetry ---------------------------------------------------
+//
+// Reported over USB and no longer drawn on the panel. There used to be a second
+// line under the counter above carrying the frame period, the average CPU cost
+// and the worst one -- useful while the renderer was being optimised, and two
+// numbers too many to have burnt into the corner of a game now that a player
+// can switch the frame rate on for themselves. The measurements are unchanged;
+// only the drawing is gone, so the benchmark and the figures in the README
+// still come from exactly what they always did.
 
 #ifdef SHOW_FPS
 uint32_t s_fpsSum = 0, s_cpuSum = 0, s_cpuMax = 0;
 int      s_fpsN = 0;
-char     s_fpsLine[24] = "";
+char     s_fpsLine[24] = "";   // formatted for the serial line, not for the panel
 
 void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
   s_fpsSum += frameUs;
@@ -158,7 +200,6 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
 }
 
 // Top left, where the objective line used to be.
-void fpsDraw() { render::text(3, 14, s_fpsLine, render::pack(120, 220, 140), 1); }
 #endif
 
 #ifdef DEV_SERIAL
@@ -188,6 +229,12 @@ int8_t   s_look = 0;
 // so it stays here rather than being carried through the simulation.
 int s_book = 0;
 
+// The title card's cursor, and where the controls card has to go back to. The
+// controls card is reachable from two places, and "one level up" has to mean
+// the level it was actually opened from.
+int    s_titleSel = 0;
+Screen s_ctrlFrom = SCR_TITLE;
+
 // The craft card's control hint, built from caps() rather than spelled out, so
 // a board that binds these elsewhere gets its own keys named back to it.
 const char* menuFoot() {
@@ -207,16 +254,22 @@ const char* cardFoot() {
   return foot;
 }
 
-// Four rows is what the card can hold: Menu::draw sizes itself to its contents
-// and four comes to 127 px of the 135 the panel has. A fifth would not fit.
+// Four rows is what the card can SHOW at once: Menu::draw sizes itself to its
+// contents and four comes to 127 px of the 135 the panel has. Five items is
+// fine -- the window scrolls and puts a chevron in the margin, which is
+// machinery Menu already has and nothing was using.
+constexpr int PAUSE_ROWS = 6;
 void openPauseMenu() {
   snprintf(s_soundRow, sizeof(s_soundRow), "SOUND: %s", s_sound ? "ON" : "OFF");
+  snprintf(s_fpsRow,   sizeof(s_fpsRow),   "FPS: %s",   s_showFps ? "ON" : "OFF");
   s_items[0] = ui::MenuItem{ "RESUME",    nullptr,         true };
-  s_items[1] = ui::MenuItem{ s_soundRow,  nullptr,         true };
-  s_items[2] = ui::MenuItem{ "NEW WORLD", "start over",    true };
-  s_items[3] = ui::MenuItem{ "QUIT",      "back to title", true };
+  s_items[1] = ui::MenuItem{ "CONTROLS",  "what does what", true };
+  s_items[2] = ui::MenuItem{ s_soundRow,  nullptr,         true };
+  s_items[3] = ui::MenuItem{ s_fpsRow,    "frame counter", true };
+  s_items[4] = ui::MenuItem{ "NEW WORLD", "start over",    true };
+  s_items[5] = ui::MenuItem{ "QUIT",      "back to title", true };
   snprintf(s_title, sizeof(s_title), "PAUSED  NIGHT %u", (unsigned)s_game.night);
-  s_menu.open(s_title, s_items, 4);
+  s_menu.open(s_title, s_items, PAUSE_ROWS);
 }
 
 void startRun() {
@@ -328,14 +381,38 @@ void setup() {
     }
   }
 
-  // Key "snd2", not "sound". Flipping the default alone would have silenced
-  // only the boards that had never touched the toggle: the old key is written
-  // on every toggle, so anyone who had ever switched sound on carried a stored
-  // true past the new default. Renaming the key retires those values in one
-  // step and starts every board silent, which is what the setting is for right
-  // now. The toggle still persists, under the new name.
-  s_sound = s_prefs.getBool("snd2", false);
+  // Sound is ON out of the box. It shipped silent, which was the wrong default
+  // for a game whose mobs announce themselves before they arrive -- a creeper
+  // hisses and a zombie winds up, and a player who never opens the pause card
+  // never finds out that either of those makes a noise.
+  //
+  // Flipping the default is all this needs, and it is worth saying why, because
+  // the last change here had to rename the key to take effect. getBool only
+  // returns the default when nothing is stored, and the key is written only by
+  // the toggle. So a board that has never touched the setting picks up the new
+  // default and starts making noise, while anyone who deliberately switched
+  // sound off keeps their stored false and stays silent. Both are what you
+  // want; there is nothing to retire this time.
+  s_sound = s_prefs.getBool("snd2", true);
   sfx::setEnabled(s_sound);
+  s_showFps = s_prefs.getBool("fps1", false);
+
+  // A caption for the title we are about to show, and it has to be a DIFFERENT
+  // one every time the board is switched on. micros() alone is not enough and
+  // was the bug here: at this point in setup it is boot time, which lands
+  // within a few hundred microseconds of the same value on every cold start,
+  // so mixing it produced the same caption every reset.
+  //
+  // Two independent things fix it, because either alone can let you down.
+  // esp_random() is the hardware generator and is the real source, but with the
+  // RF subsystem down -- which it is, this game never brings up WiFi -- the
+  // ESP-IDF docs are explicit that it is not guaranteed random and may repeat.
+  // So the last caption is also remembered in NVS and handed back to the UI
+  // before the roll, and rerollSplash draws from the other N-1: even if the
+  // seed were a constant, the line would still have to change.
+  ui::setSplashIndex(s_prefs.getInt("splash", -1));
+  ui::rerollSplash(esp_random() ^ micros());
+  s_prefs.putInt("splash", ui::splashIndex());
 
   s_lastUs = micros();
 }
@@ -354,8 +431,34 @@ void loop() {
 
   switch (s_scr) {
     case SCR_TITLE:
-      ui::title(hal::boardName(), s_best);
-      if (confirm) startRun();
+      ui::title(hal::boardName(), s_best, s_titleSel);
+      if (!s_lockout) {
+        if (b.navUp || b.navDown) {
+          s_titleSel = (s_titleSel + (b.navUp ? ui::TITLE_ROWS - 1 : 1)) % ui::TITLE_ROWS;
+          sfx::play(sfx::kMenuMove);
+        }
+        if (confirm) {
+          if (s_titleSel == 0) {
+            startRun();
+          } else {
+            s_ctrlFrom = SCR_TITLE;
+            s_scr = SCR_CONTROLS;
+            s_lockout = LOCKOUT_FRAMES;
+          }
+        }
+      }
+      break;
+
+    // Reachable from the title and from the pause card. It knows which, because
+    // "back" has to mean the level it was opened from and not one fixed screen.
+    case SCR_CONTROLS:
+      if (s_ctrlFrom == SCR_PAUSE) { drawScene(); ui::hud(s_game); }
+      else                         render::fill(0);
+      ui::controlsCard(cardFoot());
+      if (!s_lockout && (cancel || confirm)) {
+        s_scr = s_ctrlFrom;
+        s_lockout = LOCKOUT_FRAMES;
+      }
       break;
 
     case SCR_PLAY: {
@@ -395,6 +498,9 @@ void loop() {
       in.drop  = b.drop  && !s_lockout;
       in.lookUp   = b.lookUp;
       in.lookDown = b.lookDown;
+      // Lockout-gated like the other acting keys, so the press that dismissed a
+      // card cannot also launch the player the instant play resumes.
+      in.jump  = b.jump  && !s_lockout;
 #ifdef DEV_SERIAL
       if (s_bench) {
         in = game::Input{};
@@ -474,6 +580,20 @@ void loop() {
         if (b.navUp)    { game::gridMove(s_game, 0, -1); sfx::play(sfx::kMenuMove); }
         if (b.navDown)  { game::gridMove(s_game, 0,  1); sfx::play(sfx::kMenuMove); }
 
+        // The number row fills the focused cell outright. Laying out a shaped
+        // recipe by cycling each cell through everything you carry is four laps
+        // of a list; this is four keypresses, and it is the same gesture the
+        // number row already means everywhere else.
+        if (b.slotPick)
+          sfx::play(game::gridSetFromSlot(s_game, b.slotPick) ? sfx::kMenuMove
+                                                              : sfx::kCraftFail);
+        // ...and the cycle key steps a cell backwards, so overshooting costs
+        // one press rather than a full lap.
+        if (b.cycleEdge && game::gridOnCell(s_game)) {
+          game::gridCycle(s_game, -1);
+          sfx::play(sfx::kMenuMove);
+        }
+
         if (cancel || b.craftEdge) {
           resume();
         } else if (confirm) {
@@ -541,6 +661,11 @@ void loop() {
           switch (s_menu.index()) {
             case 0: resume(); break;
             case 1:
+              s_ctrlFrom = SCR_PAUSE;
+              s_scr = SCR_CONTROLS;
+              s_lockout = LOCKOUT_FRAMES;
+              break;
+            case 2:
               s_sound = !s_sound;
               s_prefs.putBool("snd2", s_sound);
               sfx::setEnabled(s_sound);
@@ -549,8 +674,14 @@ void loop() {
               if (s_sound) sfx::play(sfx::kBuy);
               openPauseMenu();          // relabel the row; the cursor survives
               break;
-            case 2: startRun(); break;
+            case 3:
+              s_showFps = !s_showFps;
+              s_prefs.putBool("fps1", s_showFps);
+              openPauseMenu();          // relabel the row; the cursor survives
+              break;
+            case 4: startRun(); break;
             default:
+              ui::rerollSplash(micros());
               s_scr = SCR_TITLE;
               s_lockout = LOCKOUT_FRAMES;
               break;
@@ -566,8 +697,12 @@ void loop() {
       break;
   }
 
+  // Top-left, and only while playing -- it is a reading about the world being
+  // drawn, and there is no world behind the title or the controls card.
+  if (s_showFps && s_scr == SCR_PLAY)
+    render::text(3, 3, s_fpsText, render::pack(120, 220, 140), 1);
+
 #ifdef SHOW_FPS
-  if (s_scr == SCR_PLAY) fpsDraw();
   const uint32_t cpuUs = micros() - frameStart;
 #endif
 
@@ -614,7 +749,7 @@ void loop() {
       Serial.printf("spawned=%d night\n", n);
     } else if (cmd == 's') {
       static const char* const kName[] = { "title", "play", "pause", "craft",
-                                          "recipes", "dead" };
+                                          "recipes", "controls", "dead" };
       // Indexed by the screen, so adding one without a name here would read
       // off the end and hand a wild pointer to the screenshot writer.
       static_assert(sizeof(kName) / sizeof(kName[0]) == SCR_DEAD + 1,
@@ -781,6 +916,18 @@ void loop() {
     } else if (cmd == 'r') {
       if (s_scr == SCR_CRAFT) { s_book = 4; s_scr = SCR_RECIPES; }
       else if (s_scr == SCR_RECIPES) { s_scr = SCR_CRAFT; }
+    } else if (cmd == 'f') {
+      // The player-facing frame counter, for the same reason 'p' and 'v' exist:
+      // it lives behind a row on the pause card and the pause card takes a
+      // keypress to reach, so over the wire it is otherwise unreachable.
+      s_showFps = !s_showFps;
+      Serial.printf("showfps=%d\n", (int)s_showFps);
+    } else if (cmd == 'v') {
+      // The controls card, for the same reason 'p' and 'c' exist: it is only
+      // openable from the keyboard, and it is the card most worth checking by
+      // eye because everything on it is generated from hal::Caps.
+      if (s_scr == SCR_CONTROLS) { s_scr = s_ctrlFrom; }
+      else { s_ctrlFrom = s_scr; s_scr = SCR_CONTROLS; }
     } else if (cmd == 'g') {
       // Stand the player in front of something worth looking at, and face it.
       // A house is two or three cells on a 64x64 map and a tree not much more;
@@ -874,6 +1021,8 @@ void loop() {
 #endif
 
   sfx::update(millis());
+
+  fpsCount();
 
   render::present();
 

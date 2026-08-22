@@ -84,27 +84,57 @@ last axis meant "one of four brightness steps".
 
 Four buttons is the entire input budget, so the game can be ported to boards
 with no keyboard. The crosshair sits at the centre of the panel, where the aim
-ray actually lands, at any pitch. Looking up and down is outside that four-button
-core on purpose: a board with no keys to spare leaves the camera at the fixed
-downward tilt the game shipped with and plays exactly as it always did.
+ray actually lands, at any pitch. Looking up and down, and jumping, are outside
+that four-button core on purpose: a board with no keys to spare leaves the
+camera at the fixed downward tilt the game shipped with, leaves the player
+walking everywhere, and plays exactly as it always did.
 
-The layout is two-handed: the right hand lives on the arrow cluster and does
-all the moving and all the menu navigation, the left hand lives on `E` and `D`
-and does all the acting. No key means two things, which is why `WASD` is not
-also bound to movement — `D` has to mean build.
+The layout is two-handed. The right hand lives on the arrow cluster and does all
+the moving and all the menu navigation. The left hand rests on a four-key square
+and does all the acting:
+
+```
+   [W][E]     W mines and A builds — the two verbs that touch the world,
+   [A][S]     down the left of the square. E and S look up and down, down
+              the right of it, so the camera pair is one finger apart and
+              up is above down under the hand as well as on the panel.
+```
+
+`D` falls just off that square and steps the hotbar; `SPACE`, under the thumb,
+jumps. No key means two things, and that rule is why `ENTER` alone confirms now:
+confirm used to be aliased onto the act key, which was harmless while acting was
+`E` and is not harmless at all now that acting is `W`.
+
+**Jump goes up *and* forward from one press.** Chording jump with the move key
+on a keyboard this size is exactly what the layout exists to avoid, so the
+forward carry is part of the jump rather than something you have to add to it.
+The arc clears about two and a third cells — enough for a gap, a lava pit, or
+getting off a ledge on purpose — and rises about nine tenths of a block, which
+is deliberately *less* than the one-block rise you already walk up for free. A
+jump grants no height walking does not. A two-high wall stays unclimbable, which
+is what keeps walling yourself in worth doing, and building is refused while
+your feet are off the ground so that jump-and-place cannot pillar you out of a
+wave.
 
 | Action | Cardputer | Hand |
 |---|---|---|
 | Move, back | `;` `.` (up/down arrows) | right |
 | Turn | `,` `/` (left/right arrows) | right |
-| Mine, attack | `E` (or `SPACE`) — hold it; the block under the crosshair is lit and outlined | left |
-| Build | `D` — places against the face you are aiming at | left |
-| Cycle block | `S` — steps through the nine-slot hotbar | left |
-| Craft | `W` — opens the crafting grid, and closes it again | left |
+| Mine, attack | `W` — hold it; the block under the crosshair is lit and outlined | left |
+| Build | `A` — places against the face you are aiming at | left |
+| Look up, down | `E` `S` — about 60° each way; both together recentres | left |
+| Jump | `SPACE` — up and forward together, from one key | left |
+| Cycle block | `D` — steps through the nine-slot hotbar | left |
+| Pick slot | `1`–`9` — straight to the slot you want | left |
 | Drop | `Q` — throws the selected item at your feet; hold to empty a stack | left |
-| Look up, down | `R` `F` — about 60° each way; both together recentres | left |
-| Back, menu | `ESC` (the top-left key, also `TAB`) — one level up, wherever you are | left |
-| Confirm | `ENTER` (`E` also works) | left |
+| Craft | `TAB` — opens the crafting grid, and closes it again | left |
+| Back, menu | `ESC` (the top-left key) — one level up, wherever you are | left |
+| Confirm | `ENTER` | left |
+
+Nothing here is hardcoded into a screen. Every hint the game prints comes from
+the board's own `hal::Caps` table, which is why the **CONTROLS** card — reachable
+from the title and from the pause menu — names the keys the board in your hands
+actually has rather than the ones a Cardputer happens to use.
 
 Mining takes the block the crosshair is on, and building puts one against the
 face it is on — so aiming at the foot of a wall tunnels into it rather than
@@ -119,14 +149,44 @@ told about while they are trying to use it.
 On the crafting card that means the cursor visits six places, not four — the
 four grid cells, the result slot, and a `RECIPES` row underneath. `ENTER` on a
 cell cycles it through what you are actually carrying; on the result slot it
-makes whatever the grid spells; on the `RECIPES` row it opens the book.
+makes whatever the grid spells; on the `RECIPES` row it opens the book. `1`–`9`
+fill the cell under the cursor outright, straight from that hotbar slot, and `D`
+steps a cell backwards — laying out a shape should cost four keypresses, not
+four laps of a list.
+
+**A recipe is a shape, not a shopping list.** Where a material sits in the grid
+is part of what it spells: a pickaxe is a wide head over a handle, a sword is a
+blade over a handle, a torch is coal over wood.
+
+```
+PLANKS   [W][ ]     TORCH    [C][ ]     BRICKS   [S][S]     MASONRY  [S][S]
+         [ ][ ]              [W][ ]              [S][ ]              [S][S]
+
+PICK     [t][t]     SWORD    [t][ ]     PATCH    [L][L]     SALVE    [L][L]
+         [P][ ]              [P][ ]              [W][ ]              [W][W]
+```
+
+This replaces a shapeless system where the grid was four boxes meaning "up to
+four of these" — no recipe reached past three cells, and nothing you learned
+about layout ever paid off. Shape is also what buys the room for the three
+recipes that *do* use all four: masonry, which had no recipe at all before and
+existed only in the structures the generator puts down; a ten-torch batch worth
+making before dusk rather than at it; and a bigger heal than a patch.
+
+Matching is **translatable**, so only the shape has to be right and not the
+corner you built it in — a sword works in either column. And when the materials
+are right but the arrangement is not, the card says so: **`WRONG SHAPE`**, with
+the name of the recipe you nearly made, rather than `NO RECIPE`. That is the
+answer to the obvious objection to shaped recipes on a keyboard with no pointer,
+and it is the reason the old order-blind matcher is still in the source.
 
 The book draws every recipe as its own ingredients — the same block icons that
-are on your hotbar, in the order they go into the grid, then an arrow and what
-comes out. Recipes you cannot afford are darkened rather than greyed, so you can
-still see *which* material you are short of. `ENTER` lays a recipe out on the
-grid and drops you back on it with the cursor already on the result slot, so
-making something from the book is: find it, `ENTER`, `ENTER`.
+are on your hotbar, laid out as the 2×2 they actually go into, holes and all,
+then an arrow and what comes out. Recipes you cannot afford are darkened rather
+than greyed, so you can still see *which* material you are short of. `ENTER`
+lays a recipe out on the grid and drops you back on it with the cursor already
+on the result slot, so making something from the book is: find it, `ENTER`,
+`ENTER`.
 
 The nine slots are a real capacity, not a display. Stacks are unbounded, but a
 material with no slot to claim will not fit — and rather than vanishing into a
@@ -145,8 +205,17 @@ Torches are the only light there is, and nothing on the map comes with any: no
 village, no house, no castle. Mobs will not spawn on lit ground, so a torch is
 the difference between a shelter and a room full of things that walked in.
 
-The pause card carries the one setting the game has: **SOUND: ON/OFF**, kept in
-NVS so it survives a reboot. It defaults to off.
+The pause card carries the settings, both kept in NVS so they survive a reboot:
+**SOUND: ON/OFF**, on by default — the mobs announce themselves before they
+arrive, and a player who never opens this card should still hear the hiss — and
+**FPS: ON/OFF**, off by default, which puts the frame rate and nothing else in
+the top-left corner while you play. It is sampled every frame either way, so
+switching it on reads the rate you already have rather than counting up from
+nothing.
+
+`CONTROLS` is here too, and on the title card: every binding the board actually
+has, generated from `hal::Caps` rather than spelled out, so it names your keys
+and not a Cardputer's.
 
 Building into your own body is refused — not just the cell you stand in but the
 whole volume you occupy, which is what stops pillaring straight up out of a
@@ -385,7 +454,7 @@ slabs contribute a separate band so a mob on the *far* side of one is.
 
 **They are ordinary blocks now.** A run used to be terrain: the generator could
 make one, the player could not mine it or build into it. Both work, so a roof
-can be dug through and a floor can be laid in mid-air — and `R`/`F` tilt the
+can be dug through and a floor can be laid in mid-air — and `E`/`S` tilt the
 view up, so an overhang directly above you is something you can look at rather
 than something you have to back away from to see.
 
