@@ -148,9 +148,17 @@ static void test_a_tree_canopy_hangs_over_walkable_ground(void) {
         // any kind of hill came out half bald — so asking whether a body at
         // the global ground level could step in was asking about the hill.
         TEST_ASSERT_TRUE(canEnter((int)height(x, y), x, y));
-        // A trunk near it, reaching its underside, holding it up. Two cells,
-        // not one: the crown is five across, so its outer ring stands that far
-        // out from the trunk it hangs off.
+        // A trunk near it, reaching its underside, holding it up. Searched two
+        // cells out, which is one more than a crown now needs: the crown is
+        // three across since the scale-down, so every leaf is orthogonally or
+        // diagonally adjacent to its own trunk. Left at two deliberately — it
+        // is the radius dropOrphanCanopy sweeps, and a wider search can only
+        // ever accept a crown a narrower one would.
+        //
+        // Leaves and not wood, and dropOrphanCanopy agrees with that now: a
+        // standing tree wears its leaf cap, so B_LEAVES is what the top of a
+        // live trunk looks like. A bare wood column is a snag or a house
+        // corner post, and neither of those ever grew a canopy.
         bool held = false;
         for (int dy = -2; dy <= 2 && !held; ++dy)
           for (int dx = -2; dx <= 2 && !held; ++dx)
@@ -214,7 +222,8 @@ static void test_felling_a_tree_leaves_its_canopy_standing(void) {
 
 // A house is three materials at three brightnesses, and that is what has to be
 // true for it to read as a house six cells away in fog rather than as the ruin
-// standing next to it.
+// standing next to it. The two are the same silhouette on purpose, so material
+// is the only thing this can ask about.
 // The block under a roofed column's brick cap, or B_BEDROCK where there is no
 // such thing. A wall and the roof over it are one column now, so "what is this
 // wall made of" is a question about the block below the cap.
@@ -290,7 +299,11 @@ static void test_a_house_door_admits_and_its_windows_do_not(void) {
           // The lintel and the eave over it are one run, not two: a cell holds
           // one slab, so a separate eave would have overwritten this or left a
           // hole in the roofline exactly where the door is.
-          TEST_ASSERT_TRUE(slabTop(x, y) >= floorH + 6);
+          //
+          // Five, not six. The run is [base + HEADROOM, wallTop + 1) and
+          // wallTop came down a course when the houses were scaled to the
+          // ten-cell draw distance, so its top followed.
+          TEST_ASSERT_TRUE(slabTop(x, y) >= floorH + 5);
         }
       }
   }

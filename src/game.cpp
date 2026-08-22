@@ -72,7 +72,24 @@ constexpr int   HIT_FLASH     = 5;      // ticks a struck mob shows white
 constexpr int   WHIFF_FRAME   = 7;      // the strike frame of the swing animation
 constexpr int   HURT_TICKS    = 12;
 constexpr float MIN_SPAWN_DIST= 11.0f;
-constexpr int   CREEPER_BLAST = 2;       // radius, in cells
+// Radius of the crater, in cells, and — through detonate() below — the reach of
+// the damage as well, which is CREEPER_BLAST + 1.
+//
+// One, down from two. A five-across crater is most of what you can see at a
+// ten-cell draw distance: you come over a rise and the ground is missing, with
+// no way to judge how far the hole goes. It is a plus-shape now, two blocks
+// deep at the centre and one at the arms.
+//
+// The damage goes with it, because it is the same number and pretending
+// otherwise would be a second constant that has to be kept honest by hand. The
+// consequence is real and deliberate: contact is still 4 of the player's 10,
+// but the sphere ends at 2.0 cells rather than 3.0, so a creeper that lights
+// its fuse and does not close does 1 rather than 2. CREEPER_LUNGE is what it
+// has to spend to earn the rest.
+//
+// Walling yourself in still has an answer. The centre column loses 2 blocks
+// instead of 3, so a three-high wall takes about three blasts rather than two.
+constexpr int   CREEPER_BLAST = 1;       // radius, in cells
 constexpr float KNOCKBACK     = 0.55f;   // cells a mob is shoved by a landed hit
 constexpr int   BURN_PERIOD   = 24;      // ticks between lava ticks, for anything standing in it
 
@@ -2040,17 +2057,35 @@ uint32_t tick(State& s, const Input& in) {
     // had killed them all the rest of the night was empty. A cap has no such
     // shape: the pressure is constant while it is dark and it stops when the
     // sun comes up, which is the only thing that should end a night.
-    int alive = 0;
-    for (int i = 0; i < MAX_MOBS; ++i) if (s.mobs[i].alive) ++alive;
+    int alive = 0, creepers = 0;
+    for (int i = 0; i < MAX_MOBS; ++i) {
+      if (!s.mobs[i].alive) continue;
+      ++alive;
+      if (s.mobs[i].kind == MOB_CREEPER) ++creepers;
+    }
 
     // A sealed-in player has opted out of the ordinary cap: the director keeps
     // sending the one thing that can do something about a wall. Its own cap is
     // much lower, because what a siege needs is for a creeper to get to the
     // wall, and a queue of them behind it is the thing that stops one.
+    //
+    // SIEGE_CAP counts CREEPERS, not bodies, and that distinction is the whole
+    // mechanic. Counting bodies deadlocked it: the mobs already out when the
+    // last block goes down are mostly zombies, they walk to the new wall and
+    // press against it, wall pressers are deliberately exempt from despawning
+    // -- see the hopeless-mob sweep -- and five immortal zombies against a cap
+    // of four meant the director never spawned the one thing that could answer
+    // the wall. The player could stand inside a box and watch a siege that
+    // consisted entirely of mobs that cannot break it.
+    //
+    // It survived this long because it needed a night where five bodies were
+    // still standing at the moment of sealing; it turned up the day the terrain
+    // got easier to walk across and more of them arrived.
     const bool siege = s.sealedTicks > SEALED_TRIGGER;
     if (s.spawnTimer) {
       --s.spawnTimer;
-    } else if (alive < (siege ? SIEGE_CAP : MOB_CAP)) {
+    } else if (siege ? (creepers < SIEGE_CAP && alive < MAX_MOBS)
+                     : (alive < MOB_CAP)) {
       // A fixed cadence, not one that ramps with the night count. What paces a
       // night now is how fast the player clears the cap, not a difficulty dial.
       s.spawnTimer = siege ? (uint16_t)(TICK_HZ / 2) : (uint16_t)35;

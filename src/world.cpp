@@ -692,23 +692,28 @@ static inline int groundOf(int x, int y) {
 // an arch. So the crown is slabs, and what you get is a tree you walk *under*
 // rather than a green post you walk around.
 //
-// A Minecraft tree: a short trunk carrying a crown four layers deep and five
-// cells across, not a mast with a plate on top.
+// A short trunk carrying a crown three cells across, not a mast with a plate
+// on top and not a hedge you cannot see past.
 //
 // The shape this replaces was a nine-to-eleven block trunk under a crown three
 // deep, which from any distance reads as two or three green blocks on a stick.
-// Almost all of that was trunk. Minecraft's oak is the other way round — six
-// logs and a crown that is most of what you see — and the reason is that the
-// crown is what a tree IS at a distance. The canopy is also what makes a forest
-// somewhere you can lose a mob rather than a field of poles.
+// Almost all of that was trunk, and the fix for that was a six-log trunk under
+// a five-across crown — right for a view that reached seventeen cells, and
+// wrong now that render::BANDS closes the fog at ten.
 //
-// Layers, measured from the first z above the top log, exactly as Minecraft
-// stacks them:
+// A block subtends PROJ / d pixels, so at five cells one block is 32 rows of a
+// 135-row panel: four blocks is the whole screen. An eight-block tree with a
+// five-wide crown could only be seen entire from about the fog line, where it
+// is already grey, and up close it was a green wall. Four or five logs under a
+// 3x3 crown is a tree you can stand next to and still read as a tree — and the
+// crown is still leaves *over air*, which is the thing that separates it from
+// a bush.
+//
+// Layers, measured from the first z above the top log:
 //
 //     trunkTop      a plus: the four orthogonal neighbours and the trunk cap
 //     trunkTop-1    3x3
-//     trunkTop-2    5x5, corners off
-//     trunkTop-3    5x5, corners off
+//     trunkTop-2    3x3, and for a spruce one course lower again
 //
 // A cell's leaves are one contiguous run, so each gets a single setSlab rather
 // than a layer at a time — the runs would merge into exactly this anyway.
@@ -726,13 +731,14 @@ static bool placeTree(int x, int y, uint32_t& rng) {
   // tree occupies six cells away the only thing that separates two of them is
   // the outline, so the variants differ in shape and not in colour.
   const bool pine = (biome == BIOME_TUNDRA);
-  const int logs = (pine ? 9 : 6) + (int)((rng >> 16) % 2u);
+  const int logs = (pine ? 6 : 4) + (int)((rng >> 16) % 2u);
   const int trunkTop = GROUND + logs;               // first z above the top log
 
-  // Where the crown starts. Three below the top log for an oak leaves three or
-  // four blocks of clear air under the eaves — HEADROOM is two, so the player
-  // and the mobs both walk under it and a canopy is shade rather than a wall.
-  const int skirt = pine ? trunkTop - 5 : trunkTop - 3;
+  // Where the crown starts, and the oak's is at its floor: the leaves() lambda
+  // below refuses a cell whose base is less than HEADROOM above the ground, so
+  // trunkTop - 2 over a four-log trunk puts the skirt at exactly GROUND + 2.
+  // Three logs would shed the whole crown rather than make a smaller tree.
+  const int skirt = pine ? trunkTop - 3 : trunkTop - 2;
 
   setCol(x, y, trunkTop, B_WOOD);                   // wood all the way down
   // The trunk's own cap: exactly one block of leaves, oak or spruce. One,
@@ -754,32 +760,43 @@ static bool placeTree(int x, int y, uint32_t& rng) {
     // one, and adding to it would not be what made it unwalkable but would
     // certainly be found holding the bag.
     if (!standable(nx, ny)) return;
-    if (base - (int)ghAt(idx(nx, ny)) < HEADROOM) return;
+    // Where the ground under a leaf comes up, the leaf comes up with it rather
+    // than being dropped. This used to be a flat refusal — anything with less
+    // than HEADROOM of air under it was simply not placed — and that was
+    // survivable while a crown was five across and the skirt sat three clear
+    // of the ground. It is not now: the crown is eight cells, the skirt clears
+    // the ground by exactly HEADROOM, and so a single cell of rise took a leaf
+    // off. Trees on any kind of slope came out visibly half bald.
+    //
+    // Lifting instead of refusing is also the more honest shape. A canopy over
+    // a hillside is not flat in the first place, and what the rule is actually
+    // protecting is the air underneath, which lifting preserves exactly.
+    const int lift = (int)ghAt(idx(nx, ny)) + HEADROOM;
+    if (lift > base) base = lift;
+    // Unless the ground has risen into the crown itself, which is where a
+    // leaf really does have nowhere to go. Keeping this as a hard floor is
+    // what stops a lifted cell from ending up above the trunk that has to
+    // hold it — the rule dropOrphanCanopy and the canopy test both apply.
+    if (base >= top) return;
     setSlab(nx, ny, base, top, B_LEAVES);
   };
 
+  // The whole crown, one ring of it. There used to be a second ring two cells
+  // out — a 5x5 with its corners knocked off — and at a ten-cell draw distance
+  // that ring was most of the screen from anywhere you could see its colour.
+  // What it bought was a ragged outline; what it cost was the view.
   static const int kR1[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
-  // The outer ring without its four corners: a full 5x5 crown is a square, and
-  // a square is the one shape a tree never is.
-  static const int kR2[12][2] = { {2,0},{-2,0},{0,2},{0,-2},
-                                  {2,1},{2,-1},{-2,1},{-2,-1},
-                                  {1,2},{-1,2},{1,-2},{-1,-2} };
 
   for (int i = 0; i < 8; ++i) {
     const int nx = x + kR1[i][0], ny = y + kR1[i][1];
     // Orthogonal neighbours reach the top layer; the diagonals stop one short,
     // which is what turns the crown's cap into a plus instead of a block.
     const int top = (i < 4) ? trunkTop + 1 : trunkTop;
+    // A spruce's ring stops a course lower than an oak's and hangs from a
+    // deeper skirt, so it tapers to its point instead of ending in a cap. With
+    // the outer ring gone that difference and the extra two logs are the whole
+    // of what tells the two apart at range, so neither can be tuned away.
     leaves(nx, ny, skirt, pine ? trunkTop - 1 : top);
-  }
-
-  for (int i = 0; i < 12; ++i) {
-    rng = rng * 1664525u + 1013904223u;
-    if ((rng >> 16) % 100u >= 82u) continue;        // ragged, not stamped
-    const int nx = x + kR2[i][0], ny = y + kR2[i][1];
-    // Two layers for an oak, and for a spruce a skirt that stops well below
-    // the middle of the tree so the silhouette tapers.
-    leaves(nx, ny, skirt, pine ? skirt + 2 : trunkTop - 1);
   }
   return true;
 }
@@ -819,13 +836,20 @@ static void dropOrphanCanopy(int cx, int cy) {
         z = top;
         if (matAtIdx(i, base) != B_LEAVES) continue;
 
+        // Held up by a standing tree, which is a column whose top is its leaf
+        // cap. Not "wood or leaves": placeTree lays the cap down in the same
+        // breath as the trunk, so a live trunk's top is always B_LEAVES, and
+        // the only things a bare wood top can be are a snag or a house corner
+        // post. Neither of those ever grew a canopy, and accepting one meant a
+        // snag two cells away could adopt a crown whose own trunk the spawn
+        // pad had just wiped -- leaving exactly the floating leaves this sweep
+        // exists to remove.
         bool held = false;
         for (int ty = y - 2; ty <= y + 2 && !held; ++ty)
           for (int tx = x - 2; tx <= x + 2 && !held; ++tx) {
             if (outside(tx, ty)) continue;
             const int j = idx(tx, ty);
-            held = (gtopAt(j) == B_WOOD || gtopAt(j) == B_LEAVES)
-                   && ghAt(j) >= base;
+            held = gtopAt(j) == B_LEAVES && ghAt(j) >= base;
           }
         if (held) continue;
         solidClear(i, base, top);
@@ -876,12 +900,17 @@ static bool placeBoulder(int cx, int cy, uint32_t& rng) {
   return true;
 }
 
-// A rock needle: one cell wide and eight to fourteen tall. Useless, unmissable,
+// A rock needle: one cell wide and five to eight tall. Useless, unmissable,
 // and the cheapest landmark in the generator.
+//
+// It was eight to fourteen, which is the height of a thing you are meant to see
+// from across the map — and the map is ten cells deep now. All that height did
+// at the range it was actually met from was run off the top of the panel, which
+// is the opposite of unmissable.
 static bool placeSpire(int x, int y, uint32_t& rng) {
   if (!clearArea(x - 1, y - 1, 3, 3, 2)) return false;
   rng = rng * 1664525u + 1013904223u;
-  const int h = 8 + (int)((rng >> 16) % 7u);
+  const int h = 5 + (int)((rng >> 16) % 4u);
   const int base = groundOf(x, y);
   setCol(x, y, base + h, B_STONE);
   // A shoulder or two, so it tapers instead of standing like a chimney.
@@ -901,10 +930,16 @@ static bool placeSpire(int x, int y, uint32_t& rng) {
 static bool placeSnag(int x, int y, uint32_t& rng) {
   if (!flatAt(x, y) || biomeAt(x, y) != BIOME_TUNDRA) return false;
   rng = rng * 1664525u + 1013904223u;
-  // Deliberately clear of GROUND + 5, which is a house's corner post: two bare
-  // wood columns of the same height are the same thing to anything reading the
-  // map, tests included.
-  setCol(x, y, GROUND + 6 + (int)((rng >> 16) % 3u), B_WOOD);
+  // The height of a live spruce, less its crown. It used to be six to eight,
+  // which was fine beside a ten-block tree and is not beside a six-block one:
+  // a dead trunk standing taller than every living tree around it reads as a
+  // mistake rather than as a snag.
+  //
+  // Still deliberately clear of a house's corner post, which is a bare wood
+  // column of the same material and now tops out at base + 4. Two bare wood
+  // columns of the same height are the same thing to anything reading the map,
+  // tests included.
+  setCol(x, y, GROUND + 5 + (int)((rng >> 16) % 2u), B_WOOD);
   return true;
 }
 
@@ -922,20 +957,27 @@ static bool placeSnag(int x, int y, uint32_t& rng) {
 // its corners. The eave is what tells a roof from a lid. The torch is why you
 // run for one at dusk: it lights the inside, and the spawner will not put a
 // mob anywhere lit.
+//
+// Five or six cells square and four blocks to the wall top, down from eight and
+// six. The materials are what make it readable at ten cells; the size is what
+// makes it readable at five, where one block is 32 of the panel's 135 rows and
+// the old roofline was off the top of the screen. Four is the floor and not a
+// preference: the sill has to be two blocks or STEP_UP lets a zombie walk in
+// through the window, and the roof sits two above the sill.
 static bool placeHouse(int x0, int y0, int w, int d, uint32_t& rng) {
   // Two cells of margin rather than one: the roof overhangs by a cell, and an
   // eave landing on somebody else's wall is a cell with two things in it and
   // room for one.
   if (!clearArea(x0 - 2, y0 - 2, w + 4, d + 4, 4)) return false;
   const int base = levelArea(x0 - 2, y0 - 2, w + 4, d + 4);
-  if (base + 6 > MAX_H || base < 2) return false;
+  if (base + 5 > MAX_H || base < 2) return false;
 
   rng = rng * 1664525u + 1013904223u;
   const int side = (int)((rng >> 16) % 4u);
   rng = rng * 1664525u + 1013904223u;
   const int doorAt = 1 + (int)((rng >> 16) % (uint32_t)((side < 2 ? w : d) - 2));
 
-  const int wallTop = base + 5;
+  const int wallTop = base + 4;
   int doorX = -1, doorY = -1;
 
   for (int y = y0; y < y0 + d; ++y) {
@@ -958,7 +1000,9 @@ static bool placeHouse(int x0, int y0, int w, int d, uint32_t& rng) {
       // One window per wall, in the middle of it, and two courses off the
       // ground. STEP_UP is one — so a zombie can see you through it and cannot
       // come through it, which is the whole reason a window is not a doorway.
-      if (along == span / 2) { setCol(x, y, base + 3, B_PLANK); continue; }
+      // Two and not three: the wall is one course shorter than it was, and a
+      // sill that kept its old height would have left the roof resting on it.
+      if (along == span / 2) { setCol(x, y, base + 2, B_PLANK); continue; }
 
       setCol(x, y, wallTop, B_PLANK);
     }
@@ -989,20 +1033,25 @@ static bool placeHouse(int x0, int y0, int w, int d, uint32_t& rng) {
 // has to make, and a village that came with its own torches was four free
 // ones sitting in a building you could also shelter in.
 static bool placeVillage(int cx, int cy, uint32_t& rng) {
-  constexpr int SPAN = 13;                 // yard plus a house on each side
+  constexpr int SPAN = 10;                 // yard plus a house on each side
   if (!clearArea(cx - SPAN, cy - SPAN, 2 * SPAN + 1, 2 * SPAN + 1, 5)) return false;
   const int base = levelArea(cx - SPAN, cy - SPAN, 2 * SPAN + 1, 2 * SPAN + 1);
-  if (base + 6 > MAX_H || base < 2) return false;
+  if (base + 5 > MAX_H || base < 2) return false;
 
   int built = 0;
-  static const int kAt[6][2] = { {-11,-9}, {3,-9}, {-11,4}, {3,4}, {-4,-12}, {-4,7} };
+  // Pulled in with the houses. The slots have to keep two clear cells between
+  // adjacent footprints, because placeHouse reserves that margin for its eave
+  // and an eave landing on somebody else's wall is a cell with two things in
+  // it. A slot that violates it does not corrupt anything — placeHouse's own
+  // clearArea simply refuses — but the village quietly comes out half built.
+  static const int kAt[6][2] = { {-8,-7}, {2,-7}, {-8,3}, {2,3}, {-3,-8}, {-3,4} };
   rng = rng * 1664525u + 1013904223u;
   const int want = 3 + (int)((rng >> 16) % 3u);
   for (int i = 0; i < 6 && built < want; ++i) {
     rng = rng * 1664525u + 1013904223u;
-    const int w = 6 + (int)((rng >> 16) % 2u);
+    const int w = 5 + (int)((rng >> 16) % 2u);
     rng = rng * 1664525u + 1013904223u;
-    const int d = 6 + (int)((rng >> 16) % 2u);
+    const int d = 5 + (int)((rng >> 16) % 2u);
     if (placeHouse(cx + kAt[i][0], cy + kAt[i][1], w, d, rng)) ++built;
   }
   return built >= 2;
@@ -1019,7 +1068,7 @@ static bool placeVillage(int cx, int cy, uint32_t& rng) {
 static bool placeRuin(int x0, int y0, int w, int d, uint32_t& rng) {
   if (!clearArea(x0 - 1, y0 - 1, w + 2, d + 2, 4)) return false;
   const int base = levelArea(x0 - 1, y0 - 1, w + 2, d + 2);
-  if (base + 6 > MAX_H || base < 2) return false;
+  if (base + 5 > MAX_H || base < 2) return false;
 
   rng = rng * 1664525u + 1013904223u;
   const int side = (int)((rng >> 16) % 4u);
@@ -1028,7 +1077,11 @@ static bool placeRuin(int x0, int y0, int w, int d, uint32_t& rng) {
   rng = rng * 1664525u + 1013904223u;
   const int doorAt = 1 + (int)((rng >> 16) % (uint32_t)((side < 2 ? w : d) - doorW - 1));
 
-  const int wallTop = base + 5;
+  // The same height as a house's, and that is the point: the two are meant to
+  // be one silhouette at the range either is first seen from, and the broken
+  // course is the only thing that separates them. Shrink one without the other
+  // and a ruin stops reading as a house somebody stopped maintaining.
+  const int wallTop = base + 4;
   for (int y = y0; y < y0 + d; ++y) {
     for (int x = x0; x < x0 + w; ++x) {
       const bool edge = (x == x0 || x == x0 + w - 1 || y == y0 || y == y0 + d - 1);
@@ -1094,7 +1147,11 @@ static bool placeTower(int cx, int cy, uint32_t& rng) {
   const int base = levelArea(cx - R - 2, cy - R - 2, 2 * R + 5, 2 * R + 5);
   if (base < 2) return false;
   rng = rng * 1664525u + 1013904223u;
-  const int top = base + 14 + (int)((rng >> 16) % 5u);
+  // Nine to eleven, down from fourteen to eighteen. The footprint is unchanged
+  // — 5x5 is already small — and all of the saving is height, because height is
+  // what a ten-cell draw distance cannot afford: at five cells a block is 32 of
+  // 135 rows, so eighteen of them is four screens of tower.
+  const int top = base + 9 + (int)((rng >> 16) % 3u);
   if (top + 2 > MAX_H) return false;
 
   for (int y = cy - R; y <= cy + R; ++y)
@@ -1127,8 +1184,8 @@ static bool placeCastle(int x0, int y0, int sz, uint32_t& rng) {
   if (!clearArea(x0 - 1, y0 - 1, sz + 2, sz + 2, 6)) return false;
   const int base = levelArea(x0 - 1, y0 - 1, sz + 2, sz + 2);
   if (base < 2) return false;
-  const int curtain = base + 8;
-  const int tower   = base + 15;
+  const int curtain = base + 5;
+  const int tower   = base + 9;
   if (tower + 2 > MAX_H) return false;
 
   rng = rng * 1664525u + 1013904223u;
@@ -1158,7 +1215,7 @@ static bool placeCastle(int x0, int y0, int sz, uint32_t& rng) {
     }
   }
 
-  // The bailey is bare. A castle is eight blocks of cut stone and nothing else
+  // The bailey is bare. A castle is five blocks of cut stone and nothing else
   // -- it is shelter, not a lit camp, and what you do with the dark inside it
   // is your own problem.
   return true;
@@ -1177,10 +1234,40 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
   // Lowland only, and clear of anything already built. Not required to be dead
   // flat — cutting into the side of a rise is what a quarry looks like — but a
   // tall hill would leave a cliff the player cannot climb back out of.
-  for (int y = cy - r; y <= cy + r; ++y)
-    for (int x = cx - r; x <= cx + r; ++x) {
+  //
+  // Scanned one cell wider than the pit, because the wall you have to climb is
+  // not made only of terraces. The rim ring is cut to GROUND - 1, so whatever
+  // stands immediately outside it is the last step out, and this guard used to
+  // stop at the pit's own edge and never look at it. A quarry that landed in a
+  // dip came out as a hole ringed by untouched hillside, and every terrace
+  // inside it was climbable right up to a wall that was not.
+  //
+  // What the ring owes the player is a way out, not a low horizon all the way
+  // round: a pit cut into the side of a rise is the shape this is for, and
+  // demanding every outside cell be steppable refused so many sites that whole
+  // seeds came out with no quarry at all. So the ring is counted rather than
+  // required, and a handful of exits is enough.
+  int exits = 0;
+  for (int y = cy - r - 1; y <= cy + r + 1; ++y)
+    for (int x = cx - r - 1; x <= cx + r + 1; ++x) {
       if (outside(x, y) || isBorder(x, y)) return false;
       const int i = idx(x, y);
+      if (x < cx - r || x > cx + r || y < cy - r || y > cy + r) {
+        // Not being cut, so it may be any material and any height. It counts
+        // as an exit only if the rim can actually step up onto it: at most
+        // GROUND, which is one above the rim, and with nothing hanging over it.
+        if (ghAt(i) > GROUND || hasFloating(i)) continue;
+        // And only if it actually touches the pit. The scan is a square and
+        // the pit is a disc, so the corners of this ring are two or three
+        // cells clear of anything that gets cut — counting those as exits let
+        // a pit whose whole rim was walled in still pass.
+        static const int kD[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+        for (int k = 0; k < 4; ++k) {
+          const int ax = x + kD[k][0] - cx, ay = y + kD[k][1] - cy;
+          if (ax * ax + ay * ay <= r * r) { ++exits; break; }
+        }
+        continue;
+      }
       // Not onto ground that has already been cut. A quarry reads the material
       // it exposes out of the column it is about to shorten, so a second one
       // laid over the floor of the first asks for the material of a layer that
@@ -1192,6 +1279,9 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
       if (isStructure(gtopAt(i)) || hasFloating(i)) return false;
       if (ghAt(i) > GROUND + 3 || ghAt(i) < GROUND) return false;
     }
+  // Three, so the way out is a stretch of bank rather than a single tile the
+  // player has to find by walking the whole rim.
+  if (exits < 3) return false;
 
   for (int y = cy - r; y <= cy + r; ++y) {
     for (int x = cx - r; x <= cx + r; ++x) {
@@ -1200,10 +1290,17 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
       if (d2 > r * r) continue;
       // Terraced rather than a smooth bowl, so the walls are one-block steps
       // the player can actually climb back out of.
-      // Two courses per terrace step, so a pit on a world twenty-four blocks
-      // tall is a pit and not a scuff. Still one block at a time to climb out
-      // of, because each terrace is two cells wide.
-      const int down = (r - (int)(sqrtf((float)d2) + 0.5f) + 1) * 2;
+      //
+      // One course per terrace, down from two. That is not a separate taste
+      // decision from the smaller radius — it is forced by it. A terrace is one
+      // ring wide, so at r=2 a two-course step is a two-block wall, STEP_UP is
+      // one, and the pit becomes a hole you cannot get out of. At one course a
+      // ring is exactly one step whatever the radius is.
+      //
+      // The pit is still a pit: r=3 cuts four blocks down, which puts its floor
+      // at z=4 reading z=3 — past the dirt band at depth 1, into stone and ore,
+      // and just inside DIAMOND_MAX_Z, so a quarry floor can still show a seam.
+      const int down = r - (int)(sqrtf((float)d2) + 0.5f) + 1;
       int h = GROUND - down;
       if (h < 1) h = 1;
       // A quarry only ever cuts down. Belt and braces against the above: the
@@ -1303,7 +1400,7 @@ static void placeStructures(uint32_t seed) {
   // the very end.
   for (int want = 0; want < 2; ++want) {
     for (int i = 0; i < TRIES; ++i) {
-      const int sz = 13 + next(5);
+      const int sz = 9 + next(3);
       const int x = spot(sz / 2 + 2) - sz / 2;
       const int y = spot(sz / 2 + 2) - sz / 2;
       if (placeCastle(x, y, sz, rng)) break;
@@ -1321,8 +1418,8 @@ static void placeStructures(uint32_t seed) {
   }
   for (int want = 0; want < 3; ++want) {
     for (int i = 0; i < TRIES; ++i) {
-      const int w = 6 + next(3);
-      const int d = 6 + next(3);
+      const int w = 5 + next(2);
+      const int d = 5 + next(2);
       const int x = spot(w / 2 + 3) - w / 2;
       const int y = spot(d / 2 + 3) - d / 2;
       if (placeHouse(x, y, w, d, rng)) break;
@@ -1330,8 +1427,8 @@ static void placeStructures(uint32_t seed) {
   }
   for (int want = 0; want < 4; ++want) {
     for (int i = 0; i < TRIES; ++i) {
-      const int w = 6 + next(4);
-      const int d = 6 + next(4);
+      const int w = 5 + next(2);
+      const int d = 5 + next(2);
       const int x = spot(w / 2 + 2) - w / 2;
       const int y = spot(d / 2 + 2) - d / 2;
       if (placeRuin(x, y, w, d, rng)) break;
@@ -1339,7 +1436,7 @@ static void placeStructures(uint32_t seed) {
   }
   for (int want = 0; want < 7; ++want) {
     for (int i = 0; i < TRIES; ++i) {
-      const int r = 3 + next(3);
+      const int r = 2 + next(2);
       const int x = spot(r + 2), y = spot(r + 2);
       if (placeQuarry(x, y, r, rng)) break;
     }
@@ -1348,7 +1445,7 @@ static void placeStructures(uint32_t seed) {
   // buildings go first: they need clear ground and the small stuff takes it.
   for (int want = 0; want < 4; ++want) {
     for (int i = 0; i < TRIES; ++i) {
-      const int len = 6 + next(4);
+      const int len = 4 + next(3);
       const int x = spot(len + 1), y = spot(len + 1);
       const bool alongX = next(2) == 0;
       if (placeArch(x, y, len, alongX, rng)) break;
