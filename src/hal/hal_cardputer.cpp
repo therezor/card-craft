@@ -26,6 +26,9 @@ static bool s_prevEnter = false;
 static bool s_prevPause = false;
 static bool s_prevCycle = false;
 static bool s_prevCraft = false;
+// One bit per number key, so a held '3' selects slot three once rather than
+// every frame — the same edge rule the rest of this file applies.
+static uint16_t s_prevSlot = 0;
 
 // Two-handed: the arrow cluster (; . , /) sits under the right hand and does
 // all the moving and menu navigation, while E and D sit under the left and do
@@ -39,12 +42,17 @@ static const Caps s_caps = {
   /*kMove */ "\x18\x19",   // up/down
   /*kAct  */ "E",
   /*kBuild*/ "D",
-  /*kStart*/ "E",
-  // Named TAB rather than ` : both are bound, but the HUD font has no
-  // backtick and a hint the player cannot read is worse than the longer name.
-  /*kPause*/ "TAB",
+  /*kConfirm*/ "ENTER",
+  // ESC rather than TAB or ` . All three are the same key to this game, and
+  // two of them are bad labels: the HUD font has no backtick, and TAB names
+  // the wrong one of the two physical keys that work. The Cardputer has no key
+  // engraved ESC, but the one under the player's left thumb at the top-left
+  // corner is where ESC lives on every keyboard they have ever used, and that
+  // is what a hint is for.
+  /*kBack*/ "ESC",
   /*kCycle*/ "S",
   /*kCraft*/ "W",
+  /*kDrop*/  "Q",
   // R sits directly above F on this keyboard, so up is up and down is down
   // under the fingers as well as on the panel.
   /*kLook */ "RF",
@@ -77,6 +85,10 @@ void update() {
   // Left hand: E swings, D builds.
   b.act   = kb.isKeyPressed('e') || kb.isKeyPressed(' ');
   b.build = kb.isKeyPressed('d');
+  // Q throws the selected item on the floor. Minecraft's key, and the one free
+  // letter next to the movement hand -- held rather than edged, because the
+  // simulation paces the repeat that empties a stack.
+  b.drop  = kb.isKeyPressed('q');
   // R over F, one row apart, so the pair reads as up and down without a hint.
   // Both together recentres the view; the game handles that, not the HAL.
   b.lookUp   = kb.isKeyPressed('r');
@@ -93,11 +105,33 @@ void update() {
   b.fwdEdge   = b.fwd   && !s_prev.fwd;
   b.backEdge  = b.back  && !s_prev.back;
   b.actEdge   = b.act   && !s_prev.act;
+  b.buildEdge = b.build && !s_prev.build;
   // Enter confirms but never acts, so dismissing a card cannot also swing.
-  b.startEdge = (b.act || st.enter) && !(s_prev.act || s_prevEnter);
-  b.pauseEdge = pause && !s_prevPause;
+  // E stays bound alongside ENTER, the way SPACE stays bound alongside E: it
+  // is what a hand already resting on the mine key will try first, and it
+  // costs nothing. ENTER is what the hints name, because it is the one that
+  // means only this.
+  b.confirmEdge = (b.act || st.enter) && !(s_prev.act || s_prevEnter);
+  b.cancelEdge  = pause && !s_prevPause;
+
+  // One cluster, two vocabularies. Up the panel is up the list.
+  b.navUp    = b.fwdEdge;
+  b.navDown  = b.backEdge;
+  b.navLeft  = b.leftEdge;
+  b.navRight = b.rightEdge;
   b.cycleEdge = cyc   && !s_prevCycle;
   b.craftEdge = crf   && !s_prevCraft;
+
+  // The number row picks a hotbar slot directly. Lowest key wins if two are
+  // down, which only matters to someone rolling a finger across the row.
+  uint16_t slotNow = 0;
+  for (int k = 0; k < 9; ++k)
+    if (kb.isKeyPressed((char)('1' + k))) slotNow |= (uint16_t)(1u << k);
+  for (int k = 0; k < 9; ++k) {
+    const uint16_t bit = (uint16_t)(1u << k);
+    if ((slotNow & bit) && !(s_prevSlot & bit)) { b.slotPick = (uint8_t)(k + 1); break; }
+  }
+  s_prevSlot = slotNow;
 
   s_prevEnter = st.enter;
   s_prevPause = pause;

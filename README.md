@@ -99,16 +99,51 @@ also bound to movement — `D` has to mean build.
 | Turn | `,` `/` (left/right arrows) | right |
 | Mine, attack | `E` (or `SPACE`) — hold it; the block under the crosshair is lit and outlined | left |
 | Build | `D` — places against the face you are aiming at | left |
-| Cycle block | `S` — steps through the six-slot hotbar | left |
-| Craft | `W` — opens the crafting card | left |
+| Cycle block | `S` — steps through the nine-slot hotbar | left |
+| Craft | `W` — opens the crafting grid, and closes it again | left |
+| Drop | `Q` — throws the selected item at your feet; hold to empty a stack | left |
 | Look up, down | `R` `F` — about 60° each way; both together recentres | left |
-| Pause | `` ` `` or `TAB` | left |
-| Confirm | `E` or `ENTER` | left |
+| Back, menu | `ESC` (the top-left key, also `TAB`) — one level up, wherever you are | left |
+| Confirm | `ENTER` (`E` also works) | left |
 
 Mining takes the block the crosshair is on, and building puts one against the
 face it is on — so aiming at the foot of a wall tunnels into it rather than
 taking the block off its top, and aiming at a wall's side builds outward rather
 than upward. Reach is 5.5 world units from the eye, for both.
+
+Every card in the game is driven the same way: **arrows move, `ENTER` does the
+thing, `ESC` goes up one level.** No card has a key that means one particular
+thing, because a card that needs to be explained is a card the player has to be
+told about while they are trying to use it.
+
+On the crafting card that means the cursor visits six places, not four — the
+four grid cells, the result slot, and a `RECIPES` row underneath. `ENTER` on a
+cell cycles it through what you are actually carrying; on the result slot it
+makes whatever the grid spells; on the `RECIPES` row it opens the book.
+
+The book draws every recipe as its own ingredients — the same block icons that
+are on your hotbar, in the order they go into the grid, then an arrow and what
+comes out. Recipes you cannot afford are darkened rather than greyed, so you can
+still see *which* material you are short of. `ENTER` lays a recipe out on the
+grid and drops you back on it with the cursor already on the result slot, so
+making something from the book is: find it, `ENTER`, `ENTER`.
+
+The nine slots are a real capacity, not a display. Stacks are unbounded, but a
+material with no slot to claim will not fit — and rather than vanishing into a
+count you cannot see, it is **spilled on the floor** where it broke. Walk over
+a dropped item to take it back; `Q` throws one out to make room. Lava eats what
+falls in it, and nothing lies around for more than about ninety seconds.
+
+A run starts with **nothing in your hands**. Wood comes away from a tree in
+about four seconds by fist, three blocks at a time, and three planks make the
+first pickaxe; from there the ladder is stone, iron, and diamond from the
+bottom three layers of the world. Pickaxes and swords both wear out — the bar
+under the icon is what is left of one — and a sword's tier is the difference
+between three blows on a zombie and one.
+
+Torches are the only light there is, and nothing on the map comes with any: no
+village, no house, no castle. Mobs will not spawn on lit ground, so a torch is
+the difference between a shelter and a room full of things that walked in.
 
 The pause card carries the one setting the game has: **SOUND: ON/OFF**, kept in
 NVS so it survives a reboot. It defaults to off.
@@ -225,7 +260,7 @@ saturates at 16.
 
 ```sh
 pio run -e cardputer -t upload          # the game
-pio test -e native                      # 126 host tests, no hardware needed
+pio test -e native                      # 164 host tests, no hardware needed
 pio run -e cardputer-dev -t upload      # + frame-time overlay, telemetry, screenshots
 ./tools/grab-screenshots.py             # pull PNGs off the dev build
 ./tools/make-font.py                    # regenerate src/font5x7.h from its glyph art

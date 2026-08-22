@@ -79,6 +79,11 @@ void drawSky(const raycast::Camera& cam, float daylight);
 // standing in.
 void drawMobs(const game::State& s, const raycast::Camera& cam);
 
+// Items lying on the floor. Clipped against the same per-column tables mobs and
+// particles use, so a drop behind a wall or under a bridge deck is hidden by
+// it. Must follow drawWorld for the same reason drawMobs must.
+void drawDrops(const game::State& s, const raycast::Camera& cam);
+
 // ---- particles --------------------------------------------------------------
 //
 // Split in two on purpose. stepParticles advances the simulation and is called

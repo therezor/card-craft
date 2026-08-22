@@ -1,5 +1,5 @@
 // =============================================================================
-//  game.cpp — clock, waves, pathing, combat
+//  game.cpp — clock, items, pathing, combat
 //
 //  Mobs steer by a BFS flow field rebuilt a few times a second rather than by
 //  per-mob pathfinding. That is not an optimisation, it is the design: the
@@ -98,73 +98,525 @@ constexpr int   LOS_PERIOD   = 6;       // ticks between line-of-sight refreshes
 constexpr float CREEPER_LUNGE = 1.45f;  // speed multiplier once the fuse is lit
 constexpr uint8_t FLOW_HOLD   = 45;     // ticks on the grid after walking into something
 
+// A creeper that has got this close and then stopped getting closer for this
+// long lights its fuse anyway. The range check alone was not enough to deliver
+// what the fuse is documented to be for — see the creeper branch in updateMob.
+constexpr float    CREEPER_PRESS_REACH = 3.5f;
+constexpr uint16_t CREEPER_PRESS_TICKS = 90;    // 1.5 s
+
+// A siege is a trickle, not a flood. Left uncapped it fills the mob array with
+// creepers that hold each OTHER at arm's length — see the same branch.
+constexpr int SIEGE_CAP = 4;
+
 static uint32_t s_aiTick = 0;
 
-// Placement stock, ordered cheapest and most plentiful first so the slot the
-// player lands on by default is the one they will actually have.
-const uint8_t kHotbar[HOTBAR_N] = {
-  world::B_DIRT, world::B_STONE, world::B_WOOD,
-  world::B_PLANK, world::B_BRICK, world::B_TORCH,
+
+// The tool table. Mining effort is per tick against world::EFFORT_PER_TICK's
+// 16, so a wooden pickaxe is exactly the tool the game used to hand out for
+// free and every tier above it is new ground.
+//
+// Swords all mine at hand speed. That is the whole reason to have two tools
+// rather than one good one: holding the sword costs you the ability to dig,
+// holding the pickaxe costs you the ability to fight, and the hotbar is a
+// choice you keep making instead of a label.
+//
+// Diamond's damage is 127 rather than 4. Nothing on the map has more than
+// three hearts, so anything above three is already a one-hit kill -- naming it
+// 127 says the one-hit is the POINT of the tier, and keeps it a one-hit if mob
+// health is ever retuned upward.
+static const ToolInfo kTool[TK_COUNT][TT_COUNT] = {
+  // pickaxes:  name        dur  effort  dmg
+  { { "WOOD PICK",           60,     16,   1 },
+    { "STONE PICK",         132,     24,   1 },
+    { "IRON PICK",          251,     40,   1 },
+    { "DIAMOND PICK",      1562,     64,   1 } },
+  // swords:
+  { { "WOOD SWORD",          60,  HAND_EFFORT,   2 },
+    { "STONE SWORD",        132,  HAND_EFFORT,   2 },
+    { "IRON SWORD",         251,  HAND_EFFORT,   3 },
+    { "DIAMOND SWORD",     1562,  HAND_EFFORT, 127 } },
 };
 
-// Four recipes, all of them turning something the world gives you freely into
-// something it does not. The torch is the important one: it is the only way to
-// make ground the mobs will not spawn on.
+const ToolInfo& toolInfo(uint8_t kind, uint8_t tier) {
+  return kTool[kind < TK_COUNT ? kind : 0][tier < TT_COUNT ? tier : 0];
+}
+
+// Twelve recipes over four cells. Two things hold the table together.
+//
+// Every tool takes a plank as its handle, so the chain out of an empty spawn is
+// always wood -> planks -> tool, and the first pickaxe is three planks from one
+// log. That is the only bootstrap the game has now, and it wants to be short.
+//
+// No two rows are the same multiset. Worth checking by eye when adding one:
+// matching is order-blind, so "2 plank" and "3 plank" are a sword and a
+// pickaxe, and a fourth plank recipe would have to find a fourth count.
 static const RecipeInfo kRecipe[R_COUNT] = {
-  { "TORCH",  "light, no spawns",
-    { world::B_WOOD,   world::B_COAL   }, { 1, 1 }, world::B_TORCH, 4, 0 },
-  { "PLANKS", "cheap walls",
-    { world::B_WOOD,   0               }, { 1, 0 }, world::B_PLANK, 3, 0 },
-  { "BRICKS", "tough walls",
-    { world::B_STONE,  0               }, { 3, 0 }, world::B_BRICK, 3, 0 },
-  { "PATCH",  "heal 2 hearts",
-    { world::B_LEAVES, world::B_WOOD   }, { 2, 1 }, world::B_COUNT, 0, 2 },
+  { "PLANKS",  { world::B_WOOD,  CELL_EMPTY,     CELL_EMPTY, CELL_EMPTY },
+    world::B_PLANK, 3, 0 },
+  { "TORCH",   { world::B_WOOD,  world::B_COAL,  CELL_EMPTY, CELL_EMPTY },
+    world::B_TORCH, 4, 0 },
+  { "BRICKS",  { world::B_STONE, world::B_STONE, world::B_STONE, CELL_EMPTY },
+    world::B_BRICK, 3, 0 },
+  { "PATCH",   { world::B_LEAVES, world::B_LEAVES, world::B_WOOD, CELL_EMPTY },
+    ITEM_NONE, 0, 2 },
+
+  { "WOOD PICK",    { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY },
+    toolId(TK_PICK, TT_WOOD), 1, 0 },
+  { "STONE PICK",   { world::B_STONE, world::B_STONE, world::B_PLANK, CELL_EMPTY },
+    toolId(TK_PICK, TT_STONE), 1, 0 },
+  { "IRON PICK",    { world::B_IRON, world::B_IRON, world::B_PLANK, CELL_EMPTY },
+    toolId(TK_PICK, TT_IRON), 1, 0 },
+  { "DIAMOND PICK", { world::B_DIAMOND, world::B_DIAMOND, world::B_PLANK, CELL_EMPTY },
+    toolId(TK_PICK, TT_DIAMOND), 1, 0 },
+
+  { "WOOD SWORD",    { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+    toolId(TK_SWORD, TT_WOOD), 1, 0 },
+  { "STONE SWORD",   { world::B_STONE, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+    toolId(TK_SWORD, TT_STONE), 1, 0 },
+  { "IRON SWORD",    { world::B_IRON, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+    toolId(TK_SWORD, TT_IRON), 1, 0 },
+  { "DIAMOND SWORD", { world::B_DIAMOND, world::B_PLANK, CELL_EMPTY, CELL_EMPTY },
+    toolId(TK_SWORD, TT_DIAMOND), 1, 0 },
 };
 
 const RecipeInfo& recipeInfo(uint8_t r) { return kRecipe[r < R_COUNT ? r : 0]; }
 
-static const UpgradeInfo kUpgrade[UP_COUNT] = {
-  { "TOUGHER",  "+2 max heart",  6 },
-  { "PICKAXE",  "mine faster",   8 },
-  { "SWORD",    "harder hits",   8 },
-  { "PATCH UP", "full heal",     4 },
-  { "STOCKPILE","+15 blocks",    3 },
-};
+// ---- items -------------------------------------------------------------------
 
-const UpgradeInfo& upgradeInfo(uint8_t u) { return kUpgrade[u < UP_COUNT ? u : 0]; }
+// Every slot bare. A run opens with nothing in it, including slot 0.
+static void resetSlots(State& s) {
+  for (int i = 0; i < SLOT_N; ++i) { s.slot[i] = SLOT_EMPTY; s.dur[i] = 0; }
+  for (int i = 0; i < GRID_N; ++i) s.grid[i] = CELL_EMPTY;
+  s.sel = 0;
+  s.gridSel = 0;
+}
 
-uint8_t  heldBlock(const State& s) { return kHotbar[s.hotbar % HOTBAR_N]; }
-uint16_t heldCount(const State& s) { return s.inv[heldBlock(s)]; }
+uint8_t heldItem(const State& s)  { return s.slot[s.sel % SLOT_N]; }
+bool    heldIsTool(const State& s){ return isTool(heldItem(s)); }
+
+uint8_t heldBlock(const State& s) {
+  const uint8_t it = heldItem(s);
+  return it < world::B_COUNT ? it : (uint8_t)world::B_COUNT;
+}
+
+uint16_t heldCount(const State& s) {
+  const uint8_t b = heldBlock(s);
+  return b < world::B_COUNT ? s.inv[b] : (uint16_t)0;
+}
 
 void cycleBlock(State& s, int delta) {
-  s.hotbar = (uint8_t)((s.hotbar + delta % HOTBAR_N + HOTBAR_N) % HOTBAR_N);
+  s.sel = (uint8_t)((s.sel + delta % SLOT_N + SLOT_N) % SLOT_N);
+}
+
+void selectSlot(State& s, int index) {
+  if (index >= 0 && index < SLOT_N) s.sel = (uint8_t)index;
+}
+
+// True if the bar has anywhere to put this material.
+//
+// This is the whole of what "inventory full" means here. Stacks are unbounded,
+// so a material that already has a slot always fits; what runs out is slots,
+// and sixteen materials against nine of them means running out is ordinary.
+bool canAccept(const State& s, uint8_t mat) {
+  if (mat >= world::B_COUNT) return false;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == mat) return true;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == SLOT_EMPTY) return true;
+  return false;
+}
+
+// Puts `n` of a material into the inventory. Returns how many it took, which
+// is all of them or none: stacks do not have a cap, so the only question is
+// whether the material has a slot at all.
+//
+// It used to take them unconditionally and let the count sit in inv[] with no
+// slot to show it -- "nothing is ever lost, it is only temporarily unplaceable"
+// was the rule. That rule is gone, and the reason is that it was invisible: you
+// mined masonry with a full bar, the game said nothing, and you owned a
+// material you could not see, select or place. What will not fit is spilled on
+// the floor now, where it is a thing you can look at and decide about.
+static int giveItem(State& s, uint8_t mat, int n) {
+  if (mat >= world::B_COUNT || n <= 0) return 0;
+  for (int i = 0; i < SLOT_N; ++i)
+    if (s.slot[i] == mat) { s.inv[mat] = (uint16_t)(s.inv[mat] + n); return n; }
+  for (int i = 0; i < SLOT_N; ++i)
+    if (s.slot[i] == SLOT_EMPTY) {
+      s.slot[i] = mat;
+      s.inv[mat] = (uint16_t)(s.inv[mat] + n);
+      return n;
+    }
+  return 0;
+}
+
+// Spends from the inventory, and hands the slot back when the last one goes.
+// An emptied slot has to clear rather than sit there at zero: a bar full of
+// materials you no longer own is a bar with no room for the ones you do.
+//
+// There is no re-let pass any more, and there is nothing left for one to do.
+// While giveItem could take a material with no slot to show it, freeing a slot
+// meant looking for a material that had been waiting in the dark for one. Now
+// stock and slot are the same fact -- inv[m] is non-zero exactly when m has a
+// slot -- so an emptied slot is simply empty.
+static void takeItem(State& s, uint8_t mat, int n) {
+  if (mat >= world::B_COUNT) return;
+  s.inv[mat] = (uint16_t)(s.inv[mat] > n ? s.inv[mat] - n : 0);
+  if (s.inv[mat]) return;
+  for (int i = 0; i < SLOT_N; ++i)
+    if (s.slot[i] == mat) { s.slot[i] = SLOT_EMPTY; break; }
+}
+
+// Puts a freshly made tool on the bar at full durability. False when the bar
+// is full, which is what makes canCraft refuse a tool recipe there.
+static bool giveTool(State& s, uint8_t item) {
+  for (int i = 0; i < SLOT_N; ++i) {
+    if (s.slot[i] != SLOT_EMPTY) continue;
+    s.slot[i] = item;
+    s.dur[i] = toolInfo(toolKind(item), toolTier(item)).durability;
+    return true;
+  }
+  return false;
+}
+
+// Spends one point of the selected tool. Returns EV_TOOL_BROKE on the point
+// that finishes it, and leaves the slot empty.
+static uint32_t wearTool(State& s) {
+  const int i = s.sel % SLOT_N;
+  if (!isTool(s.slot[i])) return 0;
+  if (s.dur[i] > 1) { --s.dur[i]; return 0; }
+  s.dur[i] = 0;
+  s.slot[i] = SLOT_EMPTY;
+  return EV_TOOL_BROKE;
+}
+
+// ---- dropped items ----------------------------------------------------------
+
+// Defined with the rest of the effects, well below. Declared here because the
+// only thing this section needs from it is one puff when lava takes an item.
+static void spark(State& s, uint8_t kind, float x, float y, float z,
+                  uint8_t mat, uint8_t mag);
+
+int dropsAlive(const State& s) {
+  int n = 0;
+  for (int i = 0; i < MAX_DROPS; ++i) if (s.drops[i].alive) ++n;
+  return n;
+}
+
+// Finds a slot in the drop array, recycling the most nearly expired one when
+// every slot is taken. Dropping has to be something that always works: it is
+// the only way out of a full bar, and a drop key that silently did nothing
+// because sixteen other things were lying about would be the worst possible
+// moment for it to fail.
+static Drop& dropSlot(State& s) {
+  int best = 0;
+  uint16_t oldest = 0xFFFF;
+  for (int i = 0; i < MAX_DROPS; ++i) {
+    if (!s.drops[i].alive) return s.drops[i];
+    if (s.drops[i].life < oldest) { oldest = s.drops[i].life; best = i; }
+  }
+  return s.drops[best];
+}
+
+// Puts an item on the floor at a point, with a velocity. Everything that
+// spills goes through here: the drop key, a mined block with nowhere to go,
+// and a craft result that would not fit.
+static void spawnDrop(State& s, uint8_t item, uint8_t count, uint16_t dur,
+                      float x, float y, float z,
+                      float vx, float vy, float vz, uint8_t arm) {
+  Drop& d = dropSlot(s);
+  d = Drop{};
+  d.x = x; d.y = y; d.z = z;
+  d.vx = vx; d.vy = vy; d.vz = vz;
+  d.life = (uint16_t)DROP_LIFE;
+  d.dur = dur;
+  d.item = item;
+  d.count = count;
+  d.arm = arm;
+  d.alive = true;
+  d.rest = false;
+}
+
+// A block that could not be carried, spilled where it was broken rather than
+// thrown. No sideways velocity: it should land on the spot it came off, not
+// skitter away down a slope the player then has to chase.
+//
+// One entity carrying the whole count, not one per block. Iron yields three,
+// and three entities for one swing would churn through a sixteen-slot array in
+// six blocks -- recycling, by design, throws the oldest away, so the cheapest
+// way to make spilled items get lost is to spend three slots describing one
+// pile of them.
+static void spillAt(State& s, uint8_t mat, int n, float x, float y, float z) {
+  if (n <= 0) return;
+  spawnDrop(s, mat, (uint8_t)(n > 255 ? 255 : n), 0, x, y, z,
+            0.0f, 0.0f, 0.0f, 0);
+}
+
+bool dropOne(State& s) {
+  const int i = s.sel % SLOT_N;
+  const uint8_t it = s.slot[i];
+  if (it == SLOT_EMPTY) return false;
+
+  // Thrown from the eye, along the look direction, with some loft on it. The
+  // arc is what says the item left your hand rather than falling through the
+  // floor at your feet.
+  const float x = s.cam.px + s.cam.dx * 0.35f;
+  const float y = s.cam.py + s.cam.dy * 0.35f;
+  const float z = s.cam.z - 0.25f;
+  const float vx = s.cam.dx * DROP_TOSS / (float)TICK_HZ;
+  const float vy = s.cam.dy * DROP_TOSS / (float)TICK_HZ;
+  const float vz = DROP_LOFT / (float)TICK_HZ;
+
+  if (isTool(it)) {
+    spawnDrop(s, it, 1, s.dur[i], x, y, z, vx, vy, vz, (uint8_t)DROP_ARM);
+    s.slot[i] = SLOT_EMPTY;
+    s.dur[i] = 0;
+    return true;
+  }
+
+  if (it >= world::B_COUNT || s.inv[it] == 0) return false;
+  spawnDrop(s, it, 1, 0, x, y, z, vx, vy, vz, (uint8_t)DROP_ARM);
+  takeItem(s, it, 1);
+  return true;
+}
+
+// Falls, settles, expires, and gets collected. One pass over sixteen entries,
+// which is nothing next to the mob loop it sits beside.
+static uint32_t updateDrops(State& s) {
+  uint32_t ev = 0;
+  constexpr float G = DROP_GRAVITY / (float)TICK_HZ / (float)TICK_HZ;
+
+  for (int i = 0; i < MAX_DROPS; ++i) {
+    Drop& d = s.drops[i];
+    if (!d.alive) continue;
+    if (d.arm) --d.arm;
+    if (--d.life == 0) { d.alive = false; continue; }
+
+    if (!d.rest) {
+      d.vz -= G;
+      // Horizontal first, and refused as a whole if the destination cell is
+      // solid. An item that has hit a wall should stop against it, not slide
+      // along inside it looking for a way through.
+      const float nx = d.x + d.vx, ny = d.y + d.vy;
+      if (!world::solidAt((int)nx, (int)ny, (int)d.z)) { d.x = nx; d.y = ny; }
+      else { d.vx = 0.0f; d.vy = 0.0f; }
+
+      d.z += d.vz;
+      const int iz = (int)d.z;
+      if (d.z < 1.0f || world::solidAt((int)d.x, (int)d.y, iz)) {
+        // Sat down on whatever it entered. Resting ON that cell means the top
+        // of it, which is one above -- the same convention feetZ uses.
+        d.z = (float)(iz + 1);
+        d.vx = d.vy = d.vz = 0.0f;
+        d.rest = true;
+      }
+    }
+
+    // Lava eats it. A pool at the bottom of a quarry is already a hazard and a
+    // light; this makes it somewhere you can lose things too, which is what
+    // stops it being scenery you bridge over without looking.
+    if (world::isHazard(world::blockAt((int)d.x, (int)d.y, (int)d.z - 1))) {
+      d.alive = false;
+      spark(s, SP_BREAK, d.x, d.y, d.z, d.item < world::B_COUNT ? d.item : 0, 90);
+      continue;
+    }
+
+    if (d.arm) continue;
+
+    const float dx = d.x - s.cam.px, dy = d.y - s.cam.py;
+    const float dz = d.z - (s.cam.z - 0.6f);
+    if (dx * dx + dy * dy + dz * dz > DROP_REACH * DROP_REACH) continue;
+
+    // Collected -- unless there is still nowhere to put it, in which case it
+    // stays exactly where it is and you walk over it again. Refusing quietly is
+    // the right answer: the item is visible, so the player can already see that
+    // something is not happening and why.
+    if (isTool(d.item)) {
+      for (int k = 0; k < SLOT_N; ++k) {
+        if (s.slot[k] != SLOT_EMPTY) continue;
+        s.slot[k] = d.item;
+        s.dur[k] = d.dur;
+        d.alive = false;
+        ev |= EV_PICKUP;
+        break;
+      }
+    } else if (giveItem(s, d.item, d.count)) {
+      d.alive = false;
+      ev |= EV_PICKUP;
+    }
+  }
+  return ev;
 }
 
 uint16_t totalBlocks(const State& s) {
   uint16_t n = 0;
-  for (int i = 0; i < HOTBAR_N; ++i) n = (uint16_t)(n + s.inv[kHotbar[i]]);
+  for (uint8_t m = 0; m < world::B_COUNT; ++m) n = (uint16_t)(n + s.inv[m]);
   return n;
+}
+
+// Sorts four cells so two multisets can be compared elementwise. CELL_EMPTY is
+// 255 and therefore sorts last on its own, which is what lets a two-cell recipe
+// and a three-cell one be told apart without counting anything.
+static void sortCells(uint8_t out[GRID_N], const uint8_t in[GRID_N]) {
+  for (int i = 0; i < GRID_N; ++i) out[i] = in[i];
+  for (int i = 1; i < GRID_N; ++i) {           // insertion sort, four elements
+    const uint8_t v = out[i];
+    int j = i - 1;
+    while (j >= 0 && out[j] > v) { out[j + 1] = out[j]; --j; }
+    out[j + 1] = v;
+  }
+}
+
+uint8_t matchGrid(const uint8_t grid[GRID_N]) {
+  uint8_t a[GRID_N];
+  sortCells(a, grid);
+  if (a[0] == CELL_EMPTY) return R_NONE;       // nothing laid out at all
+  for (uint8_t r = 0; r < R_COUNT; ++r) {
+    uint8_t b[GRID_N];
+    sortCells(b, kRecipe[r].cells);
+    bool same = true;
+    for (int i = 0; i < GRID_N && same; ++i) same = (a[i] == b[i]);
+    if (same) return r;
+  }
+  return R_NONE;
+}
+
+// How many of `mat` a set of four cells asks for.
+static int cellCount(const uint8_t cells[GRID_N], uint8_t mat) {
+  int n = 0;
+  for (int i = 0; i < GRID_N; ++i) if (cells[i] == mat) ++n;
+  return n;
+}
+
+// True if inv[] covers every material in `cells`. Counted per distinct
+// material rather than per cell, because takeItem clamps at zero silently --
+// spending three planks one at a time when you own one leaves you owning none
+// and holding a pickaxe you did not pay for.
+static bool coversCells(const State& s, const uint8_t cells[GRID_N]) {
+  for (int i = 0; i < GRID_N; ++i) {
+    const uint8_t m = cells[i];
+    if (m == CELL_EMPTY) continue;
+    if (m >= world::B_COUNT) return false;
+    if (s.inv[m] < cellCount(cells, m)) return false;
+  }
+  return true;
+}
+
+// True if the bar has room for a tool, or the recipe does not make one.
+static bool hasRoomFor(const State& s, const RecipeInfo& r) {
+  if (!isTool(r.outItem)) return true;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == SLOT_EMPTY) return true;
+  return false;
 }
 
 bool canCraft(const State& s, uint8_t recipe) {
   if (recipe >= R_COUNT) return false;
   const RecipeInfo& r = kRecipe[recipe];
-  for (int i = 0; i < 2; ++i)
-    if (r.inQty[i] && s.inv[r.inMat[i]] < r.inQty[i]) return false;
+  return coversCells(s, r.cells) && hasRoomFor(s, r);
+}
+
+bool canAffordGrid(const State& s) {
+  const uint8_t r = matchGrid(s.grid);
+  if (r == R_NONE) return false;
+  return coversCells(s, s.grid) && hasRoomFor(s, kRecipe[r]);
+}
+
+// Grants a recipe's result. Split out so craft() and craftGrid() cannot drift
+// on what "the output" means -- there are three kinds of it now.
+static bool grantResult(State& s, const RecipeInfo& r) {
+  if (isTool(r.outItem)) {
+    if (!giveTool(s, r.outItem)) return false;
+  } else if (r.outItem < world::B_COUNT) {
+    // Usually there is room, because spending the inputs has just freed the
+    // slot they were sitting in. When there is not -- crafting from materials
+    // you still have plenty of -- the result lands at your feet rather than
+    // being quietly binned. Crafting must never destroy what it just made.
+    const int took = giveItem(s, r.outItem, r.outQty);
+    if (took < r.outQty)
+      spillAt(s, r.outItem, r.outQty - took, s.cam.px, s.cam.py, s.cam.z - 0.4f);
+  }
+  if (r.heal) {
+    s.hp = (int16_t)(s.hp + r.heal);
+    if (s.hp > s.maxHp) s.hp = s.maxHp;
+  }
   return true;
 }
 
 bool craft(State& s, uint8_t recipe) {
   if (!canCraft(s, recipe)) return false;
   const RecipeInfo& r = kRecipe[recipe];
-  for (int i = 0; i < 2; ++i)
-    if (r.inQty[i]) s.inv[r.inMat[i]] = (uint16_t)(s.inv[r.inMat[i]] - r.inQty[i]);
-  if (r.outMat < world::B_COUNT) s.inv[r.outMat] = (uint16_t)(s.inv[r.outMat] + r.outQty);
-  if (r.heal) {
-    s.hp = (int16_t)(s.hp + r.heal);
-    if (s.hp > s.maxHp) s.hp = s.maxHp;
-  }
+  // Safe to spend first: canCraft has already established both that the
+  // inventory covers the cells and that a tool result has a slot waiting, so
+  // grantResult below cannot be the thing that fails.
+  for (int i = 0; i < GRID_N; ++i)
+    if (r.cells[i] != CELL_EMPTY) takeItem(s, r.cells[i], 1);
+  return grantResult(s, r);
+}
+
+bool craftGrid(State& s) {
+  const uint8_t r = matchGrid(s.grid);
+  if (r == R_NONE) return false;
+  if (!coversCells(s, s.grid) || !hasRoomFor(s, kRecipe[r])) return false;
+  for (int i = 0; i < GRID_N; ++i)
+    if (s.grid[i] != CELL_EMPTY) takeItem(s, s.grid[i], 1);
+  const bool ok = grantResult(s, kRecipe[r]);
+  for (int i = 0; i < GRID_N; ++i) s.grid[i] = CELL_EMPTY;
+  return ok;
+}
+
+bool fillGrid(State& s, uint8_t recipe) {
+  if (!canCraft(s, recipe)) return false;
+  for (int i = 0; i < GRID_N; ++i) s.grid[i] = kRecipe[recipe].cells[i];
+  s.gridSel = 0;
   return true;
+}
+
+// Where each arrow goes from each stop. Written out rather than computed,
+// because the card is not a rectangle -- it is a 2x2 grid with a result slot
+// beside it and a book row under it:
+//
+//     [0][1]   [OUT]
+//     [2][3]
+//     [  RECIPES  ]
+//
+// Every cell of the table lands somewhere real, so no arrow is ever a no-op.
+// A dead key on a card reads as the card being broken.
+static const uint8_t kGridNav[GRID_FOCUS_N][4] = {
+  //            left  right   up   down
+  /* 0     */ {    4,     1,    5,     2 },
+  /* 1     */ {    0,     4,    5,     3 },
+  /* 2     */ {    4,     3,    0,     5 },
+  /* 3     */ {    2,     4,    1,     5 },
+  /* OUT   */ {    1,     0,    5,     5 },
+  /* BOOK  */ {    4,     4,    2,     0 },
+};
+
+void gridMove(State& s, int dx, int dy) {
+  if (s.gridSel >= GRID_FOCUS_N) s.gridSel = 0;
+  int dir = -1;
+  if (dx < 0) dir = 0;
+  else if (dx > 0) dir = 1;
+  else if (dy < 0) dir = 2;
+  else if (dy > 0) dir = 3;
+  if (dir < 0) return;
+  s.gridSel = kGridNav[s.gridSel][dir];
+}
+
+// Cycles one cell through the materials the player actually holds, plus empty.
+// Only what is held: a grid that can name a material you have none of is a grid
+// that spends most of its keypresses on things you cannot make.
+void gridCycle(State& s, int delta) {
+  // Only a cell holds a material. On the result slot or the book row there is
+  // nothing to cycle, and quietly editing cell 0 from the far side of the card
+  // is the sort of thing a modulo would have done here.
+  if (!gridOnCell(s)) return;
+  uint8_t opts[world::B_COUNT + 1];
+  int n = 0;
+  opts[n++] = CELL_EMPTY;
+  for (uint8_t m = 0; m < world::B_COUNT; ++m) if (s.inv[m]) opts[n++] = m;
+
+  const uint8_t cur = s.grid[s.gridSel];
+  int at = 0;
+  for (int i = 0; i < n; ++i) if (opts[i] == cur) { at = i; break; }
+  at = (at + delta % n + n) % n;
+  s.grid[s.gridSel] = opts[at];
 }
 
 // ---- pathing ----------------------------------------------------------------
@@ -327,6 +779,7 @@ static void slide(float& px, float& py, float vx, float vy, float r, int fromH) 
 
 void begin(State& s, uint32_t seed) {
   s = State{};
+  resetSlots(s);
   s.rng = seed ? seed : 1u;
   world::generate(seed);
 
@@ -354,7 +807,23 @@ float daylight(const State& s) {
 }
 
 uint32_t score(const State& s) {
-  return (uint32_t)s.night * 100u + (uint32_t)s.ore * 5u + (uint32_t)totalBlocks(s);
+  // Surviving is still worth most. Ore used to be a separate currency counted
+  // here at five apiece; it is an item now, so the two metals are weighted
+  // where the currency was rather than counting as one block each.
+  // Five apiece, which is what the ore currency was worth. The yields were
+  // moved onto the blocks one for one — an iron block gave 3 ore and now gives
+  // 3 iron — so weighting the items the same keeps a run's score comparable
+  // with the ones already in NVS.
+  //
+  // Diamond is weighted at twenty-five. It drops one to iron's three, sits in
+  // the bottom three layers at half a percent, and costs three thousand effort
+  // a block, so five apiece would have made a seam worth less than the stone
+  // dug through to reach it.
+  return (uint32_t)s.night * 100u
+       + (uint32_t)s.inv[world::B_DIAMOND] * 25u
+       + (uint32_t)s.inv[world::B_IRON] * 5u
+       + (uint32_t)s.inv[world::B_COAL] * 5u
+       + (uint32_t)totalBlocks(s);
 }
 
 // ---- spawning ---------------------------------------------------------------
@@ -389,16 +858,21 @@ static uint8_t pickKind(State& s) {
   // choose to fight instead.
   if (s.sealedTicks > SEALED_TRIGGER) return MOB_CREEPER;
 
+  // A flat mix from the first night. It used to unlock creepers on night two
+  // and skeletons on night four, which is a wave-game's ramp: the pressure came
+  // from a counter rather than from the dark. Minecraft's night one has all
+  // three in it, and what makes a later night harder is that you are further
+  // from home and deeper in a hole.
   const uint32_t r = nextRand(s) % 100u;
-  if (s.night >= 4) { if (r < 45) return MOB_ZOMBIE; if (r < 78) return MOB_CREEPER; return MOB_SKELETON; }
-  if (s.night >= 2) { return (r < 65) ? MOB_ZOMBIE : MOB_CREEPER; }
-  return MOB_ZOMBIE;
+  if (r < 45) return MOB_ZOMBIE;
+  if (r < 75) return MOB_SKELETON;
+  return MOB_CREEPER;
 }
 
-static void spawnMob(State& s) {
+static bool spawnMob(State& s) {
   int slot = -1;
   for (int i = 0; i < MAX_MOBS; ++i) if (!s.mobs[i].alive) { slot = i; break; }
-  if (slot < 0) return;
+  if (slot < 0) return false;
 
   // A sealed-in player makes every cell on the map unreachable — the flow
   // field is a BFS out of their own cell and it cannot leave the box. Holding
@@ -447,9 +921,13 @@ static void spawnMob(State& s) {
     // Fixed at spawn so a mob circles one way consistently. Picking per tick
     // would make it jitter on the spot instead of orbiting.
     m.side = (uint8_t)(nextRand(s) & 1u);
-    if (s.spawnBudget) --s.spawnBudget;
-    return;
+    // Staggered at spawn rather than started at zero, or a night's worth of
+    // mobs would all moan on the same tick for the whole night.
+    m.press = 0;
+    m.voice = (uint16_t)(TICK_HZ + nextRand(s) % (uint32_t)(5 * TICK_HZ));
+    return true;
   }
+  return false;
 }
 
 // ---- mobs -------------------------------------------------------------------
@@ -622,10 +1100,17 @@ static uint32_t updateMob(State& s, int idx) {
   // Lava burns whatever is standing in it, mob or player. It used to burn only
   // the player, which made a lava pool a hazard to walk around rather than
   // something to back a wave into.
-  if (world::isHazard(world::topMat((int)m.x, (int)m.y))) {
+  // What it is standing ON, not what the ground column happens to be topped
+  // with. See the player's copy of this below for the bug that distinction
+  // fixes; a mob chasing you across your own bridge had exactly the same one.
+  if (world::isHazard(world::blockAt((int)m.x, (int)m.y, (int)m.z - 1))) {
     if (m.burn == 0) {
       m.burn = BURN_PERIOD;
-      if (--m.hp <= 0) { m.alive = false; return ev | EV_MOB_DIED; }
+      if (--m.hp <= 0) {
+        m.alive = false;
+        s.sfxDiedKind = m.kind;
+        return ev | EV_MOB_DIED;
+      }
     }
   }
   if (m.burn) --m.burn;
@@ -664,13 +1149,27 @@ static uint32_t updateMob(State& s, int idx) {
 
   bool lunging = false;
   if (m.kind == MOB_CREEPER) {
+    // How long it has been near the player without managing to arrive. In the
+    // open this never matters: a creeper crosses the gap from PRESS_REACH to
+    // its own range in under a second, so it fuses on range as it always did.
+    if (reach < CREEPER_PRESS_REACH) ++m.press; else m.press = 0;
+
     if (m.timer && m.hp > 0) {
       lunging = true;               // fuse lit: it commits and closes fast
       if (m.timer == 1) return detonate(s, m);
-    } else if (reach < mi.range) {
+    } else if (reach < mi.range || m.press > CREEPER_PRESS_TICKS) {
       // Deliberately not gated on line of sight. A creeper pressed against the
       // far side of a wall you built is exactly the situation its fuse exists
       // for: it cannot see you, it detonates anyway, and the wall goes with it.
+      //
+      // The press clause is what makes that true rather than merely intended.
+      // On range alone the answer to a wall could be jammed by the crowd it
+      // summoned: mobs hold each other off at SEPARATION_R, so seventeen
+      // creepers stacked against one wall all sat at 2.1 to 2.7 cells with the
+      // fuse needing 1.9, and none of them ever went off. Something that has
+      // got within three and a half cells of you and then stopped getting
+      // closer has found what it came for, whether that is your wall or the
+      // back of another creeper.
       m.timer = mi.cooldown;
       ev |= EV_HISS;
     }
@@ -782,8 +1281,10 @@ static uint32_t updateMob(State& s, int idx) {
     m.bestDist = post;
     m.idle = 0;
   } else if (post > STUCK_DIST && ++m.idle > STUCK_TICKS) {
+    // It gave its budget slot back too, when there was a budget. Under a cap
+    // there is nothing to hand back: dying drops the live count, and the
+    // spawner notices on its next tick.
     m.alive = false;
-    if (s.spawnBudget < MAX_MOBS) ++s.spawnBudget;
   }
   return ev;
 }
@@ -838,7 +1339,8 @@ static uint32_t placeAgainstFace(State& s, uint8_t held) {
     default:                   return EV_CANT_PLACE;
   }
 
-  --s.inv[held];
+  takeItem(s, held, 1);
+  s.sfxDigMat = held;           // the place cue is material-classed too
   s.swingCooldown = BUILD_TICKS;
   s_flowAge = FLOW_PERIOD;      // the map changed; repath next tick
   return EV_PLACE;
@@ -867,10 +1369,20 @@ static uint32_t playerAct(State& s) {
     if (target >= 0) {
       s.swingCooldown = SWING_TICKS;
       Mob& m = s.mobs[target];
-      m.hp -= (int16_t)(1 + s.damageLevel);
+      // What is in the hand decides the blow. A pickaxe is a fist with a
+      // handle here -- it swings for the same one heart bare hands do, which
+      // is what makes carrying a sword through a night worth a slot.
+      const uint8_t held = heldItem(s);
+      const bool sword = isTool(held) && toolKind(held) == TK_SWORD;
+      m.hp = (int16_t)(m.hp - (sword ? toolInfo(TK_SWORD, toolTier(held)).damage
+                                     : HAND_DAMAGE));
+      // Wear on the blow that LANDED, not on the swing. A whiff costs nothing;
+      // see the miss branch below, which never reaches this.
+      if (sword) ev |= wearTool(s);
       m.hitFlash = HIT_FLASH;
       kick(s, 5);
       spark(s, SP_HIT, m.x, m.y, (float)m.z + 0.95f, 0, 120);
+      s.sfxHitKind = m.kind;
       ev |= EV_SWING | EV_MOB_HIT;
 
       // Shove it back along the swing. Without this a hit has no consequence
@@ -891,6 +1403,7 @@ static uint32_t playerAct(State& s) {
         else {
           m.alive = false;
           spark(s, SP_DEATH, m.x, m.y, (float)m.z + 0.8f, 0, 200);
+          s.sfxDiedKind = m.kind;
           ev |= EV_MOB_DIED;
         }
       }
@@ -913,15 +1426,46 @@ static uint32_t playerAct(State& s) {
     return ev;
   }
 
-  uint8_t dropM = 0, dropB = 0, dropO = 0;
-  const int effort = world::EFFORT_PER_TICK + s.miningLevel * 8;
+  uint8_t dropM = 0, dropB = 0;
+
+  // What is in your hand decides how fast this goes. Bare hands and a fistful
+  // of dirt are the same thing — Minecraft's rule, and the one that makes the
+  // hotbar a choice rather than a label: keeping the pickaxe selected costs you
+  // the ability to place, and placing costs you the ability to dig quickly.
+  const uint8_t held = heldItem(s);
+  int effort = HAND_EFFORT;
+  // Any tool answers from the table, not just a pickaxe. A sword's entry is
+  // already HAND_EFFORT, so this changes nothing today -- it means the table
+  // stays the single place a tool's digging speed is written down, instead of
+  // half of it living in the condition here.
+  if (isTool(held)) effort = toolInfo(toolKind(held), toolTier(held)).effort;
+  if (effort < 1) effort = 1;          // never zero, or a slot would be a wall
+
+  // Named before the swing lands, so the dig cue knows what it is chipping at
+  // even on the ticks that break nothing.
+  s.sfxDigMat = world::blockAt(s.aimX, s.aimY, s.aimZ);
+
   // The block the crosshair is on, not the top of the column it belongs to.
   // Those used to be different things, and aiming at the foot of a six-high
   // wall took the block off its top.
-  switch (world::mine(s.aimX, s.aimY, s.aimZ, effort, dropM, dropB, dropO)) {
-    case world::MINE_BROKE:
-      s.inv[dropM] = (uint16_t)(s.inv[dropM] + dropB);
-      s.ore        = (uint16_t)(s.ore + dropO);
+  switch (world::mine(s.aimX, s.aimY, s.aimZ, effort, dropM, dropB)) {
+    case world::MINE_BROKE: {
+      // Grass gives dirt, as it does in Minecraft. It is also one material
+      // fewer competing for the eight slots the bar has for thirteen.
+      const uint8_t yield = (dropM == world::B_GRASS) ? (uint8_t)world::B_DIRT
+                                                      : dropM;
+      // What the bar cannot take is spilled on the spot rather than vanishing
+      // into a count with no slot to show it. Mining a material you have no
+      // room for is now a visible event with a thing you can go and pick up,
+      // which is the whole point of the change.
+      const int took = giveItem(s, yield, dropB);
+      if (took < dropB)
+        spillAt(s, yield, dropB - took, (float)s.aimX + 0.5f,
+                (float)s.aimY + 0.5f, (float)s.aimZ + 0.5f);
+      // A pickaxe is spent per block broken, not per tick of effort: a tough
+      // block and a soft one cost it the same, which is what makes a better
+      // tier worth more than its speed.
+      if (isTool(held) && toolKind(held) == TK_PICK) ev |= wearTool(s);
       // Shards take the colour of what came off, so digging coal out of a
       // stone face looks different from digging the face itself.
       spark(s, SP_BREAK, (float)s.aimX + 0.5f, (float)s.aimY + 0.5f,
@@ -929,6 +1473,7 @@ static uint32_t playerAct(State& s) {
       s_flowAge = FLOW_PERIOD;      // the map changed; repath next tick
       ev |= EV_BLOCK_BROKE;
       break;
+    }
     default:
       ev |= EV_MINE_STEP;
       break;
@@ -939,7 +1484,7 @@ static uint32_t playerAct(State& s) {
 // ---- tick -------------------------------------------------------------------
 
 uint32_t tick(State& s, const Input& in) {
-  if (s.dead || s.awaitingUpgrade) return 0;
+  if (s.dead) return 0;
 
   uint32_t ev = 0;
   if (s.swingCooldown) --s.swingCooldown;
@@ -1036,8 +1581,11 @@ uint32_t tick(State& s, const Input& in) {
   else if (s.aimValid) world::resetDamage(s.aimX, s.aimY, s.aimZ);
 
   if (s.swingCooldown == 0 && in.build) {
+    // A pickaxe and an empty hand both build nothing. That refusal IS the item
+    // system from the player's side: the bar is not decoration, and the answer
+    // to "why did nothing happen" is visible at the bottom of the screen.
     const uint8_t held = heldBlock(s);
-    if (s.inv[held] == 0) {
+    if (held >= world::B_COUNT || s.inv[held] == 0) {
       ev |= EV_NO_BLOCKS;
     } else if (s.aimValid) {
       // The block goes against the face that was hit, not on top of whatever
@@ -1058,11 +1606,33 @@ uint32_t tick(State& s, const Input& in) {
   else
     s.toolPhase = 0;
 
+  // -- what left the hand, and what is lying about
+  // The drop key. Tapping it fires at once because the timer is zero whenever
+  // the key is up; holding it pays DROP_PERIOD between each, which is what
+  // turns "empty this slot" into one long press instead of sixty taps.
+  if (!in.drop) {
+    s.dropTimer = 0;
+  } else if (s.dropTimer) {
+    --s.dropTimer;
+  } else {
+    if (dropOne(s)) ev |= EV_DROP;
+    s.dropTimer = (uint8_t)DROP_PERIOD;
+  }
+
+  ev |= updateDrops(s);
+
   // -- standing in the fire
   // Lava is unbreakable, so the only answers are to bridge over it or to get
   // off it. Damage on a timer rather than per tick, or a single misstep at six
   // hearts would be instantly fatal.
-  if (world::isHazard(world::topMat((int)s.cam.px, (int)s.cam.py))) {
+  // The block under the player's feet, which is not the same question as what
+  // the ground column is topped with. topMat() only ever answers for the
+  // terrain, so bridging over a lava pool — building a floor and standing on
+  // it, which is the whole answer the game offers to lava — kept burning you
+  // through your own bridge. feetZ is the surface actually being stood on, and
+  // the block below it is what that surface is made of.
+  if (world::isHazard(world::blockAt((int)s.cam.px, (int)s.cam.py,
+                                     (int)s.feetZ - 1))) {
     if (s.burn == 0) { s.burn = 24; ev |= burnPlayer(s, 1); }
   }
   if (s.burn) --s.burn;
@@ -1090,69 +1660,88 @@ uint32_t tick(State& s, const Input& in) {
     if (s.phaseTick >= (uint32_t)DAY_TICKS) {
       s.phase = PH_NIGHT;
       s.phaseTick = 0;
-      // Pressure ramps with the night count but is capped, because past a
-      // point the flow field funnels them into a queue and it stops mattering.
-      const int budget = 3 + (int)s.night * 2;
-      s.spawnBudget = (uint8_t)(budget > MAX_MOBS ? MAX_MOBS : budget);
       s.spawnTimer = 0;
       ev |= EV_DUSK;
     }
   } else {
-    // A siege does not run out. The night's budget is a pacing device for an
-    // ordinary night; a player who has sealed themselves in has opted out of
-    // that, so the director keeps sending the one thing that can reach them
-    // until the wall is open again.
-    if (s.sealedTicks > SEALED_TRIGGER && s.spawnBudget == 0
-        && (s.sealedTicks % (2u * TICK_HZ)) == 0) {
-      s.spawnBudget = 1;
+    // The dark holds as many as it can and keeps topping itself up. This used
+    // to be a budget handed out at dusk — 3 + 2 per night, paid out and then
+    // exhausted — so a night was a countable quantity of monsters, and once you
+    // had killed them all the rest of the night was empty. A cap has no such
+    // shape: the pressure is constant while it is dark and it stops when the
+    // sun comes up, which is the only thing that should end a night.
+    int alive = 0;
+    for (int i = 0; i < MAX_MOBS; ++i) if (s.mobs[i].alive) ++alive;
+
+    // A sealed-in player has opted out of the ordinary cap: the director keeps
+    // sending the one thing that can do something about a wall. Its own cap is
+    // much lower, because what a siege needs is for a creeper to get to the
+    // wall, and a queue of them behind it is the thing that stops one.
+    const bool siege = s.sealedTicks > SEALED_TRIGGER;
+    if (s.spawnTimer) {
+      --s.spawnTimer;
+    } else if (alive < (siege ? SIEGE_CAP : MOB_CAP)) {
+      // A fixed cadence, not one that ramps with the night count. What paces a
+      // night now is how fast the player clears the cap, not a difficulty dial.
+      s.spawnTimer = siege ? (uint16_t)(TICK_HZ / 2) : (uint16_t)35;
+
+      if (spawnMob(s)) {
+        s.spawnFails = 0;
+      } else if (++s.spawnFails >= 3) {
+        // Nowhere to put one, three times running. The ordinary spawn rule
+        // needs somewhere a mob could walk to the player FROM, and there are
+        // two ways for that to stop existing: the player walls themselves in,
+        // or — the one that actually bit — a night of creepers craters the
+        // ground they are standing on and leaves them at the bottom of a pit
+        // nothing can path into.
+        //
+        // updateSealed cannot see either case here, because it works by
+        // watching live mobs fail to reach you and there are none left to
+        // watch. Without this the night simply goes quiet for good: the
+        // spawner refuses every position, nothing is alive to notice, and the
+        // dark stops producing until dawn. Saying so out loud is what lets the
+        // siege path — which puts a creeper near the wall and skips the
+        // reachability test — take over, exactly as it does for a wall.
+        // Comfortably past the trigger rather than one tick over it:
+        // updateSealed decays this every tick that nothing alive is failing to
+        // reach the player, and with nothing alive at all that is every tick.
+        // Set to trigger+1 it falls back under before the next spawn attempt
+        // comes round, and the siege never actually fires.
+        s.sealedTicks = (uint16_t)(SEALED_TRIGGER + 2 * TICK_HZ);
+        s.spawnFails = 0;
+      }
     }
 
-    if (s.spawnBudget && s.spawnTimer == 0) {
-      spawnMob(s);
-      uint16_t gap = (uint16_t)(50 - (s.night > 8 ? 8 : s.night) * 3);
-      if (s.sealedTicks > SEALED_TRIGGER) gap /= 2;   // sealed in: they come faster
-      s.spawnTimer = gap;
-    } else if (s.spawnTimer) {
-      --s.spawnTimer;
-    }
     if (s.phaseTick >= (uint32_t)NIGHT_TICKS) {
       s.phase = PH_DAY;
       s.phaseTick = 0;
       ++s.night;
       for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;   // they burn off
-      s.spawnBudget = 0;
       s.sealedTicks = 0;
-
-      // Three distinct offers, drawn without replacement.
-      uint8_t pool[UP_COUNT];
-      for (uint8_t i = 0; i < UP_COUNT; ++i) pool[i] = i;
-      for (uint8_t i = UP_COUNT - 1; i > 0; --i) {
-        const uint8_t j = (uint8_t)(nextRand(s) % (uint32_t)(i + 1));
-        const uint8_t t = pool[i]; pool[i] = pool[j]; pool[j] = t;
-      }
-      s.offer[0] = pool[0]; s.offer[1] = pool[1]; s.offer[2] = pool[2];
-      s.awaitingUpgrade = true;
       ev |= EV_DAWN;
     }
   }
-  return ev;
-}
 
-void chooseUpgrade(State& s, uint8_t upgrade) {
-  if (upgrade < UP_COUNT && s.ore >= kUpgrade[upgrade].cost) {
-    s.ore = (uint16_t)(s.ore - kUpgrade[upgrade].cost);
-    switch (upgrade) {
-      case UP_MAXHP:  s.maxHp += 2; s.hp += 2; break;
-      case UP_MINING: if (s.miningLevel < 12) ++s.miningLevel; break;
-      case UP_DAMAGE: if (s.damageLevel < 12) ++s.damageLevel; break;
-      case UP_HEAL:   s.hp = s.maxHp; break;
-      case UP_BLOCKS: s.inv[world::B_PLANK] = (uint16_t)(s.inv[world::B_PLANK] + 15); break;
-      default: break;
-    }
+  // -- mobs talking to themselves
+  //
+  // One a tick at most: a dozen zombies whose timers happen to land together
+  // would otherwise stack a dozen moans into one frame, and the mixer has four
+  // channels. Losing the others costs nothing — the point of the sound is that
+  // something is out there, and one voice says that as well as six.
+  for (int i = 0; i < MAX_MOBS; ++i) {
+    Mob& m = s.mobs[i];
+    if (!m.alive || m.voice == 0) continue;
+    if (--m.voice) continue;
+    m.voice = (uint16_t)(3 * TICK_HZ + nextRand(s) % (uint32_t)(7 * TICK_HZ));
+    if (ev & EV_MOB_IDLE) continue;              // one voice a tick
+    // Only within earshot. A moan from a mob on the far side of the map is a
+    // sound with no information in it.
+    const float dx = m.x - s.cam.px, dy = m.y - s.cam.py;
+    if (dx * dx + dy * dy > 18.0f * 18.0f) continue;
+    s.sfxIdleKind = m.kind;
+    ev |= EV_MOB_IDLE;
   }
-  // Always resumes — an unaffordable pick is a skip, so a broke player is
-  // never stuck on this screen.
-  s.awaitingUpgrade = false;
+  return ev;
 }
 
 }  // namespace game

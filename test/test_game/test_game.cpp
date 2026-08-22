@@ -4,6 +4,8 @@
 // millis().
 // Run with:  pio test -e native
 #include <math.h>
+#include <initializer_list>
+
 #include <unity.h>
 
 #include "game.h"
@@ -47,6 +49,53 @@ static Mob& poseMob(State& s, int slot, uint8_t kind, float dist) {
   return m;
 }
 
+// Puts a material on the bar and selects it. The old hotbar was a fixed table
+// of six, so a test could cycle until the one it wanted came up; slots are
+// claimed on pickup now, and a material nobody has mined has no slot to cycle
+// to — the loop that used to do this spins forever.
+static void hold(State& s, uint8_t mat, uint16_t n) {
+  s.inv[mat] = n;
+  for (int i = 0; i < SLOT_N; ++i)
+    if (s.slot[i] == mat || s.slot[i] == SLOT_EMPTY) {
+      s.slot[i] = mat;
+      selectSlot(s, i);
+      return;
+    }
+  s.slot[1] = mat;
+  selectSlot(s, 1);
+}
+
+// Puts a tool on the bar at full durability and selects it.
+//
+// A run starts empty now -- the pickaxe is something the player crafts -- so
+// every test that is about mining rather than about crafting has to arm itself
+// first. Without this they would all be measuring bare hands, which are five
+// times slower and blow the guard loops below.
+static void giveTool(State& s, uint8_t kind, uint8_t tier) {
+  const uint8_t id = toolId(kind, tier);
+  for (int i = 0; i < SLOT_N; ++i)
+    if (s.slot[i] == SLOT_EMPTY) {
+      s.slot[i] = id;
+      s.dur[i] = toolInfo(kind, tier).durability;
+      selectSlot(s, i);
+      return;
+    }
+  s.slot[0] = id;
+  s.dur[0] = toolInfo(kind, tier).durability;
+  selectSlot(s, 0);
+}
+
+// The tool the game used to hand out for free, which is what most of the
+// mining tests below were written against.
+static void givePick(State& s) { giveTool(s, TK_PICK, TT_WOOD); }
+
+// Lays cells into the crafting grid, left to right, and fills the rest.
+static void layGrid(State& s, std::initializer_list<uint8_t> cells) {
+  int i = 0;
+  for (uint8_t c : cells) if (i < GRID_N) s.grid[i++] = c;
+  while (i < GRID_N) s.grid[i++] = CELL_EMPTY;
+}
+
 // ---- the clock --------------------------------------------------------------
 
 static void test_day_turns_to_night_on_schedule(void) {
@@ -59,7 +108,6 @@ static void test_day_turns_to_night_on_schedule(void) {
   ev = tick(s, idle);
   TEST_ASSERT_EQUAL_UINT8(PH_NIGHT, s.phase);
   TEST_ASSERT_TRUE(ev & EV_DUSK);
-  TEST_ASSERT_TRUE(s.spawnBudget > 0);
 }
 
 // Daylight drives the whole palette. It has to stay in range at every instant
@@ -70,66 +118,97 @@ static void test_daylight_stays_in_range(void) {
   for (int i = 0; i < DAY_TICKS + NIGHT_TICKS + 10; ++i) {
     const float d = daylight(s);
     TEST_ASSERT_TRUE(d >= 0.0f && d <= 1.0f);
-    if (s.awaitingUpgrade) chooseUpgrade(s, UP_COUNT);
     tick(s, idle);
   }
 }
 
-// Surviving a night has to offer three *distinct* upgrades, and the player
-// must be able to leave the card even with nothing to spend.
-static void test_dawn_offers_three_distinct_upgrades(void) {
+// Dawn is dawn and nothing else. It used to stop the game on a shop card that
+// spent an ore currency on stat upgrades — the "bonus after the wave" — and
+// both went together: with no waves to be paid for surviving, there is nothing
+// for a card to interrupt. The sun comes up, the mobs burn off, play continues.
+static void test_dawn_just_turns_the_day_over(void) {
   State s = fresh();
   survivable(s);
   Input idle;
-  run(s, idle, DAY_TICKS + NIGHT_TICKS + 1);
-  TEST_ASSERT_TRUE(s.awaitingUpgrade);
+  run(s, idle, DAY_TICKS + 1);
+  TEST_ASSERT_EQUAL_UINT8(PH_NIGHT, s.phase);
+  const uint32_t ev = run(s, idle, NIGHT_TICKS + 1);
+  TEST_ASSERT_TRUE(ev & EV_DAWN);
+  TEST_ASSERT_EQUAL_UINT8(PH_DAY, s.phase);
   TEST_ASSERT_EQUAL_UINT16(2, s.night);
-  TEST_ASSERT_TRUE(s.offer[0] != s.offer[1]);
-  TEST_ASSERT_TRUE(s.offer[1] != s.offer[2]);
-  TEST_ASSERT_TRUE(s.offer[0] != s.offer[2]);
-  for (int i = 0; i < 3; ++i) TEST_ASSERT_TRUE(s.offer[i] < UP_COUNT);
-
-  // A broke player picking an unaffordable upgrade is a skip, not a soft lock.
-  s.ore = 0;
-  chooseUpgrade(s, s.offer[0]);
-  TEST_ASSERT_FALSE(s.awaitingUpgrade);
+  // And the night's mobs are gone rather than carried into the light.
+  for (int i = 0; i < MAX_MOBS; ++i) TEST_ASSERT_FALSE(s.mobs[i].alive);
+  // Play is still running: a tick after dawn still moves the player.
+  Input fwd; fwd.fwd = true;
+  const float px = s.cam.px, py = s.cam.py;
+  run(s, fwd, 20);
+  TEST_ASSERT_TRUE(fabsf(s.cam.px - px) + fabsf(s.cam.py - py) > 0.01f);
 }
 
-// tick() must do nothing at all while a card is up, or the world keeps moving
-// under a paused screen.
-static void test_tick_is_inert_while_a_card_is_up(void) {
+// ---- the night holds a population, not a wave -------------------------------
+
+// The night used to be a budget: 3 + 2 per night handed out at dusk, paid down
+// to zero, and then nothing until morning. That made a night a countable
+// quantity of monsters, and the second half of one you had cleared was empty.
+// A cap has no such shape — the dark keeps topping itself up.
+static void test_the_night_keeps_topping_itself_up(void) {
   State s = fresh();
   survivable(s);
-  Input in; in.fwd = true;
-  run(s, Input{}, DAY_TICKS + NIGHT_TICKS + 1);
-  TEST_ASSERT_TRUE(s.awaitingUpgrade);
-  const float px = s.cam.px, py = s.cam.py;
-  const uint32_t pt = s.phaseTick;
-  TEST_ASSERT_EQUAL_UINT16(0, run(s, in, 120));
-  TEST_ASSERT_EQUAL_FLOAT(px, s.cam.px);
-  TEST_ASSERT_EQUAL_FLOAT(py, s.cam.py);
-  TEST_ASSERT_EQUAL_UINT32(pt, s.phaseTick);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);
+  run(s, idle, 30 * TICK_HZ);
+
+  int alive = 0;
+  for (int i = 0; i < MAX_MOBS; ++i) if (s.mobs[i].alive) ++alive;
+  TEST_ASSERT_TRUE(alive > 0);
+
+  // Kill the field outright, and the dark refills it rather than staying empty
+  // for the rest of the night.
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+  run(s, idle, 10 * TICK_HZ);
+  int refilled = 0;
+  for (int i = 0; i < MAX_MOBS; ++i) if (s.mobs[i].alive) ++refilled;
+  TEST_ASSERT_TRUE(refilled > 0);
 }
 
-// ---- upgrades ---------------------------------------------------------------
-
-static void test_upgrades_charge_and_apply(void) {
+// ...but it stops topping up somewhere. Without a ceiling the spawner would run
+// until it filled the array, and MAX_MOBS on screen is past the frame budget.
+static void test_the_population_respects_its_cap(void) {
   State s = fresh();
-  s.ore = 99;
-  const int16_t hp0 = s.maxHp;
-  const uint16_t ore0 = s.ore;
-  chooseUpgrade(s, UP_MAXHP);
-  TEST_ASSERT_EQUAL_INT16(hp0 + 2, s.maxHp);
-  TEST_ASSERT_EQUAL_UINT16(ore0 - upgradeInfo(UP_MAXHP).cost, s.ore);
+  survivable(s);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);
+  for (int k = 0; k < 12; ++k) {
+    run(s, idle, 10 * TICK_HZ);
+    int alive = 0;
+    for (int i = 0; i < MAX_MOBS; ++i) if (s.mobs[i].alive) ++alive;
+    // The siege path is allowed past the cap, and a player standing in the open
+    // is not under siege, so the plain cap holds here.
+    TEST_ASSERT_TRUE(alive <= MOB_CAP);
+  }
+}
 
-  s.ore = 0;
-  const uint8_t lvl = s.miningLevel;
-  chooseUpgrade(s, UP_MINING);
-  TEST_ASSERT_EQUAL_UINT8(lvl, s.miningLevel);      // not afforded, not applied
-
-  s.ore = 99; s.hp = 1;
-  chooseUpgrade(s, UP_HEAL);
-  TEST_ASSERT_EQUAL_INT16(s.maxHp, s.hp);
+// All three kinds turn up from the first night. The mix used to unlock creepers
+// on night two and skeletons on night four, which is a difficulty dial rather
+// than a dark full of things.
+static void test_every_kind_can_show_up_on_night_one(void) {
+  State s = fresh();
+  survivable(s);
+  Input idle;
+  run(s, idle, DAY_TICKS + 1);
+  bool seen[MOB_COUNT] = { false, false, false };
+  for (int k = 0; k < 30; ++k) {
+    for (int i = 0; i < MAX_MOBS; ++i)
+      if (s.mobs[i].alive) seen[s.mobs[i].kind] = true;
+    // Clear the field so the spawner keeps drawing fresh kinds. The clock is
+    // held back with it: thirty rounds of real ticks would run out the night
+    // and the question here is what night ONE contains.
+    for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+    s.phaseTick = 0;
+    run(s, idle, 3 * TICK_HZ);
+    TEST_ASSERT_EQUAL_UINT16(1, s.night);
+  }
+  for (int i = 0; i < MOB_COUNT; ++i) TEST_ASSERT_TRUE(seen[i]);
 }
 
 // ---- movement and building --------------------------------------------------
@@ -236,9 +315,15 @@ static void test_building_empty_handed_reports_it(void) {
 // ---- mining -----------------------------------------------------------------
 
 // Holding the action key on a block has to actually break it and pay out, and
-// the pickaxe upgrade has to make that measurably faster.
-static void test_mining_yields_and_upgrades_speed_it_up(void) {
+// the pickaxe has to make that measurably faster than a fistful of dirt.
+//
+// This is the whole of the item system from the simulation's side: what is in
+// the selected slot changes what the same keypress does. Without it the hotbar
+// is a label and "pickaxe / block / empty" is a picture of a choice rather than
+// a choice.
+static void test_mining_is_faster_with_the_pickaxe_than_by_hand(void) {
   State s = fresh();
+  givePick(s);                                 // a run no longer starts armed
   Input act; act.act = true;
   const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
   s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
@@ -248,14 +333,16 @@ static void test_mining_yields_and_upgrades_speed_it_up(void) {
   while (!(tick(s, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++slow < 600);
   TEST_ASSERT_TRUE(totalBlocks(s) > 0);
 
+  // The same wall with an empty hand, which is what every slot holds now.
   State s2 = fresh();
-  s2.miningLevel = 6;
+  selectSlot(s2, SLOT_N - 1);
+  TEST_ASSERT_FALSE(heldIsTool(s2));
   s2.angle = 0.0f; raycast::setAngle(s2.cam, s2.angle);
   const int wx2 = (int)s2.cam.px + 2, wy2 = (int)s2.cam.py;
   for (int i = 0; i < 3; ++i) world::place(wx2, wy2, world::B_PLANK);
-  int fast = 0;
-  while (!(tick(s2, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++fast < 600);
-  TEST_ASSERT_TRUE(fast < slow);
+  int byHand = 0;
+  while (!(tick(s2, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++byHand < 6000);
+  TEST_ASSERT_TRUE(byHand > slow * 2);
 }
 
 // The pickaxe animation free-runs while working and drops to rest the instant
@@ -274,22 +361,6 @@ static void test_tool_swings_only_while_working(void) {
 
 // ---- waves ------------------------------------------------------------------
 
-// Pressure has to grow with the night count but stay inside the mob array.
-static void test_wave_size_scales_and_is_capped(void) {
-  State s = fresh();
-  survivable(s);
-  Input idle;
-  int prev = -1;
-  for (int night = 0; night < 14; ++night) {
-    run(s, idle, DAY_TICKS + 1);                 // straight to dusk
-    TEST_ASSERT_TRUE(s.spawnBudget <= MAX_MOBS);
-    if (prev >= 0) TEST_ASSERT_TRUE(s.spawnBudget >= prev || s.spawnBudget == MAX_MOBS);
-    prev = s.spawnBudget;
-    run(s, idle, NIGHT_TICKS + 1);
-    if (s.awaitingUpgrade) chooseUpgrade(s, UP_COUNT);
-    if (s.dead) break;
-  }
-}
 
 // Dawn clears the field. A mob surviving into the day would chase the player
 // through the whole gathering phase.
@@ -330,13 +401,21 @@ static void test_mobs_close_in_even_when_walled_in(void) {
     if (d < before) before = d;
   }
   TEST_ASSERT_TRUE(before < 1e9f);
-  run(s, idle, 60 * 8);
+
+  // The closest anything managed over the window, not where the nearest mob
+  // happened to be standing at the end of it. Those were the same question
+  // while a walled-in night was a stalemate; they stopped being the same once
+  // a creeper could go off against the wall, because a detonation removes the
+  // very mob that had got nearest and the endpoint reading jumps back out.
   float after = 1e9f;
-  for (int i = 0; i < MAX_MOBS; ++i) {
-    if (!s.mobs[i].alive) continue;
-    const float dx = s.mobs[i].x - s.cam.px, dy = s.mobs[i].y - s.cam.py;
-    const float d = dx * dx + dy * dy;
-    if (d < after) after = d;
+  for (int t = 0; t < 60 * 8; ++t) {
+    run(s, idle, 1);
+    for (int i = 0; i < MAX_MOBS; ++i) {
+      if (!s.mobs[i].alive) continue;
+      const float dx = s.mobs[i].x - s.cam.px, dy = s.mobs[i].y - s.cam.py;
+      const float d = dx * dx + dy * dy;
+      if (d < after) after = d;
+    }
   }
   TEST_ASSERT_TRUE(after <= before);
 }
@@ -397,13 +476,18 @@ static void test_attacks_are_telegraphed(void) {
   Input idle;
   run(s, idle, DAY_TICKS + 1);
 
-  bool sawTelegraph = false, hurtWithoutWarning = false;
+  // Two shapes of warning, because there are now two shapes of attacker on
+  // night one. A zombie or a skeleton commits to a blow and telegraphs it; a
+  // creeper lights a fuse and hisses. Both are a beat of notice before the
+  // damage, which is the thing being claimed — the test used to be able to
+  // say "telegraph" only because night one held nothing but zombies.
+  bool sawWarning = false, hurtWithoutWarning = false;
   for (int i = 0; i < 60 * 40 && !s.dead; ++i) {
     const uint32_t ev = tick(s, idle);
-    if (ev & EV_TELEGRAPH) sawTelegraph = true;
-    if ((ev & EV_HURT) && !sawTelegraph) hurtWithoutWarning = true;
+    if (ev & (EV_TELEGRAPH | EV_HISS)) sawWarning = true;
+    if ((ev & EV_HURT) && !sawWarning) hurtWithoutWarning = true;
   }
-  TEST_ASSERT_TRUE(sawTelegraph);
+  TEST_ASSERT_TRUE(sawWarning);
   TEST_ASSERT_FALSE(hurtWithoutWarning);
 }
 
@@ -453,21 +537,155 @@ static void test_mining_files_drops_by_material(void) {
 
 static void test_hotbar_cycles_and_wraps(void) {
   State s = fresh();
-  TEST_ASSERT_EQUAL_UINT8(kHotbar[0], heldBlock(s));
+  givePick(s);                                         // slot 0, the first free
+  TEST_ASSERT_TRUE(heldIsTool(s));
   cycleBlock(s, 1);
-  TEST_ASSERT_EQUAL_UINT8(kHotbar[1], heldBlock(s));
-  for (int i = 0; i < HOTBAR_N; ++i) cycleBlock(s, 1);
-  TEST_ASSERT_EQUAL_UINT8(kHotbar[1], heldBlock(s));   // a full lap
+  TEST_ASSERT_EQUAL_UINT8(1, s.sel);
+  for (int i = 0; i < SLOT_N; ++i) cycleBlock(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(1, s.sel);                   // a full lap
   cycleBlock(s, -1);
-  TEST_ASSERT_EQUAL_UINT8(kHotbar[0], heldBlock(s));
+  TEST_ASSERT_TRUE(heldIsTool(s));
+
+  // A number key names a slot outright, and an out-of-range one is ignored
+  // rather than being clamped onto some arbitrary neighbour.
+  selectSlot(s, 5);
+  TEST_ASSERT_EQUAL_UINT8(5, s.sel);
+  selectSlot(s, SLOT_N);
+  TEST_ASSERT_EQUAL_UINT8(5, s.sel);
+  selectSlot(s, -1);
+  TEST_ASSERT_EQUAL_UINT8(5, s.sel);
+}
+
+// A run opens with nothing in it, including slot 0.
+//
+// This is the inverse of what used to be locked down here: the pickaxe was
+// pinned to slot 0 for the life of the run, on the reasoning that a board with
+// no inventory screen has to keep the tool reachable. The tool is crafted now,
+// so the thing worth asserting is that the game does not quietly hand one over.
+static void test_a_run_starts_with_empty_hands(void) {
+  State s = fresh();
+  for (int i = 0; i < SLOT_N; ++i) {
+    TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[i]);
+    TEST_ASSERT_FALSE(isTool(s.slot[i]));
+  }
+  TEST_ASSERT_FALSE(heldIsTool(s));
+
+  // And mining for a while does not conjure one either: what comes off a block
+  // is material, and material never lands in the tool band.
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  run(s, act, 20 * TICK_HZ);
+  for (int i = 0; i < SLOT_N; ++i) TEST_ASSERT_FALSE(isTool(s.slot[i]));
+}
+
+// Minecraft's pickup rule: a material claims the lowest free slot the first
+// time you get one, stays there while you hold any, and hands the slot back
+// when the last is spent.
+static void test_a_material_claims_a_slot_and_gives_it_back(void) {
+  State s = fresh();
+  for (int i = 0; i < SLOT_N; ++i) TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[i]);
+
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_BRICK);
+  int guard = 0;
+  while (!(tick(s, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++guard < 900);
+
+  // Slot 0, not slot 1: nothing is reserved any more, so the lowest free slot
+  // on a fresh run is the first one.
+  TEST_ASSERT_EQUAL_UINT8(world::B_BRICK, s.slot[0]);
+  TEST_ASSERT_TRUE(s.inv[world::B_BRICK] > 0);
+
+  // Spend them all and the slot clears rather than sitting there at zero — a
+  // bar full of materials you no longer own has no room for the ones you do.
+  s.inv[world::B_BRICK] = 1;
+  selectSlot(s, 0);
+  Input build; build.build = true;
+  guard = 0;
+  while (s.inv[world::B_BRICK] && ++guard < 400) run(s, build, 1);
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_BRICK]);
+  TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[0]);
+}
+
+// What the bar cannot hold is spilled on the floor, not swallowed.
+//
+// This is the inverse of what used to be locked down here. giveItem took a
+// material unconditionally and let the count sit in inv[] with no slot to show
+// it -- "nothing is ever lost, it is only temporarily unplaceable". It was
+// lost in every sense that matters: you could not see it, select it or place
+// it, and the game never said so. A full bar now drops the block where it
+// broke, which is a thing you can look at and decide about.
+static void test_a_full_bar_spills_what_it_cannot_hold(void) {
+  State s = fresh();
+  const uint8_t fill[SLOT_N] = {
+    world::B_DIRT,  world::B_STONE, world::B_WOOD,   world::B_PLANK,
+    world::B_BRICK, world::B_TORCH, world::B_LEAVES, world::B_SAND,
+    world::B_SNOW,
+  };
+  for (int i = 0; i < SLOT_N; ++i) { s.slot[i] = fill[i]; s.inv[fill[i]] = 4; }
+  TEST_ASSERT_FALSE(canAccept(s, world::B_MASONRY));
+
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_MASONRY);
+  int guard = 0;
+  while (!(tick(s, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++guard < 900);
+
+  // Not held, and not silently binned either: it is on the floor.
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_MASONRY]);
+  TEST_ASSERT_TRUE(dropsAlive(s) > 0);
+  bool spilled = false;
+  for (int i = 0; i < MAX_DROPS; ++i)
+    if (s.drops[i].alive && s.drops[i].item == world::B_MASONRY) spilled = true;
+  TEST_ASSERT_TRUE(spilled);
+
+  // Free a slot and walking over it collects it, which is what makes the spill
+  // a recoverable event rather than a punishment.
+  s.inv[world::B_SNOW] = 0;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == world::B_SNOW) s.slot[i] = SLOT_EMPTY;
+  TEST_ASSERT_TRUE(canAccept(s, world::B_MASONRY));
+}
+
+// Stock and slot are now the same fact: a material has a slot exactly when its
+// count is non-zero. The hidden-overflow state that reletSlot existed to undo
+// cannot be reached any more, so this asserts it never arises.
+static void test_every_held_material_has_a_slot(void) {
+  State s = fresh();
+  givePick(s);
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  run(s, act, 40 * TICK_HZ);
+
+  for (uint8_t m = 0; m < world::B_COUNT; ++m) {
+    if (!s.inv[m]) continue;
+    bool shown = false;
+    for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == m) shown = true;
+    TEST_ASSERT_TRUE(shown);
+  }
+}
+
+// A pickaxe builds nothing, and neither does an empty hand. That refusal is the
+// item system from the player's side.
+static void test_only_a_block_can_be_placed(void) {
+  State s = fresh();
+  s.inv[world::B_DIRT] = 10;
+  s.slot[1] = world::B_DIRT;
+  Input build; build.build = true;
+
+  selectSlot(s, 0);                                    // the pickaxe
+  TEST_ASSERT_TRUE(run(s, build, 4) & EV_NO_BLOCKS);
+  selectSlot(s, SLOT_N - 1);                           // an empty hand
+  TEST_ASSERT_TRUE(run(s, build, 4) & EV_NO_BLOCKS);
+  TEST_ASSERT_EQUAL_UINT16(10, s.inv[world::B_DIRT]);  // and nothing was spent
 }
 
 // Building places what is held, and spends that material rather than a pile.
 static void test_building_places_the_held_block(void) {
   State s = fresh();
   s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
-  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
-  s.inv[world::B_BRICK] = 5;
+  hold(s, world::B_BRICK, 5);
   s.inv[world::B_DIRT]  = 5;
 
   Input build; build.build = true;
@@ -484,11 +702,12 @@ static void test_crafting_consumes_and_produces(void) {
   TEST_ASSERT_FALSE(craft(s, R_TORCH));
 
   const RecipeInfo& r = recipeInfo(R_TORCH);
-  s.inv[r.inMat[0]] = r.inQty[0];
-  s.inv[r.inMat[1]] = r.inQty[1];
+  for (int i = 0; i < GRID_N; ++i)
+    if (r.cells[i] != CELL_EMPTY) s.inv[r.cells[i]] += 1;
   TEST_ASSERT_TRUE(canCraft(s, R_TORCH));
   TEST_ASSERT_TRUE(craft(s, R_TORCH));
-  TEST_ASSERT_EQUAL_UINT16(0, s.inv[r.inMat[0]]);
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_WOOD]);
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_COAL]);
   TEST_ASSERT_EQUAL_UINT16(r.outQty, s.inv[world::B_TORCH]);
   TEST_ASSERT_FALSE(craft(s, R_TORCH));      // inputs are gone
 }
@@ -497,14 +716,539 @@ static void test_crafting_consumes_and_produces(void) {
 static void test_patch_heals_without_overhealing(void) {
   State s = fresh();
   const RecipeInfo& r = recipeInfo(R_PATCH);
-  s.inv[r.inMat[0]] = 20;
-  s.inv[r.inMat[1]] = 20;
+  for (int i = 0; i < GRID_N; ++i)
+    if (r.cells[i] != CELL_EMPTY) s.inv[r.cells[i]] = 20;
   s.hp = 1;
   TEST_ASSERT_TRUE(craft(s, R_PATCH));
   TEST_ASSERT_EQUAL_INT16(3, s.hp);
   s.hp = s.maxHp;
   TEST_ASSERT_TRUE(craft(s, R_PATCH));
   TEST_ASSERT_EQUAL_INT16(s.maxHp, s.hp);
+}
+
+// ---- tools, tiers and durability --------------------------------------------
+
+// The bootstrap. A run starts with nothing, so the very first thing a player
+// does is hit a tree with their bare hands -- and if that does not work, the
+// game has no opening move at all.
+static void test_bare_hands_can_chop_wood(void) {
+  State s = fresh();
+  TEST_ASSERT_FALSE(heldIsTool(s));
+
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_WOOD);
+
+  int guard = 0;
+  while (!(tick(s, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++guard < 900);
+  // Three per block, which is what makes one tree enough to reach a pickaxe.
+  TEST_ASSERT_EQUAL_UINT16(3, s.inv[world::B_WOOD]);
+}
+
+// Matching is a multiset, so where in the grid a material sits is not part of
+// the recipe. The bug this guards: comparing the cells position by position,
+// which makes a two-cell recipe unmakeable in three of its four layouts.
+static void test_grid_matching_ignores_where_things_sit(void) {
+  State s = fresh();
+  layGrid(s, { world::B_PLANK, world::B_PLANK, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
+
+  layGrid(s, { CELL_EMPTY, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
+
+  layGrid(s, { CELL_EMPTY, CELL_EMPTY, world::B_PLANK, world::B_PLANK });
+  TEST_ASSERT_EQUAL_UINT8(R_SWORD_WOOD, matchGrid(s.grid));
+
+  // A third plank is a different recipe, not a near-enough one. Count is the
+  // only thing separating the sword from the pickaxe.
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_PICK_WOOD, matchGrid(s.grid));
+
+  // And a fourth is nothing at all.
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, world::B_PLANK });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+
+  layGrid(s, { CELL_EMPTY, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
+  TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(s.grid));
+}
+
+// A tool arrives on the bar at full durability, and the cells are spent.
+static void test_crafting_a_tool_spends_the_grid(void) {
+  State s = fresh();
+  s.inv[world::B_PLANK] = 3;
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_TRUE(canAffordGrid(s));
+  TEST_ASSERT_TRUE(craftGrid(s));
+
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_PLANK]);
+  int found = -1;
+  for (int i = 0; i < SLOT_N; ++i) if (isTool(s.slot[i])) found = i;
+  TEST_ASSERT_TRUE(found >= 0);
+  TEST_ASSERT_EQUAL_UINT8(toolId(TK_PICK, TT_WOOD), s.slot[found]);
+  TEST_ASSERT_EQUAL_UINT16(toolInfo(TK_PICK, TT_WOOD).durability, s.dur[found]);
+
+  // The grid is cleared, so the next press does not craft a second one from
+  // materials that are no longer there.
+  for (int i = 0; i < GRID_N; ++i) TEST_ASSERT_EQUAL_UINT8(CELL_EMPTY, s.grid[i]);
+}
+
+// The hole this closes: every cell cycles through held materials on its own, so
+// one plank will happily fill three cells. matchGrid then says "wood pickaxe",
+// and takeItem clamps at zero without complaining -- which minted a tool out of
+// a third of its cost.
+static void test_a_grid_you_cannot_pay_for_makes_nothing(void) {
+  State s = fresh();
+  s.inv[world::B_PLANK] = 1;
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+
+  TEST_ASSERT_EQUAL_UINT8(R_PICK_WOOD, matchGrid(s.grid));   // it is a recipe...
+  TEST_ASSERT_FALSE(canAffordGrid(s));                       // ...just not yours
+  TEST_ASSERT_FALSE(craftGrid(s));
+
+  TEST_ASSERT_EQUAL_UINT16(1, s.inv[world::B_PLANK]);        // nothing spent
+  for (int i = 0; i < SLOT_N; ++i) TEST_ASSERT_FALSE(isTool(s.slot[i]));
+}
+
+// A tool has no count in inv[] and nowhere to wait, unlike a material, so a
+// full bar has to refuse the recipe outright rather than eat the inputs.
+static void test_a_tool_needs_a_free_slot(void) {
+  State s = fresh();
+  s.inv[world::B_PLANK] = 3;
+  for (int i = 0; i < SLOT_N; ++i) s.slot[i] = world::B_STONE;
+
+  TEST_ASSERT_FALSE(canCraft(s, R_PICK_WOOD));
+  layGrid(s, { world::B_PLANK, world::B_PLANK, world::B_PLANK, CELL_EMPTY });
+  TEST_ASSERT_FALSE(canAffordGrid(s));
+  TEST_ASSERT_FALSE(craftGrid(s));
+  TEST_ASSERT_EQUAL_UINT16(3, s.inv[world::B_PLANK]);   // and nothing was spent
+
+  // A material, by contrast, is never refused -- it just goes uncounted on the
+  // bar until a slot frees. That asymmetry is the point.
+  s.inv[world::B_WOOD] = 1;
+  TEST_ASSERT_TRUE(canCraft(s, R_PLANK));
+}
+
+// A pickaxe is spent per block broken, not per tick of effort.
+static void test_a_pickaxe_wears_one_point_per_block(void) {
+  State s = fresh();
+  giveTool(s, TK_PICK, TT_IRON);
+  const int slot = s.sel;
+  const uint16_t full = s.dur[slot];
+
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_PLANK);
+
+  int guard = 0;
+  while (!(tick(s, act) & EV_BLOCK_BROKE)) TEST_ASSERT_TRUE(++guard < 900);
+  TEST_ASSERT_TRUE(guard > 1);                       // it took several ticks...
+  TEST_ASSERT_EQUAL_UINT16(full - 1, s.dur[slot]);   // ...and cost exactly one
+}
+
+// The last point takes the tool with it: the slot clears, and the event says so
+// rather than leaving the player to notice their hand is empty.
+static void test_a_spent_tool_breaks_and_frees_its_slot(void) {
+  State s = fresh();
+  giveTool(s, TK_PICK, TT_IRON);
+  const int slot = s.sel;
+  s.dur[slot] = 1;                                   // one block left in it
+
+  Input act; act.act = true;
+  s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+  const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+  for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_PLANK);
+
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_BLOCK_BROKE)) {
+    ev = tick(s, act);
+    TEST_ASSERT_TRUE(++guard < 900);
+  }
+  TEST_ASSERT_TRUE(ev & EV_TOOL_BROKE);
+  TEST_ASSERT_FALSE(isTool(s.slot[slot]));
+}
+
+// The ladder has to be visible in the one thing a pickaxe is for.
+static void test_a_better_pickaxe_digs_faster(void) {
+  auto ticksToBreak = [](uint8_t tier) {
+    State s = fresh();
+    giveTool(s, TK_PICK, tier);
+    Input act; act.act = true;
+    s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
+    const int wx = (int)s.cam.px + 2, wy = (int)s.cam.py;
+    for (int i = 0; i < 3; ++i) world::place(wx, wy, world::B_STONE);
+    int n = 0;
+    while (!(tick(s, act) & EV_BLOCK_BROKE)) { ++n; TEST_ASSERT_TRUE(n < 4000); }
+    return n;
+  };
+  const int wood = ticksToBreak(TT_WOOD);
+  const int stone = ticksToBreak(TT_STONE);
+  const int iron = ticksToBreak(TT_IRON);
+  const int diamond = ticksToBreak(TT_DIAMOND);
+  TEST_ASSERT_TRUE(stone < wood);
+  TEST_ASSERT_TRUE(iron < stone);
+  TEST_ASSERT_TRUE(diamond < iron);
+}
+
+// A sword is spent on the blow that lands, not on the swing that misses.
+static void test_a_sword_wears_only_on_a_landed_hit(void) {
+  State s = fresh();
+  giveTool(s, TK_SWORD, TT_IRON);
+  const int slot = s.sel;
+  const uint16_t full = s.dur[slot];
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+
+  // Nothing in the arc and nothing under the crosshair: swing at the sky.
+  Input act; act.act = true;
+  s.pitch = 0.0f;
+  run(s, act, 40);
+  TEST_ASSERT_EQUAL_UINT16(full, s.dur[slot]);
+
+  // Now put something in front of it.
+  poseMob(s, 0, MOB_ZOMBIE, 1.2f);
+  s.swingCooldown = 0;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_MOB_HIT)) { ev = tick(s, act); TEST_ASSERT_TRUE(++guard < 300); }
+  TEST_ASSERT_EQUAL_UINT16(full - 1, s.dur[slot]);
+}
+
+// What the diamond tier is FOR. A zombie has three hearts and everything else
+// has fewer, so one blow has to be the whole fight.
+static void test_a_diamond_sword_kills_in_one_blow(void) {
+  State s = fresh();
+  giveTool(s, TK_SWORD, TT_DIAMOND);
+  for (int i = 0; i < MAX_MOBS; ++i) s.mobs[i].alive = false;
+  Mob& m = poseMob(s, 0, MOB_ZOMBIE, 1.2f);
+  m.hp = 3;                                    // a zombie's real health
+  s.swingCooldown = 0;
+
+  Input act; act.act = true;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_MOB_HIT)) { ev = tick(s, act); TEST_ASSERT_TRUE(++guard < 300); }
+  TEST_ASSERT_TRUE(ev & EV_MOB_DIED);
+  TEST_ASSERT_FALSE(s.mobs[0].alive);
+
+  // And a wooden one does not, or the ladder means nothing.
+  State s2 = fresh();
+  giveTool(s2, TK_SWORD, TT_WOOD);
+  for (int i = 0; i < MAX_MOBS; ++i) s2.mobs[i].alive = false;
+  Mob& m2 = poseMob(s2, 0, MOB_ZOMBIE, 1.2f);
+  m2.hp = 3;
+  s2.swingCooldown = 0;
+  ev = 0; guard = 0;
+  while (!(ev & EV_MOB_HIT)) { ev = tick(s2, act); TEST_ASSERT_TRUE(++guard < 300); }
+  TEST_ASSERT_FALSE(ev & EV_MOB_DIED);
+  TEST_ASSERT_TRUE(s2.mobs[0].alive);
+}
+
+// The book fills the grid rather than crafting behind it, and refuses to fill
+// with something the player cannot pay for.
+static void test_the_book_fills_the_grid_only_when_affordable(void) {
+  State s = fresh();
+  TEST_ASSERT_FALSE(fillGrid(s, R_PICK_STONE));
+  for (int i = 0; i < GRID_N; ++i) TEST_ASSERT_EQUAL_UINT8(CELL_EMPTY, s.grid[i]);
+
+  s.inv[world::B_STONE] = 2;
+  s.inv[world::B_PLANK] = 1;
+  TEST_ASSERT_TRUE(fillGrid(s, R_PICK_STONE));
+  TEST_ASSERT_EQUAL_UINT8(R_PICK_STONE, matchGrid(s.grid));
+  TEST_ASSERT_TRUE(canAffordGrid(s));
+  TEST_ASSERT_TRUE(craftGrid(s));
+}
+
+// The craft card's cursor visits every stop on it, and only a cell holds a
+// material. Six stops rather than four is what lets the whole card be driven by
+// four arrows and ENTER: the result slot and the book row are places you move
+// to, not keys you have to be told about.
+static void test_the_grid_cursor_reaches_every_stop(void) {
+  State s = fresh();
+  TEST_ASSERT_EQUAL_UINT8(0, s.gridSel);
+
+  // Across the top row and on to the result slot.
+  gridMove(s, 1, 0);  TEST_ASSERT_EQUAL_UINT8(1, s.gridSel);
+  gridMove(s, 1, 0);  TEST_ASSERT_EQUAL_UINT8(GRID_FOCUS_OUT, s.gridSel);
+  gridMove(s, -1, 0); TEST_ASSERT_EQUAL_UINT8(1, s.gridSel);
+
+  // Down the grid, then on to the book row under it.
+  gridMove(s, 0, 1);  TEST_ASSERT_EQUAL_UINT8(3, s.gridSel);
+  gridMove(s, 0, 1);  TEST_ASSERT_EQUAL_UINT8(GRID_FOCUS_BOOK, s.gridSel);
+  gridMove(s, 0, -1); TEST_ASSERT_EQUAL_UINT8(2, s.gridSel);
+
+  // No arrow is ever a dead key: from every stop, every direction lands on a
+  // real stop. A card with a direction that does nothing reads as a broken one.
+  for (uint8_t from = 0; from < GRID_FOCUS_N; ++from) {
+    static const int kDir[4][2] = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+    for (int d = 0; d < 4; ++d) {
+      s.gridSel = from;
+      gridMove(s, kDir[d][0], kDir[d][1]);
+      TEST_ASSERT_TRUE(s.gridSel < GRID_FOCUS_N);
+    }
+  }
+
+  // Every stop is reachable from the top-left corner using arrows alone.
+  // Flooded rather than walked in two straight lines: a straight line misses
+  // the far cell of the grid, and "reachable" is a property of the whole map,
+  // not of the two paths a test happened to try.
+  bool seen[GRID_FOCUS_N] = { false };
+  seen[0] = true;
+  for (int pass = 0; pass < GRID_FOCUS_N; ++pass)
+    for (uint8_t from = 0; from < GRID_FOCUS_N; ++from) {
+      if (!seen[from]) continue;
+      static const int kDir[4][2] = { {-1,0}, {1,0}, {0,-1}, {0,1} };
+      for (int d = 0; d < 4; ++d) {
+        s.gridSel = from;
+        gridMove(s, kDir[d][0], kDir[d][1]);
+        seen[s.gridSel] = true;
+      }
+    }
+  for (int i = 0; i < GRID_FOCUS_N; ++i) TEST_ASSERT_TRUE(seen[i]);
+}
+
+// Cycling edits the cell under the cursor and nothing else. The bug this
+// guards: indexing grid[gridSel % GRID_N], which quietly edited cell 0 while
+// the cursor was parked on the result slot two stops away.
+static void test_cycling_only_touches_a_cell(void) {
+  State s = fresh();
+
+  // Holding nothing, cycling can only ever land back on empty.
+  gridCycle(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(CELL_EMPTY, s.grid[0]);
+
+  s.inv[world::B_WOOD] = 2;
+  gridCycle(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(world::B_WOOD, s.grid[0]);
+  gridCycle(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(CELL_EMPTY, s.grid[0]);              // full lap of one
+
+  // Parked off the grid, it does nothing at all.
+  s.grid[0] = world::B_WOOD;
+  s.gridSel = GRID_FOCUS_OUT;
+  gridCycle(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(world::B_WOOD, s.grid[0]);
+  TEST_ASSERT_FALSE(gridOnCell(s));
+
+  s.gridSel = GRID_FOCUS_BOOK;
+  gridCycle(s, 1);
+  TEST_ASSERT_EQUAL_UINT8(world::B_WOOD, s.grid[0]);
+}
+
+// ---- dropping and picking up ------------------------------------------------
+
+// The basic transaction: one press, one item out of the bar and onto the floor.
+static void test_dropping_moves_one_item_to_the_floor(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 5);
+
+  Input in; in.drop = true;
+  TEST_ASSERT_TRUE(tick(s, in) & EV_DROP);
+  TEST_ASSERT_EQUAL_UINT16(4, s.inv[world::B_DIRT]);
+  TEST_ASSERT_EQUAL_INT(1, dropsAlive(s));
+
+  bool found = false;
+  for (int i = 0; i < MAX_DROPS; ++i)
+    if (s.drops[i].alive && s.drops[i].item == world::B_DIRT) found = true;
+  TEST_ASSERT_TRUE(found);
+
+  // An empty hand has nothing to throw, and says so by not raising the event.
+  State s2 = fresh();
+  TEST_ASSERT_FALSE(run(s2, in, 5) & EV_DROP);
+  TEST_ASSERT_EQUAL_INT(0, dropsAlive(s2));
+}
+
+// A tap is one item; holding the key repeats at DROP_PERIOD. That is what turns
+// "empty this slot" into one long press rather than sixty taps, and the timer
+// resetting on release is what keeps the next tap instant.
+static void test_holding_drop_repeats_but_a_tap_does_not(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 60);
+
+  Input down; down.drop = true;
+  Input up;
+
+  // One tick with the key down, then released: exactly one leaves.
+  tick(s, down);
+  run(s, up, 30);
+  TEST_ASSERT_EQUAL_UINT16(59, s.inv[world::B_DIRT]);
+
+  // Held across four full periods: one on the first tick, then one per period.
+  const int ticks = 4 * DROP_PERIOD;
+  run(s, down, ticks);
+  const int gone = 59 - (int)s.inv[world::B_DIRT];
+  TEST_ASSERT_EQUAL_INT(4, gone);
+}
+
+// A fresh drop cannot be collected for DROP_ARM ticks. Without it the pickup
+// test fires on the same tick the throw does, and nothing ever leaves the hand.
+static void test_a_fresh_drop_cannot_be_grabbed_back_instantly(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 3);
+
+  Input in; in.drop = true;
+  tick(s, in);
+  TEST_ASSERT_EQUAL_UINT16(2, s.inv[world::B_DIRT]);
+
+  // Stand still with the key up. While it is armed the count must not climb
+  // back, however close the item lands.
+  Input idle;
+  run(s, idle, DROP_ARM - 2);
+  TEST_ASSERT_EQUAL_UINT16(2, s.inv[world::B_DIRT]);
+}
+
+// ...and once it is armed, standing on it collects it.
+static void test_walking_over_a_drop_collects_it(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 3);
+
+  Input in; in.drop = true;
+  tick(s, in);
+  TEST_ASSERT_EQUAL_INT(1, dropsAlive(s));
+
+  // Put it under the player's feet rather than walking there: the arc is not
+  // what this is testing, and where it lands depends on the terrain.
+  for (int i = 0; i < MAX_DROPS; ++i) {
+    if (!s.drops[i].alive) continue;
+    s.drops[i].x = s.cam.px;
+    s.drops[i].y = s.cam.py;
+    s.drops[i].z = s.cam.z - 0.6f;
+    s.drops[i].rest = true;
+  }
+
+  Input idle;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_PICKUP)) { ev = tick(s, idle); TEST_ASSERT_TRUE(++guard < 600); }
+  TEST_ASSERT_EQUAL_UINT16(3, s.inv[world::B_DIRT]);
+  TEST_ASSERT_EQUAL_INT(0, dropsAlive(s));
+}
+
+// A full bar cannot collect a new material, and the item stays put rather than
+// being destroyed by the attempt. Refusing has to be lossless.
+static void test_a_full_bar_leaves_a_drop_where_it_lies(void) {
+  State s = fresh();
+  const uint8_t fill[SLOT_N] = {
+    world::B_DIRT,  world::B_STONE, world::B_WOOD,   world::B_PLANK,
+    world::B_BRICK, world::B_TORCH, world::B_LEAVES, world::B_SAND,
+    world::B_SNOW,
+  };
+  for (int i = 0; i < SLOT_N; ++i) { s.slot[i] = fill[i]; s.inv[fill[i]] = 4; }
+
+  // A masonry block lying at the player's feet, armed and collectable.
+  Drop& d = s.drops[0];
+  d = Drop{};
+  d.alive = true; d.rest = true; d.item = world::B_MASONRY; d.count = 1;
+  d.life = DROP_LIFE; d.arm = 0;
+  d.x = s.cam.px; d.y = s.cam.py; d.z = s.cam.z - 0.6f;
+
+  Input idle;
+  run(s, idle, 60);
+  TEST_ASSERT_EQUAL_INT(1, dropsAlive(s));                 // still there...
+  TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_MASONRY]);    // ...and not held
+
+  // Free a slot and the next pass takes it.
+  s.inv[world::B_SNOW] = 0;
+  for (int i = 0; i < SLOT_N; ++i) if (s.slot[i] == world::B_SNOW) s.slot[i] = SLOT_EMPTY;
+  run(s, idle, 30);
+  TEST_ASSERT_EQUAL_UINT16(1, s.inv[world::B_MASONRY]);
+}
+
+// A dropped tool carries its wear with it, both ways. Throwing a nearly-spent
+// pickaxe and picking it up must not quietly repair it.
+static void test_a_dropped_tool_keeps_its_durability(void) {
+  State s = fresh();
+  giveTool(s, TK_PICK, TT_IRON);
+  const int slot = s.sel;
+  s.dur[slot] = 42;
+
+  Input in; in.drop = true;
+  TEST_ASSERT_TRUE(tick(s, in) & EV_DROP);
+  TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[slot]);
+
+  int at = -1;
+  for (int i = 0; i < MAX_DROPS; ++i) if (s.drops[i].alive) at = i;
+  TEST_ASSERT_TRUE(at >= 0);
+  TEST_ASSERT_EQUAL_UINT8(toolId(TK_PICK, TT_IRON), s.drops[at].item);
+  TEST_ASSERT_EQUAL_UINT16(42, s.drops[at].dur);
+
+  s.drops[at].x = s.cam.px;
+  s.drops[at].y = s.cam.py;
+  s.drops[at].z = s.cam.z - 0.6f;
+  s.drops[at].rest = true;
+
+  Input idle;
+  uint32_t ev = 0;
+  int guard = 0;
+  while (!(ev & EV_PICKUP)) { ev = tick(s, idle); TEST_ASSERT_TRUE(++guard < 600); }
+
+  int back = -1;
+  for (int i = 0; i < SLOT_N; ++i) if (isTool(s.slot[i])) back = i;
+  TEST_ASSERT_TRUE(back >= 0);
+  TEST_ASSERT_EQUAL_UINT16(42, s.dur[back]);
+}
+
+// It falls, and it stops on whatever it lands on -- including a floor the
+// player built, which is the same rule the player's own feet follow.
+static void test_a_drop_settles_on_the_surface(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 3);
+
+  Input in; in.drop = true;
+  tick(s, in);
+  int at = -1;
+  for (int i = 0; i < MAX_DROPS; ++i) if (s.drops[i].alive) at = i;
+  TEST_ASSERT_TRUE(at >= 0);
+  TEST_ASSERT_FALSE(s.drops[at].rest);
+
+  Input idle;
+  int guard = 0;
+  while (s.drops[at].alive && !s.drops[at].rest)
+    { tick(s, idle); TEST_ASSERT_TRUE(++guard < 600); }
+
+  // Resting means standing on solid ground with nothing solid inside it.
+  TEST_ASSERT_TRUE(s.drops[at].alive);
+  const Drop& d = s.drops[at];
+  TEST_ASSERT_TRUE(d.rest);
+  TEST_ASSERT_FALSE(world::solidAt((int)d.x, (int)d.y, (int)d.z));
+  TEST_ASSERT_TRUE(world::solidAt((int)d.x, (int)d.y, (int)d.z - 1)
+                   || (int)d.z <= 1);
+}
+
+// Nothing lies there forever, or a long run would leave the array full of
+// things nobody is coming back for.
+static void test_a_drop_expires(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 3);
+
+  Input in; in.drop = true;
+  tick(s, in);
+  TEST_ASSERT_EQUAL_INT(1, dropsAlive(s));
+
+  // Somewhere the player is not, so it expires rather than being collected.
+  for (int i = 0; i < MAX_DROPS; ++i)
+    if (s.drops[i].alive) { s.drops[i].x = s.cam.px + 30.0f; s.drops[i].rest = true; }
+
+  Input idle;
+  run(s, idle, DROP_LIFE + 4);
+  TEST_ASSERT_EQUAL_INT(0, dropsAlive(s));
+}
+
+// The drop array is a fixed sixteen, and dropping has to be something that
+// always works -- it is the only way out of a full bar. A seventeenth throw
+// recycles the most nearly expired item rather than silently doing nothing.
+static void test_the_drop_array_never_refuses_a_throw(void) {
+  State s = fresh();
+  hold(s, world::B_DIRT, 400);
+
+  Input down; down.drop = true;
+  for (int i = 0; i < MAX_DROPS + 6; ++i) {
+    tick(s, down);
+    run(s, Input{}, 1);            // release, so the next tap is instant
+  }
+  TEST_ASSERT_EQUAL_INT(MAX_DROPS, dropsAlive(s));
+  TEST_ASSERT_EQUAL_UINT16(400 - (MAX_DROPS + 6), s.inv[world::B_DIRT]);
 }
 
 // ---- light and hazards ------------------------------------------------------
@@ -551,8 +1295,8 @@ static void test_lava_burns_on_a_timer(void) {
   TEST_ASSERT_TRUE(s.hp < before - 1);
 
   // And it cannot be dug out from under you.
-  uint8_t m = 0, b = 0, o = 0;
-  TEST_ASSERT_FALSE(world::mine(px, py, 100000, m, b, o));
+  uint8_t m = 0, b = 0;
+  TEST_ASSERT_FALSE(world::mineTop(px, py, 100000, m, b));
 }
 
 // ---- reach is three-dimensional ---------------------------------------------
@@ -751,8 +1495,9 @@ static void test_wall_pressers_are_not_despawned(void) {
 // ---- scoring ----------------------------------------------------------------
 
 static void test_score_rewards_survival_most(void) {
-  State a = fresh(); a.night = 3; a.ore = 0;
-  State b = fresh(); b.night = 2; b.ore = 10; b.inv[world::B_PLANK] = 10;
+  State a = fresh(); a.night = 3;
+  State b = fresh(); b.night = 2; b.inv[world::B_IRON] = 10;
+  b.inv[world::B_PLANK] = 10;
   TEST_ASSERT_TRUE(score(a) > score(b));
 }
 
@@ -771,10 +1516,13 @@ static void test_degenerate_input(void) {
   s.dead = true;
   TEST_ASSERT_EQUAL_UINT16(0, run(s, all, 30));
 
-  // Out-of-range upgrade ids are a skip, not an out-of-bounds table read.
-  s.dead = false; s.awaitingUpgrade = true;
-  chooseUpgrade(s, 200);
-  TEST_ASSERT_FALSE(s.awaitingUpgrade);
+  // A selection past the end of the bar is ignored, not clamped into some
+  // arbitrary slot and not read off the end of the array.
+  s.dead = false;
+  selectSlot(s, 99);
+  TEST_ASSERT_TRUE(s.sel < SLOT_N);
+  TEST_ASSERT_TRUE(isTool(heldItem(s)) || heldItem(s) == SLOT_EMPTY
+                   || heldItem(s) < world::B_COUNT);
 }
 
 // ---- the fight --------------------------------------------------------------
@@ -792,12 +1540,12 @@ static void test_a_swing_at_nothing_still_swings(void) {
   // even when it is rising — which is correct behaviour, and would have made
   // this test pass for the wrong reason.
   const int px = (int)s.cam.px, py = (int)s.cam.py;
-  uint8_t dm, db, dro;
+  uint8_t dm, db;
   for (int y = py - 10; y <= py + 10; ++y)
     for (int x = px - 10; x <= px + 10; ++x) {
       if (world::isBorder(x, y)) continue;
       while (world::height(x, y) > world::GROUND)
-        world::mine(x, y, 100000, dm, db, dro);
+        world::mineTop(x, y, 100000, dm, db);
       while (world::height(x, y) < world::GROUND)
         world::place(x, y, world::B_DIRT);
     }
@@ -895,7 +1643,7 @@ static void test_invulnerability_does_not_shield_lava(void) {
   s.maxHp = s.hp = 50;
   const int cx = (int)s.cam.px, cy = (int)s.cam.py;
   uint8_t dm, db, dro;
-  while (world::height(cx, cy) > 0) world::mine(cx, cy, 100000, dm, db, dro);
+  while (world::height(cx, cy) > 1) world::mineTop(cx, cy, 100000, dm, db);
   world::place(cx, cy, world::B_LAVA);
   s.iframes = 400;
   s.burn = 0;
@@ -1048,8 +1796,7 @@ static void test_effects_do_not_disturb_the_simulation(void) {
 static void test_placing_against_a_side_face_builds_outward_not_upward(void) {
   State s = fresh();
   s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
-  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
-  s.inv[world::B_BRICK] = 40;
+  hold(s, world::B_BRICK, 40);
 
   // A wall ahead, tall enough that the resting aim meets its side rather than
   // sailing over its top.
@@ -1081,8 +1828,7 @@ static void test_placing_against_a_side_face_builds_outward_not_upward(void) {
 // what it was really guarding was pillaring straight up out of a wave.
 static void test_you_cannot_place_a_block_inside_yourself(void) {
   State s = fresh();
-  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
-  s.inv[world::B_BRICK] = 20;
+  hold(s, world::B_BRICK, 20);
   const uint16_t before = s.inv[world::B_BRICK];
 
   // Look as far down as the camera goes, so the crosshair lands underfoot.
@@ -1105,8 +1851,7 @@ static void test_you_cannot_place_a_block_inside_yourself(void) {
 // drain the inventory of a player who simply aimed badly.
 static void test_a_refused_placement_costs_nothing(void) {
   State s = fresh();
-  while (heldBlock(s) != world::B_BRICK) cycleBlock(s, 1);
-  s.inv[world::B_BRICK] = 7;
+  hold(s, world::B_BRICK, 7);
 
   Input down; down.lookDown = true;
   run(s, down, 60);
@@ -1178,13 +1923,29 @@ static void test_walling_yourself_in_still_works(void) {
   TEST_ASSERT_EQUAL_UINT8(world::NO_SURFACE,
                           world::surfaceUnder(px + 2, py, (int)s.feetZ));
 
-  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 6;
+  s.phase = PH_NIGHT; s.phaseTick = 0;
   Input idle;
+
+  // Measured only while the wall is standing. A wall is not permanent — a
+  // creeper answers it, which is test_walling_in_summons_creepers — so running
+  // a fixed thirty seconds and asserting nothing ever got close would be
+  // asserting that the siege does not work. What is being locked down here is
+  // narrower and is the thing that would break if STEP_UP ever moved: while
+  // two courses of stone are still two courses of stone, nothing climbs them.
+  auto intact = [&](void) {
+    for (int dy = -2; dy <= 2; ++dy)
+      for (int dx = -2; dx <= 2; ++dx) {
+        if (dx > -2 && dx < 2 && dy > -2 && dy < 2) continue;
+        if ((int)world::height(px + dx, py + dy) < (int)s.feetZ + 2) return false;
+      }
+    return true;
+  };
+
   float closest = 99.0f;
-  // Inside one night: past dawn the wave is gone, and sealedTicks decays
-  // because "nothing can reach you" stops being interesting with nothing alive.
-  for (int t = 0; t < 30 * TICK_HZ; ++t) {
+  int held = 0;
+  for (int t = 0; t < 30 * TICK_HZ && intact(); ++t) {
     run(s, idle, 1);
+    ++held;
     for (int i = 0; i < MAX_MOBS; ++i) {
       const Mob& m = s.mobs[i];
       if (!m.alive) continue;
@@ -1193,7 +1954,8 @@ static void test_walling_yourself_in_still_works(void) {
       if (d < closest) closest = d;
     }
   }
-  TEST_ASSERT_TRUE(closest > 1.5f);        // nothing reached the player
+  TEST_ASSERT_TRUE(held > TICK_HZ);        // it stood up for a while, at least
+  TEST_ASSERT_TRUE(closest > 1.5f);        // and nothing walked over it
   // And the game noticed, so turtling still summons the siege rather than
   // being a free win.
   // SEALED_TRIGGER is private to game.cpp; it is 2 seconds. Well past it.
@@ -1212,8 +1974,8 @@ static void test_a_mob_climbs_a_staircase_the_player_built(void) {
   // A flat run east, then four steps up to a platform.
   for (int i = 1; i <= 8; ++i)
     while ((int)world::height(px + i, py) > g) {
-      uint8_t m, b, o;
-      world::mine(px + i, py, world::height(px + i, py) - 1, 100000, m, b, o);
+      uint8_t m, b;
+      world::mine(px + i, py, world::height(px + i, py) - 1, 100000, m, b);
     }
   for (int i = 1; i <= 4; ++i)
     for (int k = 0; k < i; ++k) world::place(px + i, py, world::B_PLANK);
@@ -1231,7 +1993,7 @@ static void test_a_mob_climbs_a_staircase_the_player_built(void) {
   s.cam.z = (float)s.feetZ + raycast::EYE; s.eyeZ = s.cam.z;
   Mob& m = lone(s, MOB_ZOMBIE, (float)(px - 1) + 0.5f, (float)py + 0.5f);
   m.z = (uint8_t)world::groundAt(m.x, m.y);
-  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 0;
+  s.phase = PH_NIGHT; s.phaseTick = 0;
 
   Input idle;
   int peak = m.z;
@@ -1248,7 +2010,7 @@ static void test_a_mob_climbs_a_staircase_the_player_built(void) {
 static void test_mobs_spawn_on_the_ground_not_on_your_roof(void) {
   State s = fresh();
   survivable(s);
-  s.phase = PH_NIGHT; s.phaseTick = 0; s.spawnBudget = 12;
+  s.phase = PH_NIGHT; s.phaseTick = 0;
   Input idle;
   run(s, idle, 30 * TICK_HZ);
   int checked = 0;
@@ -1266,9 +2028,10 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_day_turns_to_night_on_schedule);
   RUN_TEST(test_daylight_stays_in_range);
-  RUN_TEST(test_dawn_offers_three_distinct_upgrades);
-  RUN_TEST(test_tick_is_inert_while_a_card_is_up);
-  RUN_TEST(test_upgrades_charge_and_apply);
+  RUN_TEST(test_dawn_just_turns_the_day_over);
+  RUN_TEST(test_the_night_keeps_topping_itself_up);
+  RUN_TEST(test_the_population_respects_its_cap);
+  RUN_TEST(test_every_kind_can_show_up_on_night_one);
   RUN_TEST(test_walls_stop_the_player_but_steps_do_not);
   RUN_TEST(test_eye_follows_the_ground);
   RUN_TEST(test_stepping_up_is_eased_not_teleported);
@@ -1279,9 +2042,8 @@ int main(int, char**) {
   RUN_TEST(test_mobs_spawn_on_the_ground_not_on_your_roof);
   RUN_TEST(test_cannot_build_under_yourself);
   RUN_TEST(test_building_empty_handed_reports_it);
-  RUN_TEST(test_mining_yields_and_upgrades_speed_it_up);
+  RUN_TEST(test_mining_is_faster_with_the_pickaxe_than_by_hand);
   RUN_TEST(test_tool_swings_only_while_working);
-  RUN_TEST(test_wave_size_scales_and_is_capped);
   RUN_TEST(test_dawn_clears_the_mobs);
   RUN_TEST(test_mobs_close_in_even_when_walled_in);
   RUN_TEST(test_mobs_hold_at_standoff);
@@ -1290,11 +2052,38 @@ int main(int, char**) {
   RUN_TEST(test_walling_in_summons_creepers);
   RUN_TEST(test_mining_files_drops_by_material);
   RUN_TEST(test_hotbar_cycles_and_wraps);
+  RUN_TEST(test_a_run_starts_with_empty_hands);
+  RUN_TEST(test_a_material_claims_a_slot_and_gives_it_back);
+  RUN_TEST(test_a_full_bar_spills_what_it_cannot_hold);
+  RUN_TEST(test_every_held_material_has_a_slot);
+  RUN_TEST(test_only_a_block_can_be_placed);
   RUN_TEST(test_building_places_the_held_block);
   RUN_TEST(test_placing_against_a_side_face_builds_outward_not_upward);
   RUN_TEST(test_you_cannot_place_a_block_inside_yourself);
   RUN_TEST(test_a_refused_placement_costs_nothing);
   RUN_TEST(test_crafting_consumes_and_produces);
+  RUN_TEST(test_bare_hands_can_chop_wood);
+  RUN_TEST(test_grid_matching_ignores_where_things_sit);
+  RUN_TEST(test_crafting_a_tool_spends_the_grid);
+  RUN_TEST(test_a_grid_you_cannot_pay_for_makes_nothing);
+  RUN_TEST(test_a_tool_needs_a_free_slot);
+  RUN_TEST(test_a_pickaxe_wears_one_point_per_block);
+  RUN_TEST(test_a_spent_tool_breaks_and_frees_its_slot);
+  RUN_TEST(test_a_better_pickaxe_digs_faster);
+  RUN_TEST(test_a_sword_wears_only_on_a_landed_hit);
+  RUN_TEST(test_a_diamond_sword_kills_in_one_blow);
+  RUN_TEST(test_the_book_fills_the_grid_only_when_affordable);
+  RUN_TEST(test_the_grid_cursor_reaches_every_stop);
+  RUN_TEST(test_cycling_only_touches_a_cell);
+  RUN_TEST(test_dropping_moves_one_item_to_the_floor);
+  RUN_TEST(test_holding_drop_repeats_but_a_tap_does_not);
+  RUN_TEST(test_a_fresh_drop_cannot_be_grabbed_back_instantly);
+  RUN_TEST(test_walking_over_a_drop_collects_it);
+  RUN_TEST(test_a_full_bar_leaves_a_drop_where_it_lies);
+  RUN_TEST(test_a_dropped_tool_keeps_its_durability);
+  RUN_TEST(test_a_drop_settles_on_the_surface);
+  RUN_TEST(test_a_drop_expires);
+  RUN_TEST(test_the_drop_array_never_refuses_a_throw);
   RUN_TEST(test_patch_heals_without_overhealing);
   RUN_TEST(test_torches_keep_the_ground_clear);
   RUN_TEST(test_lava_burns_on_a_timer);

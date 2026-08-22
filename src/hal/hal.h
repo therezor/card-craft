@@ -32,16 +32,45 @@ struct Buttons {
   // no keys to spare leaves these false and plays at the fixed downward tilt,
   // which is exactly how the game shipped. Nothing depends on them.
   bool lookUp = false, lookDown = false;
+  // Held, and passed straight through to game::Input. The repeat that empties a
+  // stack is paced by the simulation, not here. A board with no key to spare
+  // leaves it false and simply cannot throw anything away.
+  bool drop = false;
 
   // Down-edges, true for exactly one frame. Menus read these, so a held key
   // cannot rip through a three-item card in one press.
   bool leftEdge = false, rightEdge = false;
   bool fwdEdge  = false, backEdge  = false;
-  bool actEdge  = false, startEdge = false;
-  bool pauseEdge = false;
+  bool actEdge  = false;
+  // The two keys every card is driven by, alongside the four arrows. Named for
+  // what they mean rather than for where they started: this used to be
+  // startEdge (title only) and pauseEdge (play only), and every screen picked
+  // its own key for "yes" and "get me out of here" -- E confirmed here, W
+  // backed out there, D committed on the craft card. One meaning, one key.
+  bool confirmEdge = false;   // ENTER
+  bool cancelEdge  = false;   // ESC -- one level up, whatever level that is
+
+  // The same four arrow keys as the movement edges above, under the names a
+  // card reads them by. Menus navigate; the world moves. They are the same
+  // switches because the Cardputer has one arrow cluster, but they are not the
+  // same idea, and a card asking for "forward" to mean "up the list" is how
+  // the old screens ended up each inventing their own answer.
+  bool navUp = false, navDown = false, navLeft = false, navRight = false;
+  // The build key's own edge. Held state alone was enough while BUILD only ever
+  // placed blocks, which is a thing you hold down; the craft card needs it as a
+  // discrete "commit", and a held key would craft once a frame. A board that
+  // does not have a build key leaves it false and simply cannot commit a craft
+  // from the grid -- the recipe book still crafts on its own key.
+  bool buildEdge = false;
   // Beyond the four-button core. A board without these keeps one block type
   // and no crafting bench, which is a smaller game but still a whole one.
   bool cycleEdge = false, craftEdge = false;
+
+  // A hotbar slot named outright: 0 for none, 1..9 for the number key pressed
+  // this frame. Cycling with one key works and is what a board with no number
+  // row is left with, but nine presses to reach the slot you want is nine
+  // presses, and this is the row Minecraft trained everyone to reach for.
+  uint8_t slotPick = 0;
 };
 
 // Names of the physical controls, so on-screen hints match the hardware
@@ -51,10 +80,11 @@ struct Caps {
   const char* kMove;    // e.g. "^ v"
   const char* kAct;     // e.g. "E"
   const char* kBuild;   // e.g. "D"
-  const char* kStart;   // e.g. "E"
-  const char* kPause;   // e.g. "TAB"
+  const char* kConfirm; // e.g. "ENTER"
+  const char* kBack;    // e.g. "ESC"
   const char* kCycle;   // e.g. "S"
   const char* kCraft;   // e.g. "W"
+  const char* kDrop;    // e.g. "Q", or nullptr where the board has no drop key
   const char* kLook;    // e.g. "R F", or nullptr where the board has no pitch
 };
 

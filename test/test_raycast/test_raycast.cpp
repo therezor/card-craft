@@ -137,17 +137,18 @@ static void test_a_cell_dug_to_nothing_still_has_a_floor(void) {
   init();
   world::generate(1234);
   const int px = 32, py = 20;
-  uint8_t m, bl, o;
+  uint8_t m, bl;
   for (int y = py - 6; y <= py + 8; ++y)
     for (int x = px - 6; x <= px + 6; ++x) {
       if (world::isBorder(x, y)) continue;
-      while (world::height(x, y) > 0) world::mine(x, y, 100000, m, bl, o);
+      while (world::height(x, y) > 1) world::mineTop(x, y, 100000, m, bl);
     }
-  TEST_ASSERT_EQUAL_INT(0, world::height(px, py));
+  // One course, not none: the floor of the world is a real block of bedrock.
+  TEST_ASSERT_EQUAL_INT(1, world::height(px, py));
 
   Camera c;
   c.px = px + 0.5f; c.py = py + 0.5f;
-  c.z  = 0.0f + EYE;                       // standing on the quarry floor
+  c.z  = 1.0f + EYE;                       // standing on the quarry floor
   setAngle(c, 1.5707963f);
 
   Span spans[MAX_SPANS];
@@ -207,11 +208,11 @@ static void test_the_visible_extent_is_clipped_but_the_geometry_is_not(void) {
   init();
   world::generate(1234);
   const int px = 32, py = 20;
-  uint8_t m, bl, o;
+  uint8_t m, bl;
   for (int y = py - 4; y <= py + 14; ++y)
     for (int x = px - 8; x <= px + 8; ++x) {
       if (world::isBorder(x, y)) continue;
-      while (world::height(x, y) > world::GROUND) world::mine(x, y, 100000, m, bl, o);
+      while (world::height(x, y) > world::GROUND) world::mineTop(x, y, 100000, m, bl);
       while (world::height(x, y) < world::GROUND) world::place(x, y, world::B_DIRT);
     }
   for (int x = px - 6; x <= px + 6; ++x)
@@ -254,11 +255,11 @@ static void test_a_run_block_can_be_the_selection(void) {
   init();
   world::generate(555);
   const int px = 32, py = 20;
-  uint8_t m, bl, o;
+  uint8_t m, bl;
   for (int y = py - 4; y <= py + 12; ++y)
     for (int x = px - 6; x <= px + 6; ++x) {
       if (world::isBorder(x, y)) continue;
-      while (world::height(x, y) > world::GROUND) world::mine(x, y, 100000, m, bl, o);
+      while (world::height(x, y) > world::GROUND) world::mineTop(x, y, 100000, m, bl);
       while (world::height(x, y) < world::GROUND) world::place(x, y, world::B_DIRT);
     }
   const int tx = px, ty = py + 5;
@@ -837,6 +838,78 @@ static void test_pick_returns_the_face_it_came_in_through(void) {
   TEST_ASSERT_TRUE(hit.z >= 0 && hit.z < (int)world::height(wx, wy));
 }
 
+// The bug this locks down, and the reason pick() is a mask scan: a block with
+// nothing under it could not be mined. pick() treated every floating run as an
+// opaque blocker and returned NO hit at all, so a bridge deck, a roof, a tree
+// crown or anything the player had built out over air was un-aimable — and it
+// only ever consulted the lowest run, so a second deck above the first was not
+// even considered.
+static void test_a_block_hanging_on_nothing_can_be_picked_and_mined(void) {
+  init();
+  world::generate(4242);
+  const int cx = world::W / 2, cy = world::H / 2;
+
+  // Three cells east, dig the column down and leave one block hanging where
+  // its top used to be. Nothing holds it up in any direction.
+  const int fx = cx + 3, fy = cy;
+  uint8_t dm, db;
+  while (world::height(fx, fy) > world::GROUND - 3)
+    world::mineTop(fx, fy, 100000, dm, db);
+  TEST_ASSERT_EQUAL_INT(world::GROUND - 3, (int)world::height(fx, fy));
+  TEST_ASSERT_EQUAL_UINT8(world::PLACE_OK,
+                          world::place(fx, fy, world::GROUND, world::B_BRICK));
+  TEST_ASSERT_TRUE(world::solidAt(fx, fy, world::GROUND));
+  TEST_ASSERT_FALSE(world::solidAt(fx, fy, world::GROUND - 1));   // truly hanging
+
+  // The resting tilt meets that height about three cells out, so the ray walks
+  // into the block's side.
+  Camera c = atSpawn(0.0f);       // +x
+  Hit hit;
+  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));
+  TEST_ASSERT_EQUAL_INT(fx, hit.x);
+  TEST_ASSERT_EQUAL_INT(fy, hit.y);
+  TEST_ASSERT_EQUAL_INT(world::GROUND, hit.z);
+
+  // And what pick() named, mine() takes off. The two halves of the bug: the
+  // world was always willing to break this block, nothing could ever aim at it.
+  world::MineResult r = world::MINE_PROGRESS;
+  for (int i = 0; i < 4000 && r != world::MINE_BROKE; ++i)
+    r = world::mine(hit.x, hit.y, hit.z, world::EFFORT_PER_TICK, dm, db);
+  TEST_ASSERT_EQUAL_UINT8(world::MINE_BROKE, r);
+  TEST_ASSERT_EQUAL_UINT8(world::B_BRICK, dm);
+  TEST_ASSERT_FALSE(world::solidAt(fx, fy, world::GROUND));
+}
+
+// The other direction. Pitched up, the ray climbs, and what it meets first is
+// the underside of whatever is overhead — a face pick() had no way to name
+// while it assumed a descent. Naming it is what lets a player build onto the
+// belly of a bridge, because world::place() has always taken an exact z.
+static void test_looking_up_at_a_deck_reports_its_underside(void) {
+  init();
+  world::generate(4242);
+  const int cx = world::W / 2, cy = world::H / 2;
+
+  const int deckZ = 12;
+  for (int x = cx; x <= cx + 6; ++x)
+    for (int y = cy - 1; y <= cy + 1; ++y)
+      world::devSlab(x, y, deckZ, deckZ + 1, world::B_STONE);
+
+  Camera c = atSpawn(0.0f);       // +x
+  setPitch(c, VIEW_H / 2 + 160);  // slope -1.0: one block up per cell out
+  TEST_ASSERT_TRUE(c.aimSlope < -0.9f && c.aimSlope > -1.1f);
+
+  Hit hit;
+  TEST_ASSERT_TRUE(pick(c, 5.5f, hit));
+  TEST_ASSERT_EQUAL_INT(deckZ, hit.z);
+  TEST_ASSERT_EQUAL_UINT8(F_BOT, hit.face);
+  TEST_ASSERT_EQUAL_INT(0,  hit.nx);
+  TEST_ASSERT_EQUAL_INT(0,  hit.ny);
+  TEST_ASSERT_EQUAL_INT(-1, hit.nz);
+  // The outward normal points at a cell a block can go in, which is the whole
+  // reason the face is carried at all.
+  TEST_ASSERT_FALSE(world::solidAt(hit.x, hit.y, hit.z + hit.nz));
+}
+
 // The reach derivation, as an assertion rather than a comment. EYE / AIM_SLOPE
 // is where the crosshair meets flat ground at the resting tilt, and REACH in
 // game.cpp is chosen to clear it. If TILT or EYE is ever retuned, this is the
@@ -939,7 +1012,26 @@ static void test_an_unclipped_merged_span_starts_on_a_tile(void) {
   init();
   world::generate(1234);
   const int cx = world::W / 2, cy = world::H / 2;
-  for (int i = 0; i < 5; ++i) world::place(cx + 2, cy, world::B_BRICK);
+
+  // A scene built rather than found. A merged run only yields an UNCLIPPED span
+  // when the top of it lands on the panel, and the resting tilt leaves only
+  // HORIZON rows of sky — 29 of them — so a run's top has to sit under
+  // 29 * d / PROJ blocks above the eye to be in frame at all. The five-high
+  // pillar two cells away this used to rely on breaks that by a mile: it fills
+  // the screen and is clipped every time. It passed anyway because the natural
+  // terrain out at fifteen-odd cells supplied unclipped spans of its own, and
+  // pulling the fog in to MAX_DIST took that away.
+  //
+  // So: flatten a corridor and stand one two-block cap at the far end of it.
+  // Nine cells out and 0.8 of a block above the eye, which is comfortably
+  // inside both the sky and the draw distance.
+  uint8_t m, b;
+  for (int y = cy - 3; y <= cy + 3; ++y)
+    for (int x = cx - 1; x <= cx + 10; ++x) {
+      while (world::height(x, y) > world::GROUND) world::mineTop(x, y, 100000, m, b);
+      while (world::height(x, y) < world::GROUND) world::place(x, y, world::B_DIRT);
+    }
+  for (int k = 0; k < 2; ++k) world::place(cx + 9, cy, world::B_BRICK);
 
   Camera c = atSpawn(0.0f);
   Span spans[MAX_SPANS];
@@ -988,6 +1080,8 @@ int main(int, char**) {
   RUN_TEST(test_an_unclipped_merged_span_starts_on_a_tile);
   RUN_TEST(test_flat_faces_carry_no_texture_step);
   RUN_TEST(test_pick_returns_the_face_it_came_in_through);
+  RUN_TEST(test_a_block_hanging_on_nothing_can_be_picked_and_mined);
+  RUN_TEST(test_looking_up_at_a_deck_reports_its_underside);
   RUN_TEST(test_flat_ground_at_rest_is_within_reach);
   RUN_TEST(test_reach_is_measured_along_the_ray);
   RUN_TEST(test_the_crosshair_is_always_inside_the_selection);

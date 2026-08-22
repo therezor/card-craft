@@ -28,7 +28,19 @@
 
 namespace render {
 
-constexpr int BANDS   = 16;         // distance bands; band = distQ8 >> 8, i.e. 1/cell
+// Distance bands; band = distQ8 >> 8, i.e. one band per cell. This is the fog:
+// a block at BANDS cells is entirely fog colour, and raycast::MAX_DIST is set
+// one cell past it so the walker stops exactly where the haze finishes.
+//
+// Ten rather than sixteen. See raycast::MAX_DIST for what that measured; the
+// short version is that the frame time only responds once the fog closes inside
+// where a column typically finishes painting, and sixteen was nowhere near it.
+//
+// It pays twice regardless: RUNGS sizes s_shade, s_edge, s_bevel and
+// s_shadeSel, so the shorter ramp hands back about six kilobytes of internal
+// RAM, which on this board is margin against the two framebuffers rather than a
+// rounding error.
+constexpr int BANDS   = 10;
 
 // Rungs below band 0, where a block is brighter than the ambient light of the
 // hour rather than merely un-fogged.
@@ -184,10 +196,16 @@ static uint16_t s_shadeSel[raycast::F_COUNT][RUNGS][TEXELS];
 static int      s_selShadeMat = -1;
 static int      s_selQuantum = -2;
 
-// The outline colour, per material. One constant dark value could not work:
-// against snow (luminance 241) a near-black box is right, and against wood (67)
-// or coal (80) it is invisible. Chosen by luminance so the box always reads.
-static uint16_t s_selEdge[world::B_COUNT];
+// The outline colour. One value for every material and every hour: the box is
+// the same box wherever it lands, and Minecraft draws it black.
+//
+// It used to be picked per material by luminance — near-black on snow, white on
+// wood or coal — so mining across a snow line changed the colour of the
+// highlight halfway through and two blocks side by side got two different
+// boxes. Reading the outline as "this is the block" is worth more than reading
+// it against every possible background; at night it is faint, which is also
+// true of the game this is imitating.
+constexpr uint16_t C_SEL_EDGE = pack(8, 8, 10);
 
 // Topmost painted row per column, sampled at ZBUCKETS distances. drawWorld
 // fills it; drawMobs clips billboards against it. 1.9 KB to let a mob be
@@ -200,7 +218,6 @@ static uint8_t s_limit[raycast::VIEW_W][raycast::ZBUCKETS];
 // may look at its neighbours.
 static int16_t s_selVis0[raycast::VIEW_W], s_selVis1[raycast::VIEW_W];
 static int16_t s_selGeo0[raycast::VIEW_W], s_selGeo1[raycast::VIEW_W];
-static uint8_t s_selMat[raycast::VIEW_W];
 
 static uint8_t s_slabHi[raycast::VIEW_W][raycast::ZBUCKETS];
 static uint8_t s_slabLo[raycast::VIEW_W][raycast::ZBUCKETS];
@@ -356,21 +373,6 @@ void shadeFor(float dl, int horizon) {
   // grey-blue before the ambient multiplier is what separates "dark" from
   // "unlit", and it costs one lerp per material per frame.
   const float night = (1.0f - dl) * 0.30f;
-
-  // The outline is picked per material, by luminance. Against a pale block a
-  // dark rule reads and a bright one disappears; against a dark block it is the
-  // other way round. A single constant was wrong for half the palette, which is
-  // why the box looked like a black gouge on grass and vanished on snow.
-  //
-  // Judged on the block as it will actually be drawn, not on its entry in the
-  // table: grass is a mid-tone at noon and nearly black at midnight, and an
-  // outline chosen from the daylight colour is invisible for half the game.
-  for (int b = 0; b < world::B_COUNT; ++b) {
-    const world::BlockInfo& bi = world::info((uint8_t)b);
-    const int lum = (bi.r * 77 + bi.g * 151 + bi.b * 28) >> 8;
-    const int lit = world::emission((uint8_t)b) ? lum : (int)(lum * s_amb);
-    s_selEdge[b] = (lit > 110) ? pack(12, 10, 18) : pack(246, 250, 255);
-  }
 
   // Everything above is per-frame: it is a handful of lerps and a 135-entry
   // gradient, and the gradient has to be rebuilt anyway because it shears with
@@ -529,6 +531,13 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
         // as one at the far clip. Stepping u and v linearly down the span would
         // have been cheaper still and visibly wrong up close, where a single
         // cell can fill half the panel.
+        // A ceiling is a floor above your head. The same plane, the same
+        // arithmetic, and the only difference is that dz and (row - horizon)
+        // are both negative — so their ratio, which is the only thing that
+        // matters, comes out identical. Undersides used to take the flat-colour
+        // path instead, and the underside of a bridge was one grey rectangle.
+        const bool ceiling = (s.face == raycast::F_BOT);
+
         const float dz = cam.z - (float)s.zTop;
         const float kx = rdx * dz * raycast::PROJ * (float)textures::TEX_N;
         const float ky = rdy * dz * raycast::PROJ * (float)textures::TEX_N;
@@ -538,10 +547,25 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
         const uint16_t* rowA = tbl[band];
         const uint16_t* rowB = tbl[band + (frac ? 1 : 0)];
 
-        // Rows above the horizon are not part of a floor, and 1/0 is not a
-        // number. Skipped once here rather than tested on every pixel.
-        int y = s.y0, r = s.y0 - horizon;
-        if (r < 1) { const int k = 1 - r; y += k; p += k * W; r = 1; }
+        // The signed reciprocal of the row's distance from the horizon. The
+        // table only holds positives, so a ceiling reads it by magnitude and
+        // negates; the clamp at 1 keeps the row ON the horizon, where 1/0 is
+        // not a number, out of the arithmetic.
+        auto invAt = [](int row) -> float {
+          const int a = row < 0 ? -row : row;
+          const int i = a < 1 ? 1 : (a < INV_ROWS ? a : INV_ROWS - 1);
+          return row < 0 ? -s_invRow[i] : s_invRow[i];
+        };
+
+        // Rows on the wrong side of the horizon are not part of this face.
+        // Clipped once here rather than tested on every pixel.
+        int y = s.y0, yEnd = s.y1, r = s.y0 - horizon;
+        if (ceiling) {
+          if (yEnd > horizon) yEnd = horizon;
+          if (y >= yEnd) return;
+        } else {
+          if (r < 1) { const int k = 1 - r; y += k; p += k * W; r = 1; }
+        }
 
         // Two paths, and the split is the whole reason a textured floor is
         // affordable.
@@ -564,33 +588,33 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
         constexpr int SEG = 8;
 
         #define FLOOR_SAMPLE_AT(row) \
-            ({ const float iv = s_invRow[(row) < INV_ROWS ? (row) : INV_ROWS - 1]; \
+            ({ const float iv = invAt(row); \
                const int su = (int)(bx + kx * iv) & 15; \
                const int sv = (int)(by + ky * iv) & 15; \
                tex[(su << 4) | sv]; })
 
-        if (s.y1 - y <= 4) {
+        if (yEnd - y <= 4) {
           // One texel for the whole span, taken from its middle.
-          const uint8_t t = FLOOR_SAMPLE_AT(r + ((s.y1 - y) >> 1));
+          const uint8_t t = FLOOR_SAMPLE_AT(r + ((yEnd - y) >> 1));
           if (frac == 0) {
             const uint16_t c = rowA[t];
-            for (; y < s.y1; ++y, p += W) *p = c;
+            for (; y < yEnd; ++y, p += W) *p = c;
           } else {
             const uint16_t cA = rowA[t], cB = rowB[t];
             int par = y & 1;
-            for (; y < s.y1; ++y, p += W) {
+            for (; y < yEnd; ++y, p += W) {
               *p = (frac > thX + (par ? 4 : 0)) ? cB : cA;
               par ^= 1;
             }
           }
         } else {
-          float inv = s_invRow[r];
+          float inv = invAt(r);
           int32_t u = (int32_t)((bx + kx * inv) * 65536.0f);
           int32_t v = (int32_t)((by + ky * inv) * 65536.0f);
           int par = y & 1;
-          while (s.y1 - y >= SEG) {
+          while (yEnd - y >= SEG) {
             const int r2 = r + SEG;
-            inv = s_invRow[r2 < INV_ROWS ? r2 : INV_ROWS - 1];
+            inv = invAt(r2);
             const int32_t u2 = (int32_t)((bx + kx * inv) * 65536.0f);
             const int32_t v2 = (int32_t)((by + ky * inv) * 65536.0f);
             const int32_t du = (u2 - u) >> 3;      // SEG is 8, so this is /SEG
@@ -609,10 +633,10 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
           }
           // Tail: fewer than SEG rows left, so one sample rather than another
           // fix-up pair.
-          if (y < s.y1) {
-            const uint8_t t = FLOOR_SAMPLE_AT(r + ((s.y1 - y) >> 1));
+          if (y < yEnd) {
+            const uint8_t t = FLOOR_SAMPLE_AT(r + ((yEnd - y) >> 1));
             const uint16_t cA = rowA[t], cB = rowB[t];
-            for (; y < s.y1; ++y, p += W) {
+            for (; y < yEnd; ++y, p += W) {
               *p = (frac && frac > thX + (par ? 4 : 0)) ? cB : cA;
               par ^= 1;
             }
@@ -654,7 +678,6 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
     s_selVis1[x] = res.selY1;
     s_selGeo0[x] = res.selGeoY0;
     s_selGeo1[x] = res.selGeoY1;
-    s_selMat[x]  = res.selMat;
 
     for (int k = 0; k < raycast::ZBUCKETS; ++k) {
       s_limit[x][k]  = res.limit[k];
@@ -734,7 +757,8 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
             par ^= 1;
           }
         }
-      } else if (s.face == raycast::F_TOP && s.y1 - s.y0 > 1) {
+      } else if ((s.face == raycast::F_TOP || s.face == raycast::F_BOT)
+                 && s.y1 - s.y0 > 1) {
 #ifdef DEV_SERIAL
         // The rows drawFloorSpan will actually walk: it skips everything at or
         // above the horizon, where 1/(row - horizon) is not a number.
@@ -884,13 +908,11 @@ static void drawSelBox(int selX, int selY) {
   uint16_t* base = raw();
 
   int bx0 = W, bx1 = -1, by0 = H, by1 = -1;
-  uint16_t crackCol = 0;
 
   for (int x = 0; x < W; ++x) {
     const int v0 = s_selVis0[x], v1 = s_selVis1[x];
     if (v0 >= v1) continue;                       // nothing of it in this column
-    const uint16_t col = s_selEdge[s_selMat[x]];
-    crackCol = col;
+    constexpr uint16_t col = C_SEL_EDGE;
     if (x < bx0) bx0 = x;
     if (x > bx1) bx1 = x;
     if (v0 < by0) by0 = v0;
@@ -940,7 +962,7 @@ static void drawSelBox(int selX, int selY) {
     const uint8_t* g = kGrain + ((((int)x >> 1) & 7) << 3);
     uint16_t* col = base + x;
     for (int y = v0 + 1; y < v1 - 1; y += 2)
-      if (((int)g[((int)y >> 1) & 7] << 6) + 40 < dmg) col[y * W] = crackCol;
+      if (((int)g[((int)y >> 1) & 7] << 6) + 40 < dmg) col[y * W] = C_SEL_EDGE;
   }
 }
 
@@ -1008,8 +1030,19 @@ static void skyDisc(const raycast::Camera& cam, float bearing, float elev,
       if (x < 0 || x >= W) continue;
       const int dx = x - cx, dy = y - cy;
       if (dx * dx + dy * dy > r2) continue;
-      // Only where the terrain left sky.
+      // Only where the world left sky. Against EVERYTHING, at the farthest
+      // bucket, because a sky object is further away than anything that could
+      // stand in front of it.
+      //
+      // limit[] is deliberately ground-only — a mob standing under a bridge is
+      // plainly visible and must not be clipped by the deck over its head — so
+      // clipping the sun against limit[] alone let it shine straight through
+      // every bridge, roof and tree crown on the map. The slab band is the
+      // other half of the column, and a sky object has to answer to both.
       if (y >= (int)s_limit[x][raycast::ZBUCKETS - 1]) continue;
+      const int shi = (int)s_slabHi[x][raycast::ZBUCKETS - 1];
+      const int slo = (int)s_slabLo[x][raycast::ZBUCKETS - 1];
+      if (shi < slo && y >= shi && y < slo) continue;
       raw()[y * W + x] = col;
     }
   }
@@ -1112,6 +1145,11 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     const float tx = invDet * (cam.dy * spx - cam.dx * spy);
     const float ty = invDet * (-cam.planeY * spx + cam.planeX * spy);
     if (ty < 0.15f) continue;                       // behind, or on the lens
+    // Past the fog there is nothing to see: a mob out there is already banded
+    // to the fog colour and drawing it is a sprite's worth of work to paint the
+    // background over itself. The cull only became worth writing when the fog
+    // came in — at seventeen cells almost nothing was ever beyond it.
+    if (ty > raycast::MAX_DIST) continue;
     Draw& d = list[n++];
     d.depth  = ty;
     d.sx     = (float)W * 0.5f * (1.0f + tx / ty);
@@ -1434,6 +1472,107 @@ void drawParticles(const raycast::Camera& cam) {
   }
 }
 
+// Metal for the tool head, darkest shade first, one ramp per tier.
+//
+// There were six of these once, one per mining upgrade, so buying one was
+// visible in the player's hand rather than only on a card the player had
+// already closed. The upgrades went away and this collapsed to a single iron
+// ramp; tiers are back, and they are back in the same place, because a tier
+// you cannot see in your own hand is a number in a menu.
+//
+// Wood is deliberately not the haft's brown: the haft is already 'e'..'g' in
+// the art, and a wooden head in the same brown would erase the silhouette that
+// says which end does the work. It is a paler, greyer wood instead.
+static const uint8_t kMetal[game::TT_COUNT][4][3] = {
+  { {  84,  60,  38 }, { 124,  92,  58 }, { 162, 126,  84 }, { 198, 166, 124 } },  // wood
+  { {  62,  64,  70 }, {  96, 100, 108 }, { 134, 138, 146 }, { 176, 180, 188 } },  // stone
+  { {  74,  78,  86 }, { 126, 131, 140 }, { 176, 181, 190 }, { 222, 226, 232 } },  // iron
+  { {  28, 118, 122 }, {  58, 176, 178 }, { 110, 226, 224 }, { 196, 250, 248 } },  // diamond
+};
+
+// ---- dropped items ----------------------------------------------------------
+
+// A small cube, billboarded. Not a sprite: at the size these are drawn -- a few
+// pixels a side past four or five cells -- the art would be one colour anyway,
+// and taking the block's own colour means a new material needs nothing here.
+//
+// It bobs. A stationary flat square on ground of a similar colour is genuinely
+// hard to find, and the bob is what separates "an item is lying there" from a
+// texture artefact, for about six instructions a frame.
+void drawDrops(const game::State& s, const raycast::Camera& cam) {
+  const float det = cam.planeX * cam.dy - cam.dx * cam.planeY;
+  if (fabsf(det) < 1e-6f) return;
+  const float invDet = 1.0f / det;
+  uint16_t* base = raw();
+
+  for (int i = 0; i < game::MAX_DROPS; ++i) {
+    const game::Drop& d = s.drops[i];
+    if (!d.alive) continue;
+
+    // Bobbing is driven by the item's own remaining life, so two drops side by
+    // side are out of phase instead of pulsing as one block.
+    const float bob = d.rest
+        ? 0.055f * sinf((float)d.life * 0.06f + (float)i)
+        : 0.0f;
+
+    const float spx = d.x - cam.px, spy = d.y - cam.py;
+    const float tx = invDet * (cam.dy * spx - cam.dx * spy);
+    const float ty = invDet * (-cam.planeY * spx + cam.planeX * spy);
+    if (ty < 0.20f) continue;
+    const float invD = (float)raycast::PROJ / ty;
+
+    const int cx = (int)((float)W * 0.5f * (1.0f + tx / ty));
+    const int cy = (int)((float)cam.horizon
+                         + (cam.z - (d.z + 0.22f + bob)) * invD);
+
+    int bucket = (int)(ty / raycast::ZBUCKET_SPAN);
+    if (bucket >= raycast::ZBUCKETS) bucket = raycast::ZBUCKETS - 1;
+    if (bucket < 0) bucket = 0;
+
+    int sz = (int)(0.32f * invD);
+    if (sz < 2) sz = 2;
+    if (sz > 26) sz = 26;
+
+    int band = (int)ty;
+    if (band >= BANDS) band = BANDS - 1;
+    if (band < 0) band = 0;
+    const int lit = (int)world::light((int)d.x, (int)d.y);
+
+    // A tool takes its tier's mid metal; a block takes its own colour. Both go
+    // through the world's shading, or an item would sit at full daylight
+    // brightness after dark and read as a lamp.
+    uint8_t r, g, b;
+    if (game::isTool(d.item)) {
+      const uint8_t* m = kMetal[game::toolTier(d.item)][2];
+      r = m[0]; g = m[1]; b = m[2];
+    } else {
+      const world::BlockInfo& bi = world::info(d.item);
+      r = bi.r; g = bi.g; b = bi.b;
+    }
+    const uint16_t body = shadeMob(r, g, b, band, lit);
+    // A lid two shades up, so the thing reads as a cube with a top rather than
+    // as a flat chip standing on the ground.
+    auto up = [](uint8_t v) { const int q = v + 46; return (uint8_t)(q > 255 ? 255 : q); };
+    const uint16_t lid = shadeMob(up(r), up(g), up(b), band, lit);
+    const int lidH = sz / 4;
+
+    const int x0 = cx - sz / 2, x1 = x0 + sz;
+    const int y0 = cy - sz / 2, y1 = y0 + sz;
+    for (int x = x0 < 0 ? 0 : x0; x < (x1 > W ? W : x1); ++x) {
+      // The clip mobs and particles use: the ground cut, then the slab band.
+      const int lim = (int)s_limit[x][bucket];
+      const int cut = y1 > lim ? lim : y1;
+      const int hi = (int)s_slabHi[x][bucket];
+      const int lo = (int)s_slabLo[x][bucket];
+      for (int y = y0 < 0 ? 0 : y0; y < cut; ++y) {
+        if (y >= H) break;
+        if (hi < lo && y >= hi && y < lo) continue;
+        base[y * W + x] = (y < y0 + lidH) ? lid : body;
+      }
+    }
+  }
+}
+
 // ---- the tool ---------------------------------------------------------------
 //
 // The pickaxe is authored pixel art now (tools/make-sprites.py), not a shape
@@ -1462,23 +1601,20 @@ static const SwingFrame kSwing[game::TOOL_ANIM] = {
   { -2,   2,  -4 }, { -1,   1,  -2 }, {  0,   1,  -1 }, {  0,   0,   0 },
 };
 
-// Metal for each pickaxe tier, darkest shade first. The head changes colour as
-// the mining upgrade is bought, so an upgrade is visible in the player's hand
-// rather than only on a card they have already closed.
-// Grey at tier zero, not wood. A head the colour of the haft it is fixed to
-// reads as one bent stick however good the silhouette is — the metal is most of
-// what says "pickaxe" before the shape gets a chance to.
-static const uint8_t kTier[6][4][3] = {
-  { {  62,  64,  70 }, { 104, 108, 114 }, { 148, 152, 158 }, { 196, 200, 206 } }, // stone
-  { {  74,  78,  86 }, { 126, 131, 140 }, { 176, 181, 190 }, { 222, 226, 232 } }, // iron
-  { {  96,  54,  32 }, { 158,  94,  54 }, { 204, 132,  80 }, { 238, 178, 128 } }, // copper
-  { { 128,  94,  20 }, { 190, 150,  38 }, { 232, 196,  74 }, { 252, 230, 150 } }, // gold
-  { {  30, 116, 118 }, {  56, 176, 176 }, { 110, 216, 214 }, { 180, 244, 240 } }, // diamond
-  { { 116,  40, 140 }, { 168,  74, 198 }, { 208, 128, 238 }, { 238, 190, 250 } }, // arcane
-};
 
-void drawTool(const game::State& s) {
-  const SwingFrame& f = kSwing[s.toolPhase % game::TOOL_ANIM];
+// Both tools go through the same blit: same size, same palette layout, and the
+// art files agree that 'a'..'d' are the four metal steps. Only the texel array
+// differs, so the caller picks that and everything below is shared.
+// The shared blit below indexes both families through the pickaxe's constants,
+// which is only sound while the two agree. Say so here rather than discovering
+// it as a torn sprite: make-sprites.py is free to resize a family, and this is
+// the line that stops it doing so silently.
+static_assert(sprites::SWORD_W == sprites::PICK_W &&
+              sprites::SWORD_H == sprites::PICK_H &&
+              sprites::SWORD_COLOURS == sprites::PICK_COLOURS,
+              "sword and pick art must share dimensions and palette size");
+
+static void drawToolArt(const SwingFrame& f, uint8_t kind, uint8_t tier) {
 
   // Two panel pixels per texel, against three for the 24x24 art this replaced.
   // The art is 32x32 now, so the same three would have put a 96-pixel tool on a
@@ -1501,16 +1637,17 @@ void drawTool(const game::State& s) {
   // takes the head off the bottom of the screen entirely.
   const int ay = 108 + (int)f.dy * 3 / 2;
 
-  const int tier = s.miningLevel > 5 ? 5 : s.miningLevel;
-
   // Palette for this frame: the art's own colours, with the four metal steps
-  // swapped for the tier's. Twelve entries, built once per frame.
+  // swapped for the head's. Twelve entries, built once per frame.
+  const bool sword = (kind == game::TK_SWORD);
+  const uint8_t (*art)[32] = sword ? sprites::kSword[0] : sprites::kPick[0];
+  const uint8_t (*srcPal)[3] = sword ? sprites::kSwordPal : sprites::kPickPal;
+
   uint16_t pal[sprites::PICK_COLOURS];
   for (int i = 1; i < sprites::PICK_COLOURS; ++i)
-    pal[i] = pack(sprites::kPickPal[i][0], sprites::kPickPal[i][1],
-                  sprites::kPickPal[i][2]);
+    pal[i] = pack(srcPal[i][0], srcPal[i][1], srcPal[i][2]);
   for (int k = 0; k < 4; ++k)                      // 'a'..'d' are the metal
-    pal[2 + k] = pack(kTier[tier][k][0], kTier[tier][k][1], kTier[tier][k][2]);
+    pal[2 + k] = pack(kMetal[tier][k][0], kMetal[tier][k][1], kMetal[tier][k][2]);
 
   // The swing leans as well as moves, which it did not used to.
   //
@@ -1563,10 +1700,123 @@ void drawTool(const game::State& s) {
       const unsigned sy = (unsigned)((v >> 16) + hh);
       if (sx >= (unsigned)sprites::PICK_W || sy >= (unsigned)sprites::PICK_H)
         continue;
-      const uint8_t val = sprites::kPick[0][sy][sx];
+      const uint8_t val = art[sy][sx];
       if (val) row[px] = pal[val];
     }
   }
+}
+
+// A block in the hand. Not art: a cube drawn from the material's own colour,
+// three faces of it, on the same swing arc the pickaxe rides. Authoring thirteen
+// held-block sprites to say "you are holding dirt" would be thirteen things to
+// keep in step with the palette, and the palette is already the answer.
+static void drawHeldBlock(const SwingFrame& f, uint8_t mat) {
+  // The material's OWN texture, sampled the way a wall samples it, not a flat
+  // fill of its average colour. A held block that is a plain orange square
+  // while the wall in front of you is patterned brick reads as a different
+  // material — and the whole job of the thing in your hand is to tell you what
+  // you are about to place.
+  const int m = mat < world::B_COUNT ? mat : (int)world::B_STONE;
+  auto texel = [&](int u, int v, int shift) {
+    const uint8_t k = textures::kTexel[m][u & (textures::TEX_N - 1)]
+                                        [v & (textures::TEX_N - 1)];
+    const uint8_t* c = textures::kTexPal[m][k];
+    auto lit = [](int x, int d) {
+      const int q = x + d;
+      return (uint8_t)(q < 0 ? 0 : (q > 255 ? 255 : q));
+    };
+    return pack(lit(c[0], shift), lit(c[1], shift), lit(c[2], shift));
+  };
+
+  // Low and to the right, the same corner the pickaxe's haft comes out of, so
+  // switching slots does not move the hand across the screen.
+  constexpr int N = 40, SKEW = 10;
+  const int x0 = 176 + (int)f.dx * 3 / 2;
+  const int y0 =  96 + (int)f.dy * 3 / 2;
+
+  // Three faces, each sampling the texture on its own two axes so the grain
+  // turns the corner instead of being painted flat across it. Face shading
+  // follows shadeFor's own ordering: the lid catches the sky, the front falls
+  // away from it, the right cheek falls further.
+  uint16_t* base = raw();
+
+  // The lid: a parallelogram sliding one pixel left per row, which is as much
+  // isometry as a forty-pixel cube needs.
+  for (int r = 0; r < SKEW; ++r) {
+    const int off = SKEW - r;
+    const int py = y0 + r;
+    if (py < 0 || py >= H) continue;
+    for (int c = 0; c < N; ++c) {
+      const int px = x0 + off + c;
+      if (px < 0 || px >= W) continue;
+      base[py * W + px] = texel(c * textures::TEX_N / N,
+                                r * textures::TEX_N / SKEW, 34);
+    }
+  }
+  for (int r = 0; r < N; ++r) {
+    const int py = y0 + SKEW + r;
+    if (py < 0 || py >= H) continue;
+    for (int c = 0; c < N; ++c) {
+      const int px = x0 + c;
+      if (px < 0 || px >= W) continue;
+      base[py * W + px] = texel(c * textures::TEX_N / N,
+                                r * textures::TEX_N / N, 0);
+    }
+  }
+  // The right cheek. A parallelogram of constant width, sheared upward by the
+  // same one pixel per column the lid slides by — the two share the edge from
+  // (x0+N, y0+SKEW) up to (x0+N+SKEW, y0), so they have to rise together.
+  //
+  // Walked by COLUMN rather than by row, which is what fixes the shape: driving
+  // it from the front face's rows and shortening each one turned the side into
+  // a triangle tapering to nothing, so the cube had a lid and a face and then
+  // just stopped.
+  for (int c = 0; c < SKEW; ++c) {
+    const int px = x0 + N + c;
+    if (px < 0 || px >= W) continue;
+    const int yTop = y0 + SKEW - 1 - c;
+    for (int r = 0; r < N; ++r) {
+      const int py = yTop + r;
+      if (py < 0 || py >= H) continue;
+      base[py * W + px] = texel(c * textures::TEX_N / SKEW,
+                                r * textures::TEX_N / N, -44);
+    }
+  }
+
+  // One dark rule where the lid meets the face. Without it the two planes read
+  // as a gradient rather than as a corner.
+  const world::BlockInfo& bi = world::info((uint8_t)m);
+  auto dim = [](int v) { const int q = v - 80; return (uint8_t)(q < 0 ? 0 : q); };
+  rect(x0, y0 + SKEW, N, 1, pack(dim(bi.r), dim(bi.g), dim(bi.b)));
+}
+
+// An empty hand. Also not art: a fist is a rounded block of skin with a darker
+// rule down it, and at this size that is all of one that survives anyway.
+static void drawHand(const SwingFrame& f) {
+  const uint16_t skin = pack(226, 174, 132);
+  const uint16_t shade = pack(178, 128,  92);
+  const uint16_t cuff  = pack( 96, 132, 196);
+
+  const int x0 = 184 + (int)f.dx * 3 / 2;
+  const int y0 = 100 + (int)f.dy * 3 / 2;
+
+  rect(x0 + 3, y0,      26, 4,  skin);        // knuckles, tucked in a little
+  rect(x0,     y0 + 4,  32, 22, skin);
+  rect(x0,     y0 + 26, 32, H - (y0 + 26), cuff);   // sleeve, off the bottom
+  // The fingers, as three rules rather than three shapes.
+  for (int k = 0; k < 3; ++k) rect(x0 + 7 + k * 8, y0 + 4, 1, 14, shade);
+}
+
+// What is in the selected slot is what is in the hand. This is the item system
+// where the player actually reads it — the hotbar says what is selected, and
+// this says it again in the place they are already looking.
+void drawTool(const game::State& s) {
+  const SwingFrame& f = kSwing[s.toolPhase % game::TOOL_ANIM];
+  const uint8_t held = game::heldItem(s);
+  if (game::isTool(held))         drawToolArt(f, game::toolKind(held),
+                                              game::toolTier(held));
+  else if (held < world::B_COUNT) drawHeldBlock(f, held);
+  else                            drawHand(f);
 }
 
 void drawHurt(const game::State& s) {

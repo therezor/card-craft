@@ -321,12 +321,28 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
       // nothing can get beneath the base plane.
       if (!run.ground && cam.z < (float)run.base) {
         paint.vStepQ8 = 0;
-        paint.zTop = 0;
+        // The plane this face lies in, so the renderer can texture it the way
+        // it textures a floor. It used to be left at zero, which is not a
+        // height at all — the underside took the flat-colour path and a bridge
+        // deck seen from below was a single shade of grey while every other
+        // face of the same block carried its material's grain.
+        paint.zTop = (uint8_t)run.base;
         const float dz = cam.z - (float)run.base;
         const int ya = clampRow(horizon + dz * invFar);
         const int yb = clampRow(horizon + dz * invNear);
+        // An underside belongs to the block directly above it, exactly as a top
+        // face belongs to the block below. Without this the selection box could
+        // not be drawn from underneath: standing under a deck and pointing up
+        // put the crosshair on a block the walker never flagged, so there was
+        // nothing on screen to outline.
+        const bool selHere = (selCell && run.base == selZ);
+        if (selHere) {
+          const int a = ya < yb ? ya : yb, b = ya < yb ? yb : ya;
+          if (a < selGeo0) selGeo0 = a;
+          if (b > selGeo1) selGeo1 = b;
+        }
         paint.paint(ya < yb ? ya : yb, ya < yb ? yb : ya, qf,
-                    world::matAt(mapX, mapY, run.base), F_BOT, 0,
+                    world::matAt(mapX, mapY, run.base), F_BOT, selHere ? 1 : 0,
                     tintOf(mapX, mapY, run.base), 0, lit, wallU, track);
       }
 
@@ -482,13 +498,11 @@ nextrun:
   res.selGeoY1 = (int16_t)selGeo1;
   res.selY0 = (int16_t)VIEW_H;
   res.selY1 = 0;
-  res.selMat = 0;
   if (selX >= 0) {
     for (int i = 0; i < n; ++i) {
       if (!out[i].sel) continue;
       if (out[i].y0 < res.selY0) res.selY0 = out[i].y0;
       if (out[i].y1 > res.selY1) res.selY1 = out[i].y1;
-      res.selMat = out[i].mat;
     }
   }
   return n;
@@ -532,64 +546,97 @@ bool pick(const Camera& cam, float maxDist, Hit& hit) {
   float dNear = 0.0f;
   for (int stepN = 0; stepN < MAX_STEPS && dNear < hMax; ++stepN) {
     const float dFar = (sideX < sideY) ? sideX : sideY;
-    const int   h    = (int)world::height(mapX, mapY);
+
+    // The height the ray has at each end of its crossing of this cell. At the
+    // resting tilt zFar is the lower of the two; with the pitch keys the slope
+    // goes negative and the ray climbs, so neither end can be assumed.
     const float zNear = cam.z - cam.aimSlope * dNear;
     const float zFar  = cam.z - cam.aimSlope * dFar;
+    const bool  down  = zFar <= zNear;
 
-    // Blocked by a slab. The ray crosses this cell between zNear and zFar, so
-    // it is stopped if that interval meets the slab's [base, top) at all.
+    // One 32-bit load answers the whole column, and it is the whole column that
+    // has to be answered.
     //
-    // pick() used to ignore slabs completely, on the reasoning that a slab
-    // cannot be mined and so cannot be a target. But "not a target" and "not
-    // there" are different things: the ray went straight through a roof, a
-    // bridge deck or a cave mouth and lit up a block on the far side of it, so
-    // the crosshair sat on solid brick and the outline appeared on something
-    // behind it. Standing on a roof and looking down was the clearest case —
-    // every block picked was one you could not see.
-    const int st = (int)world::slabTop(mapX, mapY);
-    if (st) {
-      const int sb = (int)world::slabBase(mapX, mapY);
-      const float zLo = zNear < zFar ? zNear : zFar;
-      const float zHi = zNear < zFar ? zFar  : zNear;
-      if (zLo < (float)st && zHi >= (float)sb) return false;
-    }
+    // This used to be two questions — "how tall is the ground here" and "is
+    // there a slab in the way" — and it got both wrong in the same way. The
+    // ground column was the only thing that could be a target, so a block
+    // hanging in mid-air could not be mined at all: a bridge deck, a roof, a
+    // tree crown, anything the player had built out over nothing. And a slab
+    // was treated as an opaque blocker that returned NO hit, so aiming at one
+    // aimed at nothing. It also only ever consulted the LOWEST floating run, so
+    // a second deck above the first was not even in the conversation.
+    //
+    // A block is a bit at a z. Scanning the mask in ray order finds whichever
+    // one the ray meets first, and a ground column is just the low bits of the
+    // same word — so the two branches this replaces are one, and it can no
+    // longer matter what is holding the block up.
+    const uint32_t solid = world::cellAt(mapX, mapY).solid;
 
-    // Running into the side of a column. Skipped for the cell the camera is
-    // standing in, where the ray starts above its own floor by definition.
-    if (h > 0 && dNear > 0.001f && zNear <= (float)h) {
-      // The block struck is the one the ray's height falls inside, not the top
-      // of the stack. Clamped because zNear can sit exactly on h after the
-      // compare above, and floorf of that is the empty block over the column.
-      int bz = (int)floorf(zNear);
-      if (bz > h - 1) bz = h - 1;
-      if (bz < 0)     bz = 0;
-      hit.x = (int16_t)mapX; hit.y = (int16_t)mapY; hit.z = (int16_t)bz;
-      hit.face = enterFace;
-      hit.nx = (enterFace == F_NS) ? (int8_t)-enterStepX : (int8_t)0;
-      hit.ny = (enterFace == F_EW) ? (int8_t)-enterStepY : (int8_t)0;
-      hit.nz = 0;
-      hit.dist = dNear * ray;
-      return dNear <= hMax;
-    }
-    // Coming down onto the top of a column, or onto open ground.
-    //
-    // The reach test uses where the ray actually crosses z = h, not dFar. dFar
-    // is the far edge of the cell the crossing happens in, so testing it let
-    // reach overshoot by up to a whole cell — invisibly, while the limit was
-    // loose enough not to matter. Tightening the reach to something the player
-    // can feel made it matter at once: flat ground at the resting tilt is met
-    // 5.05 cells out and was being measured as nearly 6.
-    if (zFar <= (float)h) {
-      float dHit = dFar;
-      if (cam.aimSlope > 1e-4f) {
-        dHit = (cam.z - (float)h) / cam.aimSlope;
-        if (dHit < dNear) dHit = dNear;
-        if (dHit > dFar)  dHit = dFar;
+    int   bz = -2;          // the block struck, or -2 for none in this cell
+    float zPlane = 0.0f;    // the horizontal face crossed, when it is one
+    bool  side = false;
+
+    if (solid) {
+      const float zLo = down ? zFar : zNear;
+      const float zHi = down ? zNear : zFar;
+      int lo = (int)floorf(zLo);
+      int hi = (int)floorf(zHi);
+      if (lo < 0) lo = 0;
+      if (hi > world::MAX_H - 1) hi = world::MAX_H - 1;
+
+      for (int z = down ? hi : lo; down ? (z >= lo) : (z <= hi); z += down ? -1 : 1) {
+        if (!((solid >> z) & 1u)) continue;
+        // The block the eye is standing inside, if the camera has clipped into
+        // geometry. Skipping it keeps the old rule that the cell you are in
+        // cannot give you a side hit, without hiding the block over your head
+        // or under your feet — both of which are horizontal faces, and both of
+        // which are reachable when the view is pitched hard.
+        const bool inside = zNear >= (float)z && zNear < (float)(z + 1);
+        if (inside && dNear <= 0.001f) continue;
+        bz   = z;
+        side = inside;
+        // Descending, the ray came down onto the block's top; climbing, it came
+        // up onto its underside.
+        zPlane = down ? (float)(z + 1) : (float)z;
+        break;
       }
-      hit.x = (int16_t)mapX; hit.y = (int16_t)mapY;
-      hit.z = (int16_t)(h > 0 ? h - 1 : 0);
-      hit.face = F_TOP;
-      hit.nx = 0; hit.ny = 0; hit.nz = 1;
+    }
+
+    // Nothing in the column, and the ray has dropped out of the bottom of it:
+    // the base plane. Bedrock, so the world refuses to mine it, but it is a
+    // surface a block can be built on and the ray has to stop somewhere.
+    if (bz == -2 && down && zFar < 0.0f) { bz = -1; zPlane = 0.0f; side = false; }
+
+    if (bz != -2) {
+      float dHit = dNear;
+      if (!side) {
+        // Where the ray actually crosses the face, not the far edge of the cell
+        // the crossing happens in. dFar overshoots by up to a whole cell, which
+        // was invisible while the reach was loose and stopped being invisible
+        // the moment it was tightened to something the player can feel: flat
+        // ground at the resting tilt is met 5.05 cells out and was measuring
+        // nearly 6.
+        dHit = dFar;
+        const float sl = cam.aimSlope;
+        if (sl > 1e-4f || sl < -1e-4f) {
+          dHit = (cam.z - zPlane) / sl;
+          if (dHit < dNear) dHit = dNear;
+          if (dHit > dFar)  dHit = dFar;
+        }
+      }
+      hit.x = (int16_t)mapX; hit.y = (int16_t)mapY; hit.z = (int16_t)bz;
+      if (side) {
+        hit.face = enterFace;
+        hit.nx = (enterFace == F_NS) ? (int8_t)-enterStepX : (int8_t)0;
+        hit.ny = (enterFace == F_EW) ? (int8_t)-enterStepY : (int8_t)0;
+        hit.nz = 0;
+      } else {
+        // A face pointing up or a face pointing down. The underside is new:
+        // world::place() has always taken an exact z, so naming the bottom face
+        // is the whole of what it takes to build onto the belly of a bridge.
+        hit.face = down ? F_TOP : F_BOT;
+        hit.nx = 0; hit.ny = 0; hit.nz = down ? (int8_t)1 : (int8_t)-1;
+      }
       hit.dist = dHit * ray;
       return dHit <= hMax;
     }

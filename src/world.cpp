@@ -41,22 +41,32 @@ namespace world {
 // built out of B_STONE would have had two courses of dirt inside it, one
 // block under its own battlements.
 static const BlockInfo kInfo[B_COUNT] = {
-  // name       r    g    b   tough  blk  ore
-  { "grass",   82, 168,  62,   360,   1,   0 },   // saturated green
-  { "dirt",   140,  92,  50,   400,   1,   0 },   // mid orange-brown
-  { "stone",  128, 132, 138,  1150,   2,   0 },   // neutral grey
-  { "wood",    92,  60,  36,   760,   3,   0 },   // very dark brown, the trunk
-  { "leaves",  46, 120,  44,   220,   1,   0 },   // darker than grass
-  { "coal",    78,  80,  88,  1540,   1,   1 },   // stone shot through with black
-  { "iron",   192, 180, 166,  2100,   1,   3 },   // stone shot through with pale ore
-  { "sand",   228, 208, 148,   340,   1,   0 },   // pale yellow, fine grained
-  { "snow",   236, 242, 250,   300,   1,   0 },   // white, almost smooth
-  { "brick",  168,  96,  84,  1400,   2,   0 },   // terracotta, not brown
-  { "plank",  206, 152,  88,   470,   1,   0 },   // light tan, clearly milled
-  { "masonry", 96, 104, 122,  1500,   2,   0 },   // cut stone, cool and dark
-  { "torch",  252, 178,  56,   200,   1,   0 },   // flame orange, not sand
-  { "lava",   238,  96,  30,     0,   0,   0 },   // unbreakable: bridge over it
-  { "bedrock", 44,  46,  52,     0,   0,   0 },
+  // name       r    g    b   tough  blk
+  { "grass",   82, 168,  62,   360,   1 },   // saturated green
+  { "dirt",   140,  92,  50,   400,   1 },   // mid orange-brown
+  { "stone",  128, 132, 138,  1150,   2 },   // neutral grey
+  { "wood",    92,  60,  36,   760,   3 },   // very dark brown, the trunk
+  { "leaves",  46, 120,  44,   220,   1 },   // darker than grass
+  // Coal and iron carry their old ore yields as block yields now. They are the
+  // slowest things on the map to dig and the only reason to go down, so a
+  // single lump for two thousand effort would make the mine not worth entering.
+  { "coal",    78,  80,  88,  1540,   2 },   // stone shot through with black
+  { "iron",   192, 180, 166,  2100,   3 },   // stone shot through with pale ore
+  { "sand",   228, 208, 148,   340,   1 },   // pale yellow, fine grained
+  { "snow",   236, 242, 250,   300,   1 },   // white, almost smooth
+  { "brick",  168,  96,  84,  1400,   2 },   // terracotta, not brown
+  { "plank",  206, 152,  88,   470,   1 },   // light tan, clearly milled
+  { "masonry", 96, 104, 122,  1500,   2 },   // cut stone, cool and dark
+  { "torch",  252, 178,  56,   200,   1 },   // flame orange, not sand
+  { "lava",   238,  96,  30,     0,   0 },   // unbreakable: bridge over it
+  { "bedrock", 44,  46,  52,     0,   0 },
+  // The deep reward. Toughness above iron's so the tier that mines it fastest
+  // is the one it makes, and a single block per break because three would make
+  // one lucky seam kit you out for the whole run. Cyan because every other
+  // material on the map is warm or grey, and its luminance (~195) sits in the
+  // gap between iron's 179 and sand's 208 -- fog flattens hue long before it
+  // flattens brightness, so the gap is what keeps it readable at range.
+  { "diamond",110, 232, 228,  3000,   1 },   // pale cyan, unmistakable in stone
 };
 
 // A structure column is made of itself all the way down to ground level: a
@@ -361,7 +371,15 @@ static inline void solidFill(int i, int a, int b) {
 }
 
 static inline void solidClear(int i, int a, int b) {
-  if (a < 0) a = 0;
+  // Layer zero is bedrock and never comes out, whatever asks. Minecraft's floor
+  // is a course of bedrock for the same reason: without it the bottom of a pit
+  // is not a block, and a thing that is not a block has no texture to draw, no
+  // face to outline and nothing for a pick to bite on. It used to be a "base
+  // plane" that the renderer and the picker each had to special-case, and the
+  // selection box could not be drawn on it at all because no span belonged to
+  // it. Making it an ordinary block deletes all of that: it is unbreakable
+  // because its toughness is zero, which is a rule the world already had.
+  if (a < 1) a = 1;
   if (b > MAX_H) b = MAX_H;
   if (a >= b) return;
   g_solid[i] &= ~(((b >= MAX_H) ? ~0u : ((1u << b) - 1u)) & ~((1u << a) - 1u));
@@ -376,7 +394,7 @@ static inline void solidClear(int i, int a, int b) {
 // this one is allowed to move g_surf.
 static void setTerrain(int x, int y, int h, uint8_t mat) {
   if (outside(x, y)) return;
-  if (h < 0) h = 0;
+  if (h < 1) h = 1;              // the bedrock course; see solidClear
   if (h > MAX_H) h = MAX_H;
   const int i = idx(x, y);
   g_solid[i] = (h >= MAX_H) ? ~0u : ((1u << h) - 1u);
@@ -533,6 +551,7 @@ void generate(uint32_t seed) {
   for (int y = cy - SPAWN_CLEAR; y <= cy + SPAWN_CLEAR; ++y)
     for (int x = cx - SPAWN_CLEAR; x <= cx + SPAWN_CLEAR; ++x)
       dropOrphanCanopy(x, y);
+
 }
 
 
@@ -634,13 +653,12 @@ static int levelArea(int x0, int y0, int w, int d) {
 // same thing the special case did.
 static void setCol(int x, int y, int h, uint8_t top) {
   if (outside(x, y) || isBorder(x, y)) return;
-  if (h < 0) h = 0;
+  if (h < 1) h = 1;              // the bedrock course; see solidClear
   if (h > MAX_H) h = MAX_H;
   const int i = idx(x, y);
   const int surf = (int)g_surf[i];
 
   g_solid[i] = (h >= MAX_H) ? ~0u : ((1u << h) - 1u);
-  if (h == 0) { markClear(i); return; }
 
   if (isStructure(top)) {
     // A tree is a trunk under its canopy, not leaves on a dirt plug, and a ruin
@@ -674,15 +692,29 @@ static inline int groundOf(int x, int y) {
 // an arch. So the crown is slabs, and what you get is a tree you walk *under*
 // rather than a green post you walk around.
 //
-// Two tiers of crown, because one is a plate: the inner ring is three blocks
-// deep and hangs level with the trunk's own leaves, the outer ring is two and
-// sits a block lower. That step is the whole silhouette at the distance a tree
-// is first seen from.
+// A Minecraft tree: a short trunk carrying a crown four layers deep and five
+// cells across, not a mast with a plate on top.
 //
-// The one leaf block on top of the trunk stays a real column, so a tree is
-// still worth chopping and the trade the game is balanced around does not move.
-// The rings are scenery, and they come down with the trunk — see
-// dropOrphanCanopy.
+// The shape this replaces was a nine-to-eleven block trunk under a crown three
+// deep, which from any distance reads as two or three green blocks on a stick.
+// Almost all of that was trunk. Minecraft's oak is the other way round — six
+// logs and a crown that is most of what you see — and the reason is that the
+// crown is what a tree IS at a distance. The canopy is also what makes a forest
+// somewhere you can lose a mob rather than a field of poles.
+//
+// Layers, measured from the first z above the top log, exactly as Minecraft
+// stacks them:
+//
+//     trunkTop      a plus: the four orthogonal neighbours and the trunk cap
+//     trunkTop-1    3x3
+//     trunkTop-2    5x5, corners off
+//     trunkTop-3    5x5, corners off
+//
+// A cell's leaves are one contiguous run, so each gets a single setSlab rather
+// than a layer at a time — the runs would merge into exactly this anyway.
+//
+// The crown comes down when the trunk does, but not all at once: see
+// world::decayTick.
 static bool placeTree(int x, int y, uint32_t& rng) {
   if (!flatAt(x, y)) return false;
 
@@ -690,43 +722,81 @@ static bool placeTree(int x, int y, uint32_t& rng) {
   if (biome == BIOME_DESERT) return false;          // cactus country; see below
 
   rng = rng * 1664525u + 1013904223u;
-  // A tundra pine is taller and narrower than a plains oak. At the size a tree
-  // occupies six cells away the only thing that separates two of them is the
-  // outline, so the variants differ in shape and not in colour.
+  // A tundra spruce is taller and narrower than a plains oak. At the size a
+  // tree occupies six cells away the only thing that separates two of them is
+  // the outline, so the variants differ in shape and not in colour.
   const bool pine = (biome == BIOME_TUNDRA);
-  const int top = GROUND + (pine ? 10 : 8 + (int)((rng >> 16) % 3u));
-  setCol(x, y, top, B_LEAVES);
+  const int logs = (pine ? 9 : 6) + (int)((rng >> 16) % 2u);
+  const int trunkTop = GROUND + logs;               // first z above the top log
 
-  static const int kIn[8][2]  = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+  // Where the crown starts. Three below the top log for an oak leaves three or
+  // four blocks of clear air under the eaves — HEADROOM is two, so the player
+  // and the mobs both walk under it and a canopy is shade rather than a wall.
+  const int skirt = pine ? trunkTop - 5 : trunkTop - 3;
+
+  setCol(x, y, trunkTop, B_WOOD);                   // wood all the way down
+  // The trunk's own cap: exactly one block of leaves, oak or spruce. One,
+  // because the whole column below it is trunk and the rest of the game reads
+  // a tree as "wood under a single leaf cap" — chop through two and the second
+  // one is a leaf you got where a log should have been.
+  setSlab(x, y, trunkTop, trunkTop + 1, B_LEAVES);
+
+  // A canopy cell is refused where the ground would come up into it, and where
+  // it would leave too little air underneath to walk through. The old rule
+  // wanted dead flat ground under every leaf, which is why a tree on any kind
+  // of slope lost half its crown; this wants only the clearance that makes a
+  // canopy shade rather than a wall.
+  auto leaves = [](int nx, int ny, int base, int top) {
+    if (outside(nx, ny) || isBorder(nx, ny)) return;
+    // Somewhere a body could already stand, and still somewhere a body can
+    // stand once the leaves are over it. The second test alone is not enough:
+    // the cell may already be roofed by a neighbouring crown lower than this
+    // one, and adding to it would not be what made it unwalkable but would
+    // certainly be found holding the bag.
+    if (!standable(nx, ny)) return;
+    if (base - (int)ghAt(idx(nx, ny)) < HEADROOM) return;
+    setSlab(nx, ny, base, top, B_LEAVES);
+  };
+
+  static const int kR1[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
   // The outer ring without its four corners: a full 5x5 crown is a square, and
   // a square is the one shape a tree never is.
-  static const int kOut[12][2] = { {2,0},{-2,0},{0,2},{0,-2},
-                                   {2,1},{2,-1},{-2,1},{-2,-1},
-                                   {1,2},{-1,2},{1,-2},{-1,-2} };
+  static const int kR2[12][2] = { {2,0},{-2,0},{0,2},{0,-2},
+                                  {2,1},{2,-1},{-2,1},{-2,-1},
+                                  {1,2},{-1,2},{1,-2},{-1,-2} };
 
   for (int i = 0; i < 8; ++i) {
-    if (pine && i >= 4) continue;                   // a pine has no shoulders
-    const int nx = x + kIn[i][0], ny = y + kIn[i][1];
-    // Three blocks deep, flush with the trunk's own leaves. The base lands at
-    // GROUND + 5 at the lowest, a clear three metres more than HEADROOM over
-    // open ground, so the player and the mobs both walk under it and the
-    // canopy is shade rather than a wall.
-    if (flatAt(nx, ny)) setSlab(nx, ny, top - 3, top, B_LEAVES);
+    const int nx = x + kR1[i][0], ny = y + kR1[i][1];
+    // Orthogonal neighbours reach the top layer; the diagonals stop one short,
+    // which is what turns the crown's cap into a plus instead of a block.
+    const int top = (i < 4) ? trunkTop + 1 : trunkTop;
+    leaves(nx, ny, skirt, pine ? trunkTop - 1 : top);
   }
-  if (pine) return true;                            // narrow all the way up
 
   for (int i = 0; i < 12; ++i) {
     rng = rng * 1664525u + 1013904223u;
-    if ((rng >> 16) % 100u >= 62u) continue;        // ragged, not stamped
-    const int nx = x + kOut[i][0], ny = y + kOut[i][1];
-    if (flatAt(nx, ny)) setSlab(nx, ny, top - 3, top - 1, B_LEAVES);
+    if ((rng >> 16) % 100u >= 82u) continue;        // ragged, not stamped
+    const int nx = x + kR2[i][0], ny = y + kR2[i][1];
+    // Two layers for an oak, and for a spruce a skirt that stops well below
+    // the middle of the tree so the silhouette tapers.
+    leaves(nx, ny, skirt, pine ? skirt + 2 : trunkTop - 1);
   }
   return true;
 }
 
-// Leaves hang from a trunk. Cut the trunk and they have nothing to hang from,
-// and a felled tree that leaves a green sheet floating over its own stump is
-// worse than the bush it replaced.
+// Clears leaves that have nothing left to hang from.
+//
+// This runs at GENERATION time only, and the distinction is the whole point of
+// it. The generator cuts platforms and clears a spawn pad out from under trees
+// it has already grown, and a world handed to the player with crowns floating
+// over nothing is a world that looks broken before it is touched.
+//
+// What it deliberately does NOT do any more is run when the player chops. Cut
+// the trunk out from under an oak in Minecraft and the crown stays where it is;
+// you climb it, or you knock it down a block at a time, or you leave it. Doing
+// this on every mine meant a whole canopy winked out on the frame the last log
+// came off, which is not a thing that happens in the game this is imitating and
+// took the harvest with it.
 //
 // Tested per canopy cell rather than per trunk, because two trees can stand
 // close enough to share one and only one of them is being cut down. A slab is
@@ -910,25 +980,19 @@ static bool placeHouse(int x0, int y0, int w, int d, uint32_t& rng) {
       setSlab(x, y, wallTop, wallTop + 1, B_BRICK);
     }
 
-  setCol(x0 + 1, y0 + 1, base + 1, B_TORCH);
   return true;
 }
 
-// Three to five houses around a common yard, with torches down the middle of
-// it. One house on a hillside is a curiosity; a village is a place, and at
-// night it is the only lit ground on the map that the player did not have to
-// build themselves.
+// Three to five houses around a common yard. One house on a hillside is a
+// curiosity; a village is a place -- but it is an unlit one. Nothing on the
+// map emits any more except lava, because light is the one thing the player
+// has to make, and a village that came with its own torches was four free
+// ones sitting in a building you could also shelter in.
 static bool placeVillage(int cx, int cy, uint32_t& rng) {
   constexpr int SPAN = 13;                 // yard plus a house on each side
   if (!clearArea(cx - SPAN, cy - SPAN, 2 * SPAN + 1, 2 * SPAN + 1, 5)) return false;
   const int base = levelArea(cx - SPAN, cy - SPAN, 2 * SPAN + 1, 2 * SPAN + 1);
   if (base + 6 > MAX_H || base < 2) return false;
-
-  // Torch-lit path through the middle, laid before the houses so their
-  // footprint test refuses to build across it.
-  for (int i = -SPAN + 3; i <= SPAN - 3; ++i) {
-    if ((i & 3) == 0) setCol(cx + i, cy, base + 1, B_TORCH);
-  }
 
   int built = 0;
   static const int kAt[6][2] = { {-11,-9}, {3,-9}, {-11,4}, {3,4}, {-4,-12}, {-4,7} };
@@ -951,7 +1015,7 @@ static bool placeVillage(int cx, int cy, uint32_t& rng) {
 // The gaps are not damage for its own sake. A ruin and the house above it are
 // the same silhouette at the distance either is first seen from, and a broken
 // wall is the one difference that survives being ten cells away and half in
-// fog. One is shelter you repair; the other is shelter that is already lit.
+// fog. One is shelter you repair; the other is shelter you can just walk into.
 static bool placeRuin(int x0, int y0, int w, int d, uint32_t& rng) {
   if (!clearArea(x0 - 1, y0 - 1, w + 2, d + 2, 4)) return false;
   const int base = levelArea(x0 - 1, y0 - 1, w + 2, d + 2);
@@ -1094,10 +1158,9 @@ static bool placeCastle(int x0, int y0, int sz, uint32_t& rng) {
     }
   }
 
-  // A brazier in the middle of the bailey, so a castle is shelter and not just
-  // scenery. It is the only lit ground inside the walls, and the walls are
-  // eight blocks of cut stone.
-  setCol(x0 + sz / 2, y0 + sz / 2, base + 1, B_TORCH);
+  // The bailey is bare. A castle is eight blocks of cut stone and nothing else
+  // -- it is shelter, not a lit camp, and what you do with the dark inside it
+  // is your own problem.
   return true;
 }
 
@@ -1359,6 +1422,12 @@ bool isBorder(int x, int y) {
 // mask there is no such distinction: a block is at a z, and z is all the depth
 // anchor a soil profile needs.
 static uint8_t matAtIdx(int i, int z) {
+  // The floor of the world, under everything and answerable before the markers
+  // are consulted: a player cannot place over it because it is never air, and
+  // the soil profile below has nothing to say about a layer that is bedrock by
+  // definition.
+  if (z <= 0) return B_BEDROCK;
+
   const uint8_t m = markAt(i, z);
   if (m != M_DERIVE) return m;
 
@@ -1372,6 +1441,22 @@ static uint8_t matAtIdx(int i, int z) {
   if (depth <= 0) return smatOf(i);
   if (depth == 1) return B_DIRT;
   const int x = i % W, y = i / W;
+  // Diamond, before the ore bands and after the two depth branches above. Both
+  // positions are load-bearing. After, because a column whose ground sits low
+  // -- a desert floor, the bottom of a quarry -- has its surface and its dirt
+  // layer inside the depth band, and answering diamond there would put it on
+  // open ground and into g_cell's four-bit surface field, which has no room to
+  // describe it. Before the ore bands, because it is the rarest thing here and
+  // a band checked later can only ever be what the earlier ones did not claim.
+  //
+  // Its own lattice seed rather than a slice off the end of iron's range: one
+  // field asked twice at the same point is not independent, and carving the
+  // diamond band out of iron's would quietly thin the iron in exactly the
+  // layers a player digs to for diamond.
+  if (z <= DIAMOND_MAX_Z) {
+    const uint32_t d = latticeu(x * 11 - z, y * 5 + z, 0x1D0B3u);
+    if (d < DIAMOND_RARITY) return B_DIAMOND;
+  }
   const uint32_t o = latticeu(x * 7 + z, y * 13 - z, 0x0C0A1u);
   if (o < 214748365u) return B_IRON;    // 0.050 of the range
   if (o < 794568365u) return B_COAL;    // 0.185
@@ -1663,7 +1748,7 @@ uint8_t groundAt(float px, float py) {
 // bit cannot fail.
 
 MineResult mine(int x, int y, int z, int effort,
-                uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre) {
+                uint8_t& dropMat, uint8_t& dropBlocks) {
   if (outside(x, y) || isBorder(x, y)) return MINE_NOTHING;
   const int i = idx(x, y);
   if (!solidAt(x, y, z)) return MINE_NOTHING;
@@ -1686,7 +1771,6 @@ MineResult mine(int x, int y, int z, int effort,
 
   dropMat    = m;
   dropBlocks = bi.dropBlocks;
-  dropOre    = bi.dropOre;
 
   // The edit itself. Everything the old code did around this -- recomputing the
   // revealed material before the column moved, splitting a run in two, carrying
@@ -1698,21 +1782,21 @@ MineResult mine(int x, int y, int z, int effort,
 
   s_mineX = s_mineY = s_mineZ = -1;
   s_effort = 0;
-  // Only when what came off was part of a tree, so the common case -- digging
-  // dirt -- never pays for the sweep.
-  if (m == B_WOOD || m == B_LEAVES) dropOrphanCanopy(x, y);
+  // Leaves are NOT swept here. Chopping the trunk out from under a crown used
+  // to delete the whole crown on the spot; in Minecraft it stays, and so does
+  // this one. See dropOrphanCanopy, which is now generator-only.
   if (emission(m)) rebuildLight();       // a torch just came down
   return MINE_BROKE;
 }
 
 // The old shape, kept because most callers mean "take the top block off this
 // column" and should not have to work out which z that is.
-bool mine(int x, int y, int effort,
-          uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre) {
+bool mineTop(int x, int y, int effort,
+             uint8_t& dropMat, uint8_t& dropBlocks) {
   if (outside(x, y)) return false;
   const int h = ghAt(idx(x, y));
   if (h == 0) return false;
-  return mine(x, y, h - 1, effort, dropMat, dropBlocks, dropOre) == MINE_BROKE;
+  return mine(x, y, h - 1, effort, dropMat, dropBlocks) == MINE_BROKE;
 }
 
 void resetDamage(int x, int y, int z) {
@@ -1805,13 +1889,9 @@ int explode(int cx, int cy, int radius) {
       n += take;
     }
   }
-  // A second pass rather than a call inside the first: the sweep looks at the
-  // columns around a cell, and half of them have not been blasted yet while the
-  // first loop is still running.
-  if (n)
-    for (int y = cy - radius; y <= cy + radius; ++y)
-      for (int x = cx - radius; x <= cx + radius; ++x)
-        dropOrphanCanopy(x, y);
+  // A blast leaves whatever it did not reach standing, leaves included. It used
+  // to sweep the canopy afterwards, which meant a creeper going off under a
+  // tree took the tree with it.
   if (n) { resetDamage(s_mineX, s_mineY); rebuildLight(); }
   return n;
 }

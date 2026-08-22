@@ -67,8 +67,25 @@ struct Cue {
 
 // The cues the game plays. Named rather than numbered so main.cpp reads as a
 // list of what happened, not a table of frequencies.
-extern const Cue kMineTick, kBlockBroke, kPlace, kNoBlocks;
-extern const Cue kSwing, kWhiff, kMobHit, kMobDied;
+// Digging, breaking and placing come in three material families rather than one
+// cue apiece. A pickaxe in dirt and a pickaxe in iron used to be the same sound,
+// which is most of the reason mining read as a UI event rather than as work.
+enum MatClass : uint8_t { MC_SOFT, MC_STONE, MC_WOOD, MC_COUNT };
+
+// Which family a block belongs to. Soft is anything you would use a shovel on,
+// wood is anything grown or milled, stone is the rest.
+MatClass matClass(uint8_t block);
+
+extern const Cue kDig[MC_COUNT], kBreak[MC_COUNT], kPlace[MC_COUNT];
+extern const Cue kNoBlocks;
+extern const Cue kSwing, kWhiff;
+
+// A voice per mob, because a night you can hear is a night you can read: a
+// groan behind you and a bone rattle to your left are two different problems,
+// and on a panel this small the ear does more of that work than the eye.
+// Indexed by game::MobKind.
+extern const Cue kMobIdle[3], kMobHurt[3], kMobDied[3];
+
 extern const Cue kHurt, kDied, kTelegraph, kHiss, kExplode;
 extern const Cue kArrowFire, kArrowHit;
 extern const Cue kDusk, kDawn, kMenuMove, kBuy, kCraft, kCraftFail;

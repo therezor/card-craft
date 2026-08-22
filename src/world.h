@@ -51,6 +51,11 @@ enum Block : uint8_t {
   B_TORCH,      // emits light and keeps mobs from spawning nearby
   B_LAVA,       // emits light, burns anything standing on it, cannot be mined
   B_BEDROCK,    // map border and the base plane, unbreakable
+  // Appended rather than filed next to the other ores, so that adding it
+  // renumbers nothing. It is the SIXTEENTH material, and sixteen is the whole
+  // of what the four-bit surface-material field in g_cell can hold -- see
+  // SMAT_MASK in world.cpp. A seventeenth means repacking that byte first.
+  B_DIAMOND,    // rare, and only in the deepest layers
   B_COUNT
 };
 
@@ -103,6 +108,16 @@ constexpr int H = 96;
 constexpr int GROUND = 8;
 constexpr int MAX_H  = GROUND + 24;
 
+// How deep diamond goes, and how much of it there is. Public because the host
+// tests assert the depth rule directly -- that no diamond is ever reachable
+// above this, which is what keeps it out of the four-bit surface field.
+//
+// Layer 0 is bedrock, so three layers is z 1..3: the floor of the deepest hole
+// the map has. At 0.5% of the lattice range a column that goes all the way down
+// is usually three layers of stone, and a seam is a thing you go looking for.
+constexpr int      DIAMOND_MAX_Z  = 3;
+constexpr uint32_t DIAMOND_RARITY = 21474836u;   // 0.005 of the range
+
 // Mining is accumulated in "effort", not seconds, so a pickaxe upgrade is a
 // multiplier on the numerator rather than a special case in the timing code.
 constexpr int EFFORT_PER_TICK = 16;
@@ -115,8 +130,11 @@ struct BlockInfo {
   // against this table so the two cannot drift apart.
   uint8_t r, g, b;
   uint16_t toughness;   // total effort to break; 0 means unbreakable
-  uint8_t  dropBlocks;  // build material yielded
-  uint8_t  dropOre;     // upgrade currency yielded
+  // How many of itself a block yields when it comes off. There used to be a
+  // second yield beside it, dropOre, feeding an abstract upgrade currency; the
+  // dawn shop it was spent in is gone, so coal and iron are items you hold like
+  // any other and their richness is spelled here instead.
+  uint8_t  dropBlocks;
 
   // There used to be a `speckle` byte here: how strongly the material broke up
   // across its own face, driving the amplitude of one shared noise tile. The
@@ -282,12 +300,20 @@ enum MineResult : uint8_t {
 // dig. A column is a bitmask now, so a hole is a cleared bit and there is
 // nothing left to run out of. Mining cannot be refused for want of room.
 MineResult mine(int x, int y, int z, int effort,
-                uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre);
+                uint8_t& dropMat, uint8_t& dropBlocks);
 
 // Takes the top block off a column. Most callers mean this and should not have
 // to work out which z it is.
-bool mine(int x, int y, int effort,
-          uint8_t& dropMat, uint8_t& dropBlocks, uint8_t& dropOre);
+//
+// Named rather than overloaded on arity, and that is not style. It was
+// `mine(x, y, effort, mat, blocks)` next to `mine(x, y, z, effort, mat,
+// blocks)` — two signatures a single int apart — so a stale six-argument call
+// left over from when there was a third out-param bound silently to the OTHER
+// overload, mining z = 100000 and reporting nothing. It compiles, it runs, and
+// the `while (height > GROUND)` loop around it never terminates. That happened
+// three separate times during one refactor before the names were split.
+bool mineTop(int x, int y, int effort,
+             uint8_t& dropMat, uint8_t& dropBlocks);
 
 void resetDamage(int x, int y, int z);
 void resetDamage(int x, int y);

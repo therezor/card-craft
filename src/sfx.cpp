@@ -16,6 +16,8 @@
 // =============================================================================
 #include "sfx.h"
 
+#include "world.h"
+
 #include "hal/hal.h"
 #include "sfxdata.h"
 
@@ -31,13 +33,25 @@ namespace sfx {
 // fuse, explosion) lives low and anything routine (mining, placing) lives high,
 // and the two never compete for the same part of the range.
 
-// Mining: a dull tick, not a chirp. Fired every eighth tick by main.cpp.
-static const Step kMineTickS[] = {{ 210, 26, W_NOISE, 90 }, { 150, 18, W_SQUARE, 70 }};
+// Mining, per material family: a dull tick, not a chirp. On a board with no PCM
+// path the three families are three pitches of the same gesture — less
+// difference than the waveforms carry, but still a difference.
+static const Step kDigSoftS[]  = {{ 150, 26, W_NOISE, 80 }, { 110, 16, W_SQUARE, 60 }};
+static const Step kDigStoneS[] = {{ 320, 22, W_NOISE, 95 }, { 190, 16, W_SQUARE, 70 }};
+static const Step kDigWoodS[]  = {{ 420, 30, W_TRI,   95 }, { 240, 18, W_NOISE, 55 }};
 // The block gives way: the crack, then the piece landing.
-static const Step kBlockBrokeS[] = {
+static const Step kBreakSoftS[] = {
+  { 420, 34, W_NOISE, 170 }, { 240, 46, W_NOISE, 130 }, { 160, 60, W_TRI, 100 },
+};
+static const Step kBreakStoneS[] = {
   { 640, 34, W_NOISE, 190 }, { 320, 46, W_SQUARE, 150 }, { 180, 60, W_TRI, 110 },
 };
-static const Step kPlaceS[]    = {{ 380, 28, W_SQUARE, 130 }, { 520, 34, W_TRI, 110 }};
+static const Step kBreakWoodS[] = {
+  { 520, 30, W_NOISE, 170 }, { 400, 50, W_TRI, 160 }, { 260, 70, W_TRI, 110 },
+};
+static const Step kPlaceSoftS[]  = {{ 220, 28, W_NOISE, 110 }, { 300, 34, W_TRI, 100 }};
+static const Step kPlaceStoneS[] = {{ 380, 28, W_SQUARE, 130 }, { 520, 34, W_TRI, 110 }};
+static const Step kPlaceWoodS[]  = {{ 480, 30, W_TRI, 130 }, { 560, 34, W_TRI, 100 }};
 static const Step kNoBlocksS[] = {{ 150, 40, W_SQUARE, 110 }, {   0, 30, W_SQUARE,   0 },
                                   { 130, 46, W_SQUARE,  90 }};
 
@@ -47,11 +61,28 @@ static const Step kNoBlocksS[] = {{ 150, 40, W_SQUARE, 110 }, {   0, 30, W_SQUAR
 static const Step kSwingS[] = {{ 900, 22, W_NOISE, 70 }, { 520, 26, W_NOISE, 45 }};
 static const Step kWhiffS[] = {{1400, 26, W_NOISE, 55 }, { 700, 40, W_NOISE, 35 },
                                { 400, 34, W_NOISE, 20 }};
-// A landed hit is meat and bone, so: a low square with noise on the front.
-static const Step kMobHitS[] = {{ 520, 20, W_NOISE, 200 }, { 260, 40, W_SQUARE, 180 },
-                                { 200, 30, W_SQUARE, 120 }};
-static const Step kMobDiedS[] = {{ 440, 40, W_SAW, 190 }, { 330, 46, W_SAW, 160 },
-                                 { 220, 60, W_SAW, 130 }, { 150, 80, W_TRI, 90 }};
+// One voice per mob. A buzzer cannot do formants, so the fallback separates
+// them by register and rhythm instead: the zombie low and slurred, the skeleton
+// a run of short clicks, the creeper pure noise.
+static const Step kZombieIdleS[] = {{ 120,180, W_SAW, 110 }, {  98,240, W_SAW, 90 }};
+static const Step kZombieHurtS[] = {{ 190, 70, W_SAW, 190 }, { 140, 90, W_SAW, 150 }};
+static const Step kZombieDieS[]  = {{ 165,120, W_SAW, 190 }, { 120,150, W_SAW, 160 },
+                                    {  85,200, W_TRI, 120 }};
+static const Step kSkeletonIdleS[] = {
+  {2400, 14, W_NOISE, 120 }, { 0, 70, W_NOISE, 0 }, {2900, 14, W_NOISE, 100 },
+  { 0, 50, W_NOISE, 0 }, {2100, 14, W_NOISE, 110 },
+};
+static const Step kSkeletonHurtS[] = {{2600, 16, W_NOISE, 200 },
+                                      {1500, 26, W_NOISE, 150 }};
+static const Step kSkeletonDieS[] = {
+  {2500, 14, W_NOISE, 190 }, {2200, 14, W_NOISE, 165 }, {1900, 14, W_NOISE, 140 },
+  {1600, 16, W_NOISE, 115 }, {1300, 20, W_NOISE,  90 },
+};
+static const Step kCreeperHurtS[] = {{2800, 30, W_NOISE, 190 },
+                                     {1800, 40, W_NOISE, 130 }};
+static const Step kCreeperDieS[]  = {{2400, 70, W_NOISE, 170 },
+                                     {1400, 90, W_NOISE, 120 },
+                                     { 700,120, W_NOISE,  80 }};
 
 // Being hurt has to cut through whatever else is happening, so it is the lowest
 // and the loudest thing in the mix.
@@ -100,14 +131,34 @@ static const Step kCraftFailS[] = {{ 200, 50, W_SQUARE, 130 }, { 150, 70, W_SQUA
                      arr, (uint8_t)(sizeof(arr) / sizeof(arr[0])), ch, prio }
 
 //   cue          fallback      waveform       channel    prio  vol  varies
-CUE(kMineTick,  kMineTickS,  kMineTick,   CH_TOOL,   1,   200, true);
 CUE(kSwing,     kSwingS,     kSwing,      CH_TOOL,   2,   190, true);
 CUE(kWhiff,     kWhiffS,     kWhiff,      CH_TOOL,   2,   180, false);
-CUE(kBlockBroke,kBlockBrokeS,kBlockBroke, CH_IMPACT, 4,   230, true);
-CUE(kPlace,     kPlaceS,     kPlace,      CH_TOOL,   3,   200, false);
 CUE(kNoBlocks,  kNoBlocksS,  kNoBlocks,   CH_UI,     3,   190, false);
-CUE(kMobHit,    kMobHitS,    kMobHit,     CH_IMPACT, 5,   240, true);
-CUE(kMobDied,   kMobDiedS,   kMobDied,    CH_VOICE,  5,   225, false);
+
+// The three material families, in MatClass order so a block's class indexes
+// straight into them.
+CUE(kDigSoft,   kDigSoftS,   kDigSoft,    CH_TOOL,   1,   200, true);
+CUE(kDigStone,  kDigStoneS,  kDigStone,   CH_TOOL,   1,   200, true);
+CUE(kDigWood,   kDigWoodS,   kDigWood,    CH_TOOL,   1,   200, true);
+CUE(kBreakSoft, kBreakSoftS, kBreakSoft,  CH_IMPACT, 4,   225, true);
+CUE(kBreakStone,kBreakStoneS,kBreakStone, CH_IMPACT, 4,   230, true);
+CUE(kBreakWood, kBreakWoodS, kBreakWood,  CH_IMPACT, 4,   228, true);
+CUE(kPlaceSoft, kPlaceSoftS, kPlaceSoft,  CH_TOOL,   3,   195, false);
+CUE(kPlaceStone,kPlaceStoneS,kPlaceStone, CH_TOOL,   3,   200, false);
+CUE(kPlaceWood, kPlaceWoodS, kPlaceWood,  CH_TOOL,   3,   198, false);
+
+// Mob voices, in game::MobKind order for the same reason.
+//
+// An idle sits on CH_VOICE at low priority: it is the least important thing in
+// the mix and must never step on a fuse or a death.
+CUE(kZombieIdle,  kZombieIdleS,  kZombieIdle,   CH_VOICE, 1, 175, true);
+CUE(kZombieHurt,  kZombieHurtS,  kZombieHurt,   CH_IMPACT,5, 240, true);
+CUE(kZombieDie,   kZombieDieS,   kZombieDie,    CH_VOICE, 5, 225, false);
+CUE(kSkeletonIdle,kSkeletonIdleS,kSkeletonIdle, CH_VOICE, 1, 175, true);
+CUE(kSkeletonHurt,kSkeletonHurtS,kSkeletonHurt, CH_IMPACT,5, 240, true);
+CUE(kSkeletonDie, kSkeletonDieS, kSkeletonDie,  CH_VOICE, 5, 225, false);
+CUE(kCreeperHurt, kCreeperHurtS, kCreeperHurt,  CH_IMPACT,5, 240, true);
+CUE(kCreeperDie,  kCreeperDieS,  kCreeperDie,   CH_VOICE, 5, 225, false);
 CUE(kHurt,      kHurtS,      kHurt,       CH_IMPACT, 8,   255, false);
 CUE(kDied,      kDiedS,      kDied,       CH_IMPACT, 9,   255, false);
 CUE(kTelegraph, kTelegraphS, kTelegraph,  CH_VOICE,  3,   210, false);
@@ -126,6 +177,38 @@ CUE(kCraft,     kCraftS,     kCraft,      CH_UI,     5,   215, false);
 CUE(kCraftFail, kCraftFailS, kCraftFail,  CH_UI,     5,   200, false);
 
 #undef CUE
+
+// The tables the game actually indexes. Built from the cues above rather than
+// being the cues themselves, because a Cue carries a reference to its waveform
+// and an array of them would either duplicate that or need an extra indirection
+// at every call site.
+const Cue kDig[MC_COUNT]   = { kDigSoft,   kDigStone,   kDigWood };
+const Cue kBreak[MC_COUNT] = { kBreakSoft, kBreakStone, kBreakWood };
+const Cue kPlace[MC_COUNT] = { kPlaceSoft, kPlaceStone, kPlaceWood };
+
+// MobKind order: zombie, creeper, skeleton. A creeper has no idle — the thing
+// that announces one is its fuse, and giving it an ambient noise would spend
+// the only warning the player gets on a mob that is not yet coming.
+const Cue kMobIdle[3] = { kZombieIdle, kZombieIdle, kSkeletonIdle };
+const Cue kMobHurt[3] = { kZombieHurt, kCreeperHurt, kSkeletonHurt };
+const Cue kMobDied[3] = { kZombieDie,  kCreeperDie,  kSkeletonDie };
+
+MatClass matClass(uint8_t block) {
+  switch (block) {
+    case world::B_GRASS: case world::B_DIRT: case world::B_SAND:
+    case world::B_SNOW:  case world::B_LEAVES:
+      return MC_SOFT;
+    case world::B_WOOD:  case world::B_PLANK: case world::B_TORCH:
+      return MC_WOOD;
+    // Ore in a stone matrix sounds like the matrix, not like the ore. Spelled
+    // out rather than left to the default so that adding a material and
+    // forgetting this switch is a compile-time-visible omission here.
+    case world::B_DIAMOND:
+      return MC_STONE;
+    default:
+      return MC_STONE;
+  }
+}
 
 // ---- the sequencer ----------------------------------------------------------
 

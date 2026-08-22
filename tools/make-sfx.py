@@ -256,6 +256,223 @@ def melody(notes, peak, wave="tri", harm=0.0):
 # Each function returns floats in -1..1. The comments say what the sound is
 # meant to be, because the numbers cannot.
 
+# ---- material classes -------------------------------------------------------
+#
+# Minecraft has a sound per material family and it is most of why digging feels
+# like digging: gravel crunches, stone cracks, wood knocks. One generic "tick"
+# for all thirteen materials made a pickaxe in dirt and a pickaxe in iron the
+# same event. Three families is the honest number here — the ear cannot tell
+# brick from masonry at 16 kHz through a Cardputer speaker, but it can very
+# easily tell soft from stone from wood.
+
+def s_dig_soft():
+    """Grass, dirt, sand, snow, leaves: a short damp crunch with no ring to it.
+    Bandpassed low and cut off fast, so a held dig is a shovel rhythm rather
+    than a rattle."""
+    d = 90
+    out = buf(d)
+    add(out, decay(band(noise(50), 900, 380, 120), 22, 0.5), 0, 1.0)
+    add(out, decay(osc(45, 120, 90, "tri"), 16, 1), 0, 0.35)
+    return finish(out, 0.5)
+
+
+def s_dig_stone():
+    """Stone, the ores, brick, masonry: a hard chip with a bright transient on
+    it. This is the one that has to survive being heard eight times a second,
+    so the tail is short and there is nothing tonal to fatigue against."""
+    d = 80
+    out = buf(d)
+    add(out, decay(band(noise(28), 3400, 1500, 700), 9, 0.2), 0, 1.0)
+    add(out, decay(band(noise(40), 1300, 700, 300), 18, 0.4), 6, 0.6)
+    add(out, decay(osc(55, 210, 165, "tri"), 16, 1), 0, 0.45)
+    return finish(out, 0.55)
+
+
+def s_dig_wood():
+    """Wood, planks, the lamp: a hollow knock. A resonator rather than a filter
+    — what makes wood sound like wood is that it rings briefly at a pitch."""
+    d = 95
+    out = buf(d)
+    add(out, decay(resonator(noise(30), 420, 380, q=7.0), 30, 0.5), 0, 1.0)
+    add(out, decay(band(noise(24), 2200, 900, 500), 10, 0.3), 0, 0.45)
+    return finish(out, 0.5)
+
+
+def s_break_soft():
+    """The same family, one octave of effort further: the crunch, then the
+    handful of it landing."""
+    d = 240
+    out = buf(d)
+    add(out, decay(band(noise(70), 1400, 500, 150), 30, 0.4), 0, 1.0)
+    add(out, decay(band(noise(60), 700, 300, 110), 26, 1), 70, 0.5)
+    add(out, decay(band(noise(50), 600, 260, 100), 22, 1), 140, 0.35)
+    return finish(out, 0.75)
+
+
+def s_break_stone():
+    """A crack and two pieces of rubble. The debris is what says a block came
+    apart rather than that something was struck."""
+    d = 280
+    out = buf(d)
+    add(out, decay(band(noise(60), 4500, 1500, 900), 14, 0.3), 0, 1.0)
+    add(out, decay(band(noise(70), 900, 500, 180), 26, 1), 70, 0.55)
+    add(out, decay(osc(70, 190, 140, "tri"), 26, 1), 70, 0.4)
+    add(out, decay(band(noise(60), 700, 400, 150), 22, 1), 150, 0.4)
+    add(out, decay(osc(60, 150, 110, "tri"), 22, 1), 150, 0.3)
+    return finish(out, 0.85)
+
+
+def s_break_wood():
+    """A splintering crack over the hollow the dig sound rings at, so breaking
+    and digging the same block are plainly the same material."""
+    d = 260
+    out = buf(d)
+    add(out, decay(band(noise(50), 3800, 1200, 800), 12, 0.25), 0, 0.9)
+    add(out, decay(resonator(noise(80), 400, 300, q=8.0), 60, 0.5), 0, 1.0)
+    add(out, decay(resonator(noise(60), 260, 210, q=8.0), 45, 1), 90, 0.5)
+    return finish(out, 0.8)
+
+
+def s_place_soft():
+    """A block set down: a soft pat, and a little rise on the end so placing and
+    breaking are opposites rather than variations."""
+    d = 120
+    out = buf(d)
+    add(out, decay(band(noise(28), 1100, 500, 200), 14, 0.3), 0, 0.8)
+    add(out, decay(osc(90, 200, 280, "tri"), 34, 2), 6, 0.9)
+    return finish(out, 0.55)
+
+
+def s_place_stone():
+    d = 130
+    out = buf(d)
+    add(out, decay(band(noise(26), 2600, 1100, 500), 10, 0.3), 0, 0.7)
+    add(out, decay(osc(100, 300, 430, "tri"), 40, 2), 8, 1.0)
+    return finish(out, 0.6)
+
+
+def s_place_wood():
+    d = 140
+    out = buf(d)
+    add(out, decay(resonator(noise(26), 480, 560, q=7.0), 40, 0.4), 0, 1.0)
+    add(out, decay(band(noise(20), 1800, 800, 400), 10, 0.3), 0, 0.4)
+    return finish(out, 0.6)
+
+
+# ---- mob voices -------------------------------------------------------------
+#
+# A mob that sounds like every other mob tells you nothing. In Minecraft the
+# night is legible by ear — a groan behind you and a rattle to your left are two
+# different problems — and on a panel this small, where a mob is sixteen pixels
+# and half the map is out of the fog, the ear is doing more of that work than
+# the eye is.
+#
+# There is no vocal tract here to model. What separates a groan from a rattle at
+# this sample rate is formants: two or three resonators over a source, low and
+# close together for a voice, high and sparse for bone.
+
+def voiced(ms, f0, f1, formants, q=9.0, buzz=0.55):
+    """A crude larynx: a saw at f0 sweeping to f1, plus noise, through a bank of
+    resonators. Enough to read as a throat rather than as a filter sweep."""
+    src = osc(ms, f0, f1, "saw")
+    nz = noise(ms)
+    src = [a * buzz + b * (1.0 - buzz) * 0.6 for a, b in zip(src, nz)]
+    out = buf(ms)
+    for i, (f, g) in enumerate(formants):
+        add(out, resonator(src, f, f * (f1 / f0), q=q), 0, g)
+    return out
+
+
+def s_zombie_idle():
+    """The moan. Low, slow, and falling — it is the sound of something that has
+    noticed you and is in no hurry, which is the whole of a zombie."""
+    d = 620
+    out = buf(d)
+    add(out, adr(voiced(d, 118, 92, [(190, 1.0), (520, 0.5), (1150, 0.2)]),
+                 90, 220, 240), 0, 1.0)
+    return finish(out, 0.55)
+
+
+def s_zombie_hurt():
+    """The same throat, hit. Shorter, higher, and it starts on the transient
+    rather than easing in."""
+    d = 260
+    out = buf(d)
+    add(out, decay(voiced(d, 168, 120, [(230, 1.0), (600, 0.5), (1250, 0.22)]),
+                   90, 4), 0, 1.0)
+    add(out, decay(band(noise(24), 2600, 1100, 500), 9, 0.2), 0, 0.35)
+    return finish(out, 0.8)
+
+
+def s_zombie_die():
+    """Longer, and it falls further than it can hold — the pitch runs out from
+    under the formants and the throat closes."""
+    d = 540
+    out = buf(d)
+    add(out, decay(voiced(d, 155, 70, [(210, 1.0), (540, 0.45), (1100, 0.18)]),
+                   210, 8), 0, 1.0)
+    return finish(out, 0.8)
+
+
+def s_skeleton_idle():
+    """Bone. Four dry clacks at no particular pitch, spaced unevenly — a rattle
+    is a rhythm, and an even one reads as a machine."""
+    d = 420
+    out = buf(d)
+    for at, g, f in ((0, 1.0, 2400), (95, 0.7, 2900), (165, 0.85, 2100),
+                     (290, 0.6, 2700)):
+        add(out, decay(resonator(noise(18), f, f, q=16.0), 12, 0.3), at, g)
+    return finish(out, 0.5)
+
+
+def s_skeleton_hurt():
+    """One hard clack with the whole rack behind it."""
+    d = 200
+    out = buf(d)
+    add(out, decay(resonator(noise(22), 2600, 2200, q=14.0), 16, 0.2), 0, 1.0)
+    add(out, decay(resonator(noise(30), 1500, 1300, q=10.0), 26, 0.4), 10, 0.6)
+    add(out, decay(band(noise(30), 3800, 1600, 900), 12, 0.2), 0, 0.5)
+    return finish(out, 0.8)
+
+
+def s_skeleton_die():
+    """The rack coming apart: clacks getting closer together and quieter, which
+    is what a pile of bones landing sounds like."""
+    d = 520
+    out = buf(d)
+    at = 0.0
+    gap = 78.0
+    g = 1.0
+    for k in range(7):
+        f = 2500 - k * 190
+        add(out, decay(resonator(noise(18), f, f, q=15.0), 13, 0.3), at, g)
+        at += gap
+        gap *= 0.82
+        g *= 0.84
+    return finish(out, 0.75)
+
+
+def s_creeper_hurt():
+    """Not a voice: a creeper is a bag of gunpowder with legs, so being hit is a
+    short pressurised hiss cut off rather than a cry."""
+    d = 190
+    out = buf(d)
+    add(out, adr(band(noise(d), 3600, 1800, 900, 700), 6, 30, 60), 0, 1.0)
+    add(out, decay(osc(70, 150, 110, "tri"), 26, 1), 0, 0.35)
+    return finish(out, 0.75)
+
+
+def s_creeper_die():
+    """The pressure going out of it, with no bang on the end — a creeper killed
+    before its fuse is the one that does NOT explode, and the sound has to say
+    so or the player braces for nothing."""
+    d = 420
+    out = buf(d)
+    add(out, ramp(band(noise(d), 3000, 700, 500, 300), 1.0, 0.0), 0, 1.0)
+    add(out, decay(osc(200, 120, 60, "tri"), 90, 6), 60, 0.4)
+    return finish(out, 0.7)
+
+
 def s_explode():
     """Noise falling from a hiss to a rumble, over a sub that drops with it, and
     a second thump behind it. The fall is the sound: five discrete tones read as
@@ -281,69 +498,19 @@ def s_died():
 
 
 def s_hurt():
-    """A noise transient over a square dropping through the bottom of the mix.
-    Has to cut through mining and a wave at once, so it is the loudest thing
-    that is not an explosion."""
-    d = 220
+    """The breath going out of you. Minecraft's damage sound is a grunt, and a
+    grunt is what makes damage read as happening to a body rather than to a
+    number — the square wave falling over that this replaces was a buzzer.
+
+    Still the loudest thing that is not an explosion: it has to cut through
+    mining and a full dark at once."""
+    d = 250
     out = buf(d)
-    add(out, decay(highpass(noise(30), 900), 10, 0.3), 0, 0.8)
-    add(out, decay(lowpass(osc(d, 200, 90, "square"), 1600, 700), 90, 2), 0, 1.0)
+    add(out, decay(highpass(noise(26), 1100), 8, 0.25), 0, 0.55)
+    add(out, decay(voiced(d, 205, 132, [(300, 1.0), (780, 0.55), (1500, 0.2)],
+                          q=8.0, buzz=0.62), 95, 3), 0, 1.0)
+    add(out, decay(osc(120, 105, 72, "tri"), 50, 2), 0, 0.4)
     return finish(out, 0.95)
-
-
-def s_mob_hit():
-    """Meat and bone: a 10 ms crack sitting on an 80 ms thump."""
-    d = 170
-    out = buf(d)
-    add(out, decay(band(noise(30), 5000, 2500, 600), 6, 0.2), 0, 1.0)
-    add(out, decay(lowpass(osc(120, 180, 110, "square"), 1400, 600), 45, 1), 0, 0.9)
-    add(out, decay(osc(d, 95, 70, "tri"), 70, 3), 0, 0.6)
-    return finish(out, 0.9)
-
-
-def s_mob_died():
-    """A saw sagging out from under itself. Lower and slower than a hit, so the
-    two never read as the same event."""
-    d = 400
-    out = buf(d)
-    add(out, decay(lowpass(osc(d, 440, 150, "saw", vib_hz=9.0, vib=0.04),
-                           3000, 700), 160, 8), 0, 1.0)
-    add(out, decay(osc(d, 220, 90, "tri"), 150, 8), 0, 0.4)
-    return finish(out, 0.85)
-
-
-def s_block_broke():
-    """The crack, then two pieces landing. The debris is what says a block came
-    apart rather than that something was struck."""
-    d = 280
-    out = buf(d)
-    add(out, decay(band(noise(60), 4500, 1500, 900), 14, 0.3), 0, 1.0)
-    add(out, decay(band(noise(70), 900, 500, 180), 26, 1), 70, 0.55)
-    add(out, decay(osc(70, 190, 140, "tri"), 26, 1), 70, 0.4)
-    add(out, decay(band(noise(60), 700, 400, 150), 22, 1), 150, 0.4)
-    add(out, decay(osc(60, 150, 110, "tri"), 22, 1), 150, 0.3)
-    return finish(out, 0.85)
-
-
-def s_mine_tick():
-    """A pick hitting rock. Fires several times a second while mining, so it has
-    to be short, dull and quiet — anything bright here becomes a buzz within a
-    second. sfx.cpp jitters its playback rate so repeats are not identical."""
-    d = 75
-    out = buf(d)
-    add(out, decay(band(noise(30), 1400, 700, 260), 12, 0.3), 0, 1.0)
-    add(out, decay(osc(60, 170, 130, "tri"), 20, 1), 0, 0.7)
-    return finish(out, 0.55)
-
-
-def s_place():
-    """A block set down: a soft knock with a little rise on the end, so placing
-    and breaking are opposites rather than variations."""
-    d = 130
-    out = buf(d)
-    add(out, decay(band(noise(30), 2000, 900, 400), 12, 0.3), 0, 0.7)
-    add(out, decay(osc(110, 300, 430, "tri"), 45, 2), 8, 1.0)
-    return finish(out, 0.6)
 
 
 def s_no_blocks():
@@ -413,13 +580,31 @@ def s_arrow_hit():
 
 
 def s_dusk():
-    """Two notes falling. A single beep says something happened; a falling pair
-    says which thing."""
-    return melody([(330, 150, 0), (247, 230, 140)], 0.65)
+    """A swell, not a jingle. With the phase bar gone this and its opposite are
+    the only clock the player has, so they have to be unmistakable without
+    being a fanfare every three minutes — the two-note chiptune fall this
+    replaces was fine as a level-transition sting and wrong as weather.
+
+    Falling, soft-edged, and low: the light going."""
+    d = 900
+    out = buf(d)
+    add(out, adr(lowpass(osc(d, 220, 146, "tri"), 1400, 600), 260, 200, 380),
+        0, 1.0)
+    add(out, adr(lowpass(osc(d, 110, 73, "sine"), 900, 400), 300, 200, 380),
+        0, 0.55)
+    add(out, adr(band(noise(d), 700, 300, 90, 60), 320, 150, 380), 0, 0.18)
+    return finish(out, 0.6)
 
 
 def s_dawn():
-    return melody([(392, 130, 0), (523, 130, 115), (659, 230, 230)], 0.65)
+    """The same idea rising, and a little brighter at the top."""
+    d = 900
+    out = buf(d)
+    add(out, adr(lowpass(osc(d, 175, 294, "tri"), 1200, 2400), 280, 220, 340),
+        0, 1.0)
+    add(out, adr(lowpass(osc(d, 262, 440, "sine"), 1600, 3000), 340, 200, 320),
+        0, 0.45)
+    return finish(out, 0.6)
 
 
 def s_menu_move():
@@ -451,14 +636,26 @@ def s_craft_fail():
 # Order here is the order in the header, and it is grouped the way sfx.cpp
 # groups its cues rather than alphabetically.
 BANK = [
-    ("mine_tick",  s_mine_tick),
-    ("block_broke", s_block_broke),
-    ("place",      s_place),
+    ("dig_soft",   s_dig_soft),
+    ("dig_stone",  s_dig_stone),
+    ("dig_wood",   s_dig_wood),
+    ("break_soft", s_break_soft),
+    ("break_stone", s_break_stone),
+    ("break_wood", s_break_wood),
+    ("place_soft", s_place_soft),
+    ("place_stone", s_place_stone),
+    ("place_wood", s_place_wood),
     ("no_blocks",  s_no_blocks),
     ("swing",      s_swing),
     ("whiff",      s_whiff),
-    ("mob_hit",    s_mob_hit),
-    ("mob_died",   s_mob_died),
+    ("zombie_idle", s_zombie_idle),
+    ("zombie_hurt", s_zombie_hurt),
+    ("zombie_die", s_zombie_die),
+    ("skeleton_idle", s_skeleton_idle),
+    ("skeleton_hurt", s_skeleton_hurt),
+    ("skeleton_die", s_skeleton_die),
+    ("creeper_hurt", s_creeper_hurt),
+    ("creeper_die", s_creeper_die),
     ("hurt",       s_hurt),
     ("died",       s_died),
     ("telegraph",  s_telegraph),

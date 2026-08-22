@@ -31,7 +31,8 @@
 
 namespace {
 
-enum Screen : uint8_t { SCR_TITLE, SCR_PLAY, SCR_UPGRADE, SCR_PAUSE, SCR_CRAFT, SCR_DEAD };
+enum Screen : uint8_t { SCR_TITLE, SCR_PLAY, SCR_PAUSE, SCR_CRAFT, SCR_RECIPES,
+                        SCR_DEAD };
 
 constexpr uint32_t TICK_US   = 1000000u / game::TICK_HZ;
 constexpr int      MAX_CATCHUP = 4;    // never simulate more than this per frame
@@ -44,14 +45,11 @@ uint32_t         s_best = 0;
 bool             s_record = false;
 bool             s_sound = false;                 // the pause-card setting, kept in NVS
 ui::Menu         s_menu;
-// Four is the pause card, which is the longest list here: the craft menu has
-// R_COUNT rows and the dawn card has three. Spelled as a floor rather than left
-// to happen to be R_COUNT, so removing a recipe cannot quietly shrink it under
-// what openPauseMenu() writes.
-ui::MenuItem     s_items[game::R_COUNT > 4 ? game::R_COUNT : 4];
+// The pause card is the only Menu left: the recipe book draws itself now, and
+// draws pictures rather than rows. Four is what openPauseMenu() writes.
+ui::MenuItem     s_items[4];
 char             s_title[28];                     // menu heading, rebuilt per open
 char             s_soundRow[16];                  // "SOUND: ON", rebuilt on toggle
-char             s_detail[game::R_COUNT][26];     // recipe cost lines
 uint32_t         s_tickAccum = 0;
 uint32_t         s_lastUs = 0;
 int              s_lockout = 0;
@@ -68,26 +66,42 @@ uint16_t         s_mineChirp = 0;
 // what it always should have been — the hiss is the only warning the player
 // gets, and it used to be silenced by a pickaxe.
 void playEvents(uint32_t ev) {
+  // The three cues that need a subject read it off State. An event is a bit and
+  // a bit cannot say WHICH — which material is under the pick, which mob was
+  // hit — so the simulation leaves the answer next to the flag.
+  const sfx::MatClass mc = sfx::matClass(s_game.sfxDigMat);
+  const uint8_t hitKind  = s_game.sfxHitKind  % 3;
+  const uint8_t diedKind = s_game.sfxDiedKind % 3;
+  const uint8_t idleKind = s_game.sfxIdleKind % 3;
+
   if (ev & game::EV_DIED)        sfx::play(sfx::kDied);
   if (ev & game::EV_EXPLODE)     sfx::play(sfx::kExplode);
   if (ev & game::EV_HURT)        sfx::play(sfx::kHurt);
-  if (ev & game::EV_MOB_DIED)    sfx::play(sfx::kMobDied);
+  if (ev & game::EV_MOB_DIED)    sfx::play(sfx::kMobDied[diedKind]);
   if (ev & game::EV_HISS)        sfx::play(sfx::kHiss);
   if (ev & game::EV_TELEGRAPH)   sfx::play(sfx::kTelegraph);
   if (ev & game::EV_DUSK)        sfx::play(sfx::kDusk);
   if (ev & game::EV_DAWN)        sfx::play(sfx::kDawn);
-  if (ev & game::EV_BLOCK_BROKE) sfx::play(sfx::kBlockBroke);
-  if (ev & game::EV_MOB_HIT)     sfx::play(sfx::kMobHit);
+  if (ev & game::EV_BLOCK_BROKE) sfx::play(sfx::kBreak[mc]);
+  // A tool going is the one thing here the player cannot see happen -- it is a
+  // slot emptying at the bottom of the screen while they are looking at a wall.
+  if (ev & game::EV_TOOL_BROKE)  sfx::play(sfx::kCraftFail);
+  if (ev & game::EV_PICKUP)      sfx::play(sfx::kBuy);
+  else if (ev & game::EV_DROP)   sfx::play(sfx::kMenuMove);
+  if (ev & game::EV_MOB_HIT)     sfx::play(sfx::kMobHurt[hitKind]);
   else if (ev & game::EV_SWING)  sfx::play(sfx::kSwing);
   else if (ev & game::EV_WHIFF)  sfx::play(sfx::kWhiff);
   if (ev & game::EV_ARROW_FIRE)  sfx::play(sfx::kArrowFire);
   if (ev & game::EV_ARROW_HIT)   sfx::play(sfx::kArrowHit);
-  if (ev & game::EV_PLACE)       sfx::play(sfx::kPlace);
+  if (ev & game::EV_PLACE)       sfx::play(sfx::kPlace[mc]);
   if (ev & game::EV_NO_BLOCKS)   sfx::play(sfx::kNoBlocks);
+  // Something out in the dark, talking to itself. Lowest priority on its
+  // channel, so it never lands on top of a fuse.
+  if (ev & game::EV_MOB_IDLE)    sfx::play(sfx::kMobIdle[idleKind]);
   if (ev & game::EV_MINE_STEP) {
     // Mining fires every tick; a sound per tick is a buzz. Every eighth is a
     // pickaxe rhythm instead.
-    if (++s_mineChirp >= 8) { s_mineChirp = 0; sfx::play(sfx::kMineTick); }
+    if (++s_mineChirp >= 8) { s_mineChirp = 0; sfx::play(sfx::kDig[mc]); }
   }
 }
 
@@ -138,7 +152,7 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
   s_fpsN = 0;
 }
 
-// Below the objective line, not on top of it.
+// Top left, where the objective line used to be.
 void fpsDraw() { render::text(3, 14, s_fpsLine, render::pack(120, 220, 140), 1); }
 #endif
 
@@ -164,48 +178,38 @@ int8_t   s_look = 0;
 
 // ---- helpers ----------------------------------------------------------------
 
-// Builds the dawn card from the three offers. The labels come from the game's
-// upgrade table so the menu never disagrees with what buying one actually does.
-void openUpgradeMenu() {
-  for (int i = 0; i < 3; ++i) {
-    const game::UpgradeInfo& u = game::upgradeInfo(s_game.offer[i]);
-    s_items[i].label   = u.name;
-    s_items[i].detail  = u.detail;
-    s_items[i].cost    = u.cost;
-    s_items[i].enabled = (s_game.ore >= u.cost);
-  }
-  snprintf(s_title, sizeof(s_title), "NIGHT %u SURVIVED",
-           (unsigned)(s_game.night - 1));
-  s_menu.open(s_title, s_items, 3);
+// The book's cursor. It is UI and only UI -- unlike the grid cursor, which
+// lives in State because the host tests lay recipes out and commit them --
+// so it stays here rather than being carried through the simulation.
+int s_book = 0;
+
+// The craft card's control hint, built from caps() rather than spelled out, so
+// a board that binds these elsewhere gets its own keys named back to it.
+const char* menuFoot() {
+  static char foot[40];
+  snprintf(foot, sizeof(foot), "%s MOVE  %s OK  %s BACK",
+           hal::caps().kMove, hal::caps().kConfirm, hal::caps().kBack);
+  return foot;
 }
 
-// Recipe rows carry their inputs in the detail line, because a recipe you have
-// to memorise is a recipe nobody uses.
-void openCraftMenu() {
-  for (int i = 0; i < game::R_COUNT; ++i) {
-    const game::RecipeInfo& r = game::recipeInfo((uint8_t)i);
-    int n = snprintf(s_detail[i], sizeof(s_detail[i]), "%u %s",
-                     (unsigned)r.inQty[0], world::info(r.inMat[0]).name);
-    if (r.inQty[1])
-      snprintf(s_detail[i] + n, sizeof(s_detail[i]) - n, " + %u %s",
-               (unsigned)r.inQty[1], world::info(r.inMat[1]).name);
-    s_items[i].label   = r.name;
-    s_items[i].detail  = s_detail[i];
-    s_items[i].cost    = 0;
-    s_items[i].enabled = game::canCraft(s_game, (uint8_t)i);
-  }
-  snprintf(s_title, sizeof(s_title), "CRAFT");
-  s_menu.open(s_title, s_items, game::R_COUNT);
+const char* cardFoot() {
+  static char foot[44];
+  // Short on purpose: the card is 168 px and this used to be 185, so it ran off
+  // both ends and over the hotbar. The arrows need no hint -- the cursor is
+  // visible and moving it is the first thing anyone tries.
+  snprintf(foot, sizeof(foot), "%s OK   %s BACK",
+           hal::caps().kConfirm, hal::caps().kBack);
+  return foot;
 }
 
 // Four rows is what the card can hold: Menu::draw sizes itself to its contents
 // and four comes to 127 px of the 135 the panel has. A fifth would not fit.
 void openPauseMenu() {
   snprintf(s_soundRow, sizeof(s_soundRow), "SOUND: %s", s_sound ? "ON" : "OFF");
-  s_items[0] = ui::MenuItem{ "RESUME",    nullptr,         0, true };
-  s_items[1] = ui::MenuItem{ s_soundRow,  nullptr,         0, true };
-  s_items[2] = ui::MenuItem{ "NEW WORLD", "start over",    0, true };
-  s_items[3] = ui::MenuItem{ "QUIT",      "back to title", 0, true };
+  s_items[0] = ui::MenuItem{ "RESUME",    nullptr,         true };
+  s_items[1] = ui::MenuItem{ s_soundRow,  nullptr,         true };
+  s_items[2] = ui::MenuItem{ "NEW WORLD", "start over",    true };
+  s_items[3] = ui::MenuItem{ "QUIT",      "back to title", true };
   snprintf(s_title, sizeof(s_title), "PAUSED  NIGHT %u", (unsigned)s_game.night);
   s_menu.open(s_title, s_items, 4);
 }
@@ -267,6 +271,7 @@ void drawScene() {
                     s_game.aimValid ? s_game.aimZ : -1);
   render::drawSky(cam, game::daylight(s_game));
   render::drawMobs(s_game, cam);
+  render::drawDrops(s_game, cam);
   render::drawParticles(cam);
   render::drawTool(s_game);
   render::drawHurt(s_game);
@@ -339,7 +344,8 @@ void loop() {
   hal::update();
   const hal::Buttons& b = hal::buttons();
   if (s_lockout) --s_lockout;
-  const bool confirm = (s_lockout == 0) && b.startEdge;
+  const bool confirm = (s_lockout == 0) && b.confirmEdge;
+  const bool cancel  = (s_lockout == 0) && b.cancelEdge;
 
   switch (s_scr) {
     case SCR_TITLE:
@@ -348,24 +354,27 @@ void loop() {
       break;
 
     case SCR_PLAY: {
-      if (b.pauseEdge && !s_lockout) {
+      if (cancel) {
         openPauseMenu();
         s_scr = SCR_PAUSE;
         s_lockout = LOCKOUT_FRAMES;
         drawScene();
-        s_menu.draw("\x18\x19 PICK   E OK");
+        s_menu.draw(menuFoot());
         break;
       }
       if (b.craftEdge && !s_lockout) {
-        openCraftMenu();
         s_scr = SCR_CRAFT;
         s_lockout = LOCKOUT_FRAMES;
         drawScene();
-        s_menu.draw(nullptr);
+        ui::craftCard(s_game, cardFoot());
         break;
       }
       if (b.cycleEdge && !s_lockout) {
         game::cycleBlock(s_game, 1);
+        sfx::play(sfx::kMenuMove);
+      }
+      if (b.slotPick && !s_lockout) {
+        game::selectSlot(s_game, (int)b.slotPick - 1);
         sfx::play(sfx::kMenuMove);
       }
 
@@ -378,6 +387,7 @@ void loop() {
       in.fwd   = b.fwd;    in.back  = b.back;
       in.act   = b.act && !s_lockout;
       in.build = b.build && !s_lockout;
+      in.drop  = b.drop  && !s_lockout;
       in.lookUp   = b.lookUp;
       in.lookDown = b.lookDown;
 #ifdef DEV_SERIAL
@@ -439,50 +449,67 @@ void loop() {
 
       playEvents(ev);
       drawScene();
-      ui::phaseBar(s_game);
-      ui::objective(s_game);
       ui::crosshair(s_game);
       ui::hud(s_game);
 
       if (s_game.dead) endRun();
-      else if (s_game.awaitingUpgrade) {
-        openUpgradeMenu();
-        s_scr = SCR_UPGRADE;
-        s_lockout = LOCKOUT_FRAMES;
+      break;
+    }
+
+    case SCR_CRAFT: {
+      drawScene();
+      ui::hud(s_game);
+      ui::craftCard(s_game, cardFoot());
+      if (!s_lockout) {
+        // Four arrows move the cursor across every stop on the card -- the four
+        // cells, the result, and the book row -- and ENTER does whatever the
+        // cursor is on. There is no key here that means one particular thing.
+        if (b.navLeft)  { game::gridMove(s_game, -1, 0); sfx::play(sfx::kMenuMove); }
+        if (b.navRight) { game::gridMove(s_game,  1, 0); sfx::play(sfx::kMenuMove); }
+        if (b.navUp)    { game::gridMove(s_game, 0, -1); sfx::play(sfx::kMenuMove); }
+        if (b.navDown)  { game::gridMove(s_game, 0,  1); sfx::play(sfx::kMenuMove); }
+
+        if (cancel || b.craftEdge) {
+          resume();
+        } else if (confirm) {
+          if (game::gridOnCell(s_game)) {
+            game::gridCycle(s_game, 1);
+            sfx::play(sfx::kMenuMove);
+          } else if (s_game.gridSel == game::GRID_FOCUS_OUT) {
+            sfx::play(game::craftGrid(s_game) ? sfx::kCraft : sfx::kCraftFail);
+          } else {
+            s_book = 0;
+            s_scr = SCR_RECIPES;
+            s_lockout = LOCKOUT_FRAMES;
+          }
+        }
       }
       break;
     }
 
-    case SCR_UPGRADE:
+    case SCR_RECIPES: {
       drawScene();
-      s_menu.draw("\x18\x19 PICK   E TAKE");
-      if (!s_lockout) {
-        if (b.fwdEdge  || b.leftEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
-        if (b.backEdge || b.rightEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
-        if (b.actEdge) {
-          game::chooseUpgrade(s_game, s_game.offer[s_menu.index()]);
-          sfx::play(sfx::kBuy);
-          resume();
-        }
-      }
-      break;
-
-    case SCR_CRAFT: {
-      drawScene();
-      ui::phaseBar(s_game);
       ui::hud(s_game);
-      char foot[40];
-      snprintf(foot, sizeof(foot), "\x18\x19 PICK   %s MAKE   %s BACK",
-               hal::caps().kAct, hal::caps().kCraft);
-      s_menu.draw(foot);
+      ui::recipeBook(s_game, s_book, cardFoot());
       if (!s_lockout) {
-        if (b.fwdEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
-        if (b.backEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
-        if (b.craftEdge || b.pauseEdge) resume();
-        else if (b.actEdge) {
-          if (game::craft(s_game, (uint8_t)s_menu.index())) {
-            sfx::play(sfx::kCraft);
-            openCraftMenu();          // refresh what is now affordable
+        const int n = (int)game::R_COUNT;
+        if (b.navUp)   { s_book = (s_book + n - 1) % n; sfx::play(sfx::kMenuMove); }
+        if (b.navDown) { s_book = (s_book + 1) % n;     sfx::play(sfx::kMenuMove); }
+
+        if (cancel) {
+          // Back is one level up, and one level up from the book is the grid.
+          s_scr = SCR_CRAFT;
+          s_lockout = LOCKOUT_FRAMES;
+        } else if (confirm) {
+          // Lays the recipe out on the grid and goes back to it, rather than
+          // crafting on the spot. The grid is where crafting happens, and a
+          // book that quietly made things behind it would leave the player with
+          // no idea what the four cells were for.
+          if (game::fillGrid(s_game, (uint8_t)s_book)) {
+            sfx::play(sfx::kMenuMove);
+            s_game.gridSel = game::GRID_FOCUS_OUT;   // cursor on the thing to press
+            s_scr = SCR_CRAFT;
+            s_lockout = LOCKOUT_FRAMES;
           } else {
             sfx::play(sfx::kCraftFail);
           }
@@ -496,14 +523,13 @@ void loop() {
       // background would lose where the player was standing, which is the one
       // thing they came back to the game to remember.
       drawScene();
-      ui::phaseBar(s_game);
       ui::hud(s_game);
-      s_menu.draw("\x18\x19 PICK   E OK");
+      s_menu.draw(menuFoot());
       if (!s_lockout) {
-        if (b.fwdEdge)  { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
-        if (b.backEdge) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
-        if (b.pauseEdge) resume();
-        else if (b.actEdge) {
+        if (b.navUp)   { s_menu.move(-1); sfx::play(sfx::kMenuMove); }
+        if (b.navDown) { s_menu.move(1);  sfx::play(sfx::kMenuMove); }
+        if (cancel) resume();
+        else if (confirm) {
           // Spelled out rather than leaning on default:, because the row that
           // falls through is whichever one was added last, and that is not a
           // thing the next person to add a row should have to notice.
@@ -544,7 +570,12 @@ void loop() {
   if (Serial.available()) {
     const int cmd = Serial.read();
     if (cmd == 's') {
-      static const char* const kName[] = { "title", "play", "upgrade", "pause", "dead" };
+      static const char* const kName[] = { "title", "play", "pause", "craft",
+                                          "recipes", "dead" };
+      // Indexed by the screen, so adding one without a name here would read
+      // off the end and hand a wild pointer to the screenshot writer.
+      static_assert(sizeof(kName) / sizeof(kName[0]) == SCR_DEAD + 1,
+                    "every Screen needs a screenshot name");
       shot::capture(kName[s_scr]);
     } else if (cmd == 't') {
       // Build a bridge across the view and stand back from it. Arches and cave
@@ -561,7 +592,7 @@ void loop() {
       for (int x = cx - 8; x <= cx + 8; ++x) {
         for (int y = by - 1; y <= by + 1; ++y) {
           while (world::height(x, y) > world::GROUND)
-            { uint8_t m, b2, o; world::mine(x, y, 100000, m, b2, o); }
+            { uint8_t m, b2; world::mineTop(x, y, 100000, m, b2); }
           while (world::height(x, y) < world::GROUND)
             world::place(x, y, world::B_DIRT);
         }
@@ -602,9 +633,9 @@ void loop() {
       for (int y = py - 12; y <= py + 12; ++y)
         for (int x = px - 12; x <= px + 12; ++x) {
           if (world::isBorder(x, y)) continue;
-          uint8_t dm, db, dro;
+          uint8_t dm, db;
           while (world::height(x, y) > world::GROUND)
-            world::mine(x, y, 100000, dm, db, dro);
+            world::mineTop(x, y, 100000, dm, db);
           while (world::height(x, y) < world::GROUND)
             world::place(x, y, world::B_DIRT);
         }
@@ -633,6 +664,37 @@ void loop() {
       // openable from the keyboard.
       if (s_scr == SCR_PLAY) { openPauseMenu(); s_scr = SCR_PAUSE; }
       else if (s_scr == SCR_PAUSE) { resume(); }
+    } else if (cmd == 'c') {
+      // The craft card and the book, for the same reason 'p' exists: they are
+      // openable only from the keyboard, and both are now pictures rather than
+      // text, so the only way to review them is to look at one.
+      //
+      // Stocked on the way in. An empty grid photographs as an empty grid, and
+      // what wants reviewing is a card with a recipe laid out in it.
+      if (s_scr == SCR_PLAY || s_scr == SCR_RECIPES) {
+        s_game.inv[world::B_PLANK] = 6;
+        s_game.inv[world::B_STONE] = 8;
+        s_game.inv[world::B_WOOD]  = 4;
+        s_game.inv[world::B_COAL]  = 3;
+        s_game.inv[world::B_IRON]  = 2;
+        for (uint8_t m = 0; m < world::B_COUNT; ++m) {
+          if (!s_game.inv[m]) continue;
+          bool shown = false;
+          for (int i = 0; i < game::SLOT_N; ++i)
+            if (s_game.slot[i] == m) shown = true;
+          if (shown) continue;
+          for (int i = 0; i < game::SLOT_N; ++i)
+            if (s_game.slot[i] == game::SLOT_EMPTY) { s_game.slot[i] = m; break; }
+        }
+        game::fillGrid(s_game, game::R_PICK_STONE);
+        s_game.gridSel = game::GRID_FOCUS_OUT;
+        s_scr = SCR_CRAFT;
+      } else if (s_scr == SCR_CRAFT) {
+        resume();
+      }
+    } else if (cmd == 'r') {
+      if (s_scr == SCR_CRAFT) { s_book = 4; s_scr = SCR_RECIPES; }
+      else if (s_scr == SCR_RECIPES) { s_scr = SCR_CRAFT; }
     } else if (cmd == 'g') {
       // Stand the player in front of something worth looking at, and face it.
       // A house is two or three cells on a 64x64 map and a tree not much more;
@@ -709,14 +771,14 @@ void loop() {
         s_lockout = LOCKOUT_FRAMES;
         s_tickAccum = 0;
         s_lastUs = micros();
-        // Jump straight to a late-night wave. A benchmark that measures night
-        // one measures five mobs; the frame rate that has to hold is the one
-        // with a full field of twenty-four, and waiting ten real minutes to
-        // reach it is not a test anyone will run twice.
+        // Jump straight into the small hours. A benchmark run in daylight
+        // measures no mobs at all; the frame rate that has to hold is the one
+        // with the dark full to its cap, and the spawner fills it in about
+        // seven seconds from here rather than the ten real minutes it would
+        // take to arrive at honestly.
         s_game.night = 10;
         s_game.phase = game::PH_NIGHT;
         s_game.phaseTick = 0;
-        s_game.spawnBudget = game::MAX_MOBS;
         s_game.spawnTimer = 0;
         s_game.maxHp = s_game.hp = 200;     // survive long enough to be measured
       }

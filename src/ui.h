@@ -5,9 +5,10 @@
 //  as the 3D pass, so a frame is still one DMA transfer. Nothing in this file
 //  touches the panel directly.
 //
-//  The whole HUD lives in a 13-pixel strip. On a 240x135 panel anything more is
-//  taken out of the world you are trying to see, so state the picture can carry
-//  — how late in the day it is, that you are hurt — is carried by the picture.
+//  The HUD is hearts over a nine-slot hotbar, floating at the bottom of the
+//  panel rather than filling a strip across it. On 240x135 every row it covers
+//  is a row of world you cannot see, so anything the picture can carry — how
+//  late it is, that you are hurt — is left to the picture.
 // =============================================================================
 #pragma once
 
@@ -17,19 +18,39 @@
 
 namespace ui {
 
-constexpr int HUD_H = 13;
+// Hearts (9 px) over the hotbar (18 px) with a little air. Nothing renders
+// around this — the world is drawn full-frame and the HUD is painted over it —
+// so it is an occlusion budget, not a viewport.
+constexpr int HUD_H = 30;
 
+// Hearts and the hotbar. There is no clock in it and no objective line: the sky
+// says how late it is, and the dusk and dawn cues say when it turned. A meter
+// counting down to nightfall is a thing this game was reading instead of
+// looking at the world, which is the opposite of what it wants to be.
 void hud(const game::State& s);
 
-// A single line under the phase bar saying what to do and how long is left.
-// The game has no tutorial and no manual: without this a new player spends
-// their first day not knowing a night is coming.
-void objective(const game::State& s);
 void crosshair(const game::State& s);
 
-// The thin band at the top of the screen: how much of the current phase is
-// left. Not a widget so much as a horizon line — it reads without being read.
-void phaseBar(const game::State& s);
+// The 2x2 crafting card: the grid, what it currently spells, and the cursor.
+// Draws only — the cursor and the cells live in game::State, so the host tests
+// can lay out a recipe and commit it with no renderer in the picture.
+//
+// footer is the control hint, built by the caller from hal::caps() the same way
+// every other card's is. It is not spelled here because the key that does a job
+// is a property of the board, not of the card.
+void craftCard(const game::State& s, const char* footer);
+
+// The recipe book: every recipe drawn as its own ingredients, not described in
+// words. A cost line like "2 STONE + 1 PLANK" asks the player to hold three
+// facts in their head and then find those materials on a bar that shows them as
+// pictures; this shows the same pictures, in the order they go into the grid.
+//
+// sel is the highlighted row; the window scrolls to keep it visible.
+void recipeBook(const game::State& s, int sel, const char* footer);
+
+// How many rows of the book fit on the card. The caller owns the cursor, so it
+// needs the same number to clamp against.
+constexpr int BOOK_ROWS = 4;
 
 void title(const char* board, uint32_t best);
 void deathCard(const game::State& s, uint32_t best, bool isRecord);
@@ -39,8 +60,7 @@ void deathCard(const game::State& s, uint32_t best, bool isRecord);
 struct MenuItem {
   const char* label   = nullptr;
   const char* detail  = nullptr;   // second line, optional
-  uint16_t    cost    = 0;         // 0 = free; otherwise drawn with an ore swatch
-  bool        enabled = true;      // false greys it and marks the cost red
+  bool        enabled = true;      // false greys the row
 };
 
 // A card with a title, a cursor and up to a handful of rows.
@@ -54,6 +74,10 @@ struct MenuItem {
 // decide what a selection means: the screen that opened it does both.
 class Menu {
  public:
+  // How many rows fit on the card. See Menu::draw for where 4 comes from; a
+  // list longer than this scrolls a window of this size over itself.
+  static constexpr int MAX_ROWS = 4;
+
   void open(const char* title, const MenuItem* items, int count);
   void close() { items_ = nullptr; }
   bool isOpen() const { return items_ != nullptr; }

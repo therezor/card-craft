@@ -93,10 +93,25 @@ constexpr float slopeFor(int horizon) {
   return (float)(VIEW_H / 2 - horizon) / PROJ;
 }
 
-// The shade table saturates at 16 cells (one distance band per cell), so a
-// span drawn beyond that is exactly the fog colour the background already
-// holds. Walking further is work with nothing to show for it.
-constexpr float MAX_DIST  = 17.0f;
+// The shade table saturates at render::BANDS cells (one distance band per
+// cell), so a span drawn beyond that is exactly the fog colour the background
+// already holds. Walking further is work with nothing to show for it.
+//
+// Pulled in from 17 with the fog, and the figure is measured rather than
+// reasoned about. The walker usually stops because every screen row is painted,
+// not because it ran out of distance, so this only bites once it drops below
+// where a column typically fills up — which is why 12 was worth nothing and 11
+// is worth something. On the fixed-seed daylight sweep, averaged over 1200
+// frames of it, world_us and the worst frame rate went:
+//
+//     17 cells  11.9 ms  34 fps        11 cells  10.4 ms  38 fps
+//     12 cells  11.7 ms  35 fps         9 cells   9.7 ms  41 fps
+//
+// Eleven is the modest end of that: a real gain, and a view you can still see
+// across. Keep it exactly one cell past render::BANDS — shorter and the walker
+// stops before the fog has finished closing, which reads as a cut-off edge
+// rather than as distance.
+constexpr float MAX_DIST  = 11.0f;
 constexpr int   MAX_STEPS = 72;
 // A column is 135 rows, so this cannot be reached by geometry that tiles the
 // panel — but a stack thirty-two blocks tall seen edge-on emits one span per
@@ -112,9 +127,21 @@ constexpr int   MAX_SPANS = 112;
 // over the largest area of the screen with a per-row shade computation, and
 // the pixels cost far more than the spans saved.
 
-// Distance buckets recorded per column for mob occlusion. See castColumn.
-constexpr int   ZBUCKETS     = 8;
-constexpr float ZBUCKET_SPAN = 4.0f;
+// Distance buckets recorded per column for sprite occlusion. See castColumn.
+//
+// One bucket per cell, which is one bucket per block — the finest resolution
+// that means anything in a world made of unit cubes, and the reason it can be
+// afforded is MAX_DIST: twelve buckets cover the whole draw distance now,
+// where at seventeen cells they would not have.
+//
+// It used to be eight buckets of four cells, and four cells is three blocks of
+// slack. A mob standing anywhere in the same four-cell band as the wall in
+// front of it was tested against occlusion the wall had not contributed yet,
+// so it drew straight through the wall — which is exactly the resolution of
+// the artefact. Sprites clip against a per-column, per-cell horizon now; a
+// true per-pixel depth buffer would be 31 KB and this board does not have it.
+constexpr int   ZBUCKETS     = 12;
+constexpr float ZBUCKET_SPAN = 1.0f;
 
 enum Face : uint8_t { F_NS = 0, F_EW = 1, F_TOP = 2, F_BOT = 3, F_COUNT = 4 };
 
@@ -237,7 +264,6 @@ struct ColumnResult {
   //
   // Empty is encoded as selY0 >= selY1.
   int16_t  selY0, selY1;
-  uint8_t  selMat;
 
   // The same block's extent *before* the clipper saw it. The visible extent
   // alone cannot tell an edge of the block from an edge of whatever is standing

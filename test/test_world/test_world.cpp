@@ -114,10 +114,10 @@ static void test_chopping_a_tree_actually_yields_wood(void) {
       if (topMat(x, y) == B_LEAVES && height(x, y) > GROUND + 2) { tx = x; ty = y; }
   TEST_ASSERT_TRUE(tx > 0);
 
-  uint8_t dm, db, dro;
+  uint8_t dm, db;
   int leaves = 0, wood = 0;
   while (height(tx, ty) > GROUND)
-    if (mine(tx, ty, 100000, dm, db, dro)) {
+    if (mineTop(tx, ty, 100000, dm, db)) {
       if (dm == B_LEAVES) ++leaves;
       if (dm == B_WOOD)   ++wood;
     }
@@ -142,7 +142,12 @@ static void test_a_tree_canopy_hangs_over_walkable_ground(void) {
         ++canopies;
         TEST_ASSERT_TRUE(slabBase(x, y) > height(x, y));   // over air
         TEST_ASSERT_TRUE(standable(x, y));                 // with headroom
-        TEST_ASSERT_TRUE(canEnter(GROUND, x, y));          // and you can get in
+        // Enterable from the ground under it, which is not the same as from
+        // GROUND. A crown is allowed to hang over a slope now — the old rule
+        // wanted dead-flat ground under every leaf and that is why a tree on
+        // any kind of hill came out half bald — so asking whether a body at
+        // the global ground level could step in was asking about the hill.
+        TEST_ASSERT_TRUE(canEnter((int)height(x, y), x, y));
         // A trunk near it, reaching its underside, holding it up. Two cells,
         // not one: the crown is five across, so its outer ring stands that far
         // out from the trunk it hangs off.
@@ -157,9 +162,16 @@ static void test_a_tree_canopy_hangs_over_walkable_ground(void) {
   TEST_ASSERT_TRUE(canopies > 0);
 }
 
-// Fell the tree and the crown comes down with it. Leaves left hanging over
-// their own stump are worse than the bush this replaced.
-static void test_felling_a_tree_drops_its_canopy(void) {
+// Fell the tree and the crown stays exactly where it was.
+//
+// This test used to assert the opposite, and the opposite is what the game
+// did: cutting the last log deleted the whole canopy on the same tick. That is
+// not what Minecraft does — a chopped oak leaves a crown hanging in the air
+// that you can climb into, harvest, or ignore — and it took the leaves out of
+// the player's reach in the process. The sweep that did it still exists and is
+// still correct, but it belongs to worldgen, where a platform cut out from
+// under a tree really would leave a crown over nothing.
+static void test_felling_a_tree_leaves_its_canopy_standing(void) {
   generate(4242);
   int tx = -1, ty = -1;
   for (int y = 5; y < H - 5 && tx < 0; ++y)
@@ -179,13 +191,23 @@ static void test_felling_a_tree_drops_its_canopy(void) {
     }
   TEST_ASSERT_TRUE(tx > 0);
 
-  uint8_t dm, db, dro;
-  while (height(tx, ty) > GROUND) mine(tx, ty, 100000, dm, db, dro);
-
+  int before = 0;
   for (int dy = -2; dy <= 2; ++dy)
     for (int dx = -2; dx <= 2; ++dx)
-      TEST_ASSERT_FALSE(hasSlab(tx + dx, ty + dy)
-                        && slabMat(tx + dx, ty + dy) == B_LEAVES);
+      if (hasSlab(tx + dx, ty + dy) && slabMat(tx + dx, ty + dy) == B_LEAVES)
+        ++before;
+  TEST_ASSERT_TRUE(before > 0);
+
+  uint8_t dm, db;
+  while (height(tx, ty) > GROUND) mineTop(tx, ty, 100000, dm, db);
+  TEST_ASSERT_EQUAL_UINT8(GROUND, height(tx, ty));    // the trunk really is gone
+
+  int after = 0;
+  for (int dy = -2; dy <= 2; ++dy)
+    for (int dx = -2; dx <= 2; ++dx)
+      if (hasSlab(tx + dx, ty + dy) && slabMat(tx + dx, ty + dy) == B_LEAVES)
+        ++after;
+  TEST_ASSERT_EQUAL_INT(before, after);               // and the crown is still up
 }
 
 // ---- buildings --------------------------------------------------------------
@@ -287,11 +309,92 @@ static void test_ore_is_below_the_dirt_band(void) {
         { ux = x; uy = y; }
   TEST_ASSERT_TRUE(ux > 0);
   TEST_ASSERT_EQUAL_UINT8(B_DIRT, matAt(ux, uy, GROUND - 2));
+  // Sampled a course above the floor: layer zero is bedrock everywhere now, so
+  // asking it about ore asks about the one layer that can never hold any.
   bool sawOre = false;
   for (int y = 2; y < H - 2 && !sawOre; ++y)
     for (int x = 2; x < W - 2 && !sawOre; ++x)
-      if (matAt(x, y, 0) == B_COAL || matAt(x, y, 0) == B_IRON) sawOre = true;
+      if (matAt(x, y, 1) == B_COAL || matAt(x, y, 1) == B_IRON) sawOre = true;
   TEST_ASSERT_TRUE(sawOre);
+}
+
+// Light is craft-only now, so nothing the generator builds may emit any. The
+// three places that used to -- a house's interior torch, the village path, and
+// the castle brazier -- were free light sitting inside the best shelter on the
+// map, which is exactly the pressure the torch recipe is supposed to create.
+//
+// Swept over seeds rather than checked on one: village, house and castle all
+// have placement tests that fail on some maps, so a single seed could pass by
+// simply not having built the thing that used to carry the torch.
+static void test_the_generator_places_no_light(void) {
+  for (uint32_t seed = 1; seed <= 25; ++seed) {
+    generate(seed);
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x)
+        for (int z = 0; z < MAX_H; ++z) {
+          if (!solidAt(x, y, z)) continue;
+          TEST_ASSERT_NOT_EQUAL_UINT8(B_TORCH, matAt(x, y, z));
+        }
+  }
+}
+
+// Diamond is deep and rare, and both halves matter: deep is what makes it worth
+// digging for, and rare is what stops one seam from kitting out the whole run.
+static void test_diamond_is_deep_and_rarer_than_iron(void) {
+  int diamond = 0, iron = 0, deepest = -1;
+  for (uint32_t seed = 1; seed <= 8; ++seed) {
+    generate(seed);
+    for (int y = 2; y < H - 2; ++y)
+      for (int x = 2; x < W - 2; ++x)
+        for (int z = 1; z < MAX_H; ++z) {
+          const uint8_t m = matAt(x, y, z);
+          if (m == B_IRON) ++iron;
+          if (m != B_DIAMOND) continue;
+          ++diamond;
+          if (z > deepest) deepest = z;
+        }
+  }
+  TEST_ASSERT_TRUE(diamond > 0);                     // it exists...
+  TEST_ASSERT_TRUE(diamond < iron);                  // ...and is the scarcer one
+  TEST_ASSERT_TRUE(deepest <= DIAMOND_MAX_Z);        // never above its band
+}
+
+// The invariant that lets B_DIAMOND be the sixteenth material at all.
+//
+// g_cell packs the natural surface material into four bits, so ids run 0..15
+// and diamond takes the very last one. That is only sound while diamond is
+// never a generator SURFACE: it is answered by the depth profile, and setSmat
+// is only ever handed a biome surface or bedrock. If it could reach that field
+// the id would have to survive a round trip through a byte that is exactly
+// full, and isBorder -- which reads the same field -- would start answering
+// about the wrong cells.
+//
+// Asserted as a depth bound, because that is what makes it structural rather
+// than incidental: the generator leaves terrain at GROUND (8) and diamond
+// cannot exist above DIAMOND_MAX_Z (3), so no cut, quarry or cave can bring
+// the two together.
+//
+// Note that diamond DOES show at the floor of a deep quarry, and should: that
+// is where ore surfaces, and iron and coal do exactly the same thing. Exposed
+// is not the same as stored -- topMat computes that answer from depth and
+// never reads the packed field.
+static void test_diamond_cannot_reach_the_surface_field(void) {
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    generate(seed);
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x)
+        for (int z = DIAMOND_MAX_Z + 1; z < MAX_H; ++z)
+          TEST_ASSERT_NOT_EQUAL_UINT8(B_DIAMOND, matAt(x, y, z));
+  }
+
+  // And the field itself is still intact: the border ring is exactly the cells
+  // isBorder names, which it decides by reading the packed surface material.
+  generate(7);
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x) {
+      const bool edge = (x == 0 || y == 0 || x == W - 1 || y == H - 1);
+      if (edge) TEST_ASSERT_TRUE(isBorder(x, y));
+    }
 }
 
 // Layers at or above the column height are the base plane, not a stale read of
@@ -310,9 +413,9 @@ static void test_mine_takes_exactly_one_block(void) {
   generate(11);
   const int x = W / 2, y = H / 2;
   const int before = height(x, y);
-  uint8_t m = 0, b = 0, o = 0;
+  uint8_t m = 0, b = 0;
   int guard = 0;
-  while (!mine(x, y, 32, m, b, o)) TEST_ASSERT_TRUE(++guard < 500);
+  while (!mineTop(x, y, 32, m, b)) TEST_ASSERT_TRUE(++guard < 500);
   TEST_ASSERT_EQUAL_INT(before - 1, height(x, y));
   TEST_ASSERT_TRUE(b > 0);
 }
@@ -325,12 +428,12 @@ static void test_mine_takes_exactly_one_block(void) {
 static void test_mining_reveals_what_is_underneath(void) {
   generate(11);
   const int x = W / 2, y = H / 2;
-  uint8_t m = 0, b = 0, o = 0;
+  uint8_t m = 0, b = 0;
 
   TEST_ASSERT_EQUAL_UINT8(GROUND, height(x, y));
   const uint8_t surface = topMat(x, y);
   int guard = 0;
-  while (!mine(x, y, 64, m, b, o)) TEST_ASSERT_TRUE(++guard < 500);
+  while (!mineTop(x, y, 64, m, b)) TEST_ASSERT_TRUE(++guard < 500);
   TEST_ASSERT_EQUAL_UINT8(surface, m);              // took the surface block
   TEST_ASSERT_NOT_EQUAL(surface, topMat(x, y));     // and something else is now on top
   TEST_ASSERT_EQUAL_UINT8(B_DIRT, topMat(x, y));
@@ -338,7 +441,7 @@ static void test_mining_reveals_what_is_underneath(void) {
   // A torch is a single block on top of something, not a column of torches.
   TEST_ASSERT_TRUE(place(x, y, B_TORCH));
   guard = 0;
-  while (!mine(x, y, 64, m, b, o)) TEST_ASSERT_TRUE(++guard < 500);
+  while (!mineTop(x, y, 64, m, b)) TEST_ASSERT_TRUE(++guard < 500);
   TEST_ASSERT_EQUAL_UINT8(B_TORCH, m);
   TEST_ASSERT_NOT_EQUAL(B_TORCH, topMat(x, y));
 }
@@ -348,10 +451,10 @@ static void test_mining_reveals_what_is_underneath(void) {
 static void test_mining_effort_resets_on_new_target(void) {
   generate(11);
   const int x = W / 2, y = H / 2;
-  uint8_t m = 0, b = 0, o = 0;
-  TEST_ASSERT_FALSE(mine(x, y, 100, m, b, o));
+  uint8_t m = 0, b = 0;
+  TEST_ASSERT_FALSE(mineTop(x, y, 100, m, b));
   TEST_ASSERT_TRUE(damage(x, y) > 0);
-  TEST_ASSERT_FALSE(mine(x + 1, y, 16, m, b, o));      // look away
+  TEST_ASSERT_FALSE(mineTop(x + 1, y, 16, m, b));      // look away
   TEST_ASSERT_EQUAL_UINT8(0, damage(x, y));         // progress discarded
   resetDamage(x + 1, y);
   TEST_ASSERT_EQUAL_UINT8(0, damage(x + 1, y));
@@ -362,21 +465,26 @@ static void test_can_dig_below_ground_level(void) {
   generate(11);
   const int x = W / 2, y = H / 2;
   TEST_ASSERT_EQUAL_UINT8(GROUND, height(x, y));
-  uint8_t m = 0, b = 0, o = 0;
-  for (int dug = 0; dug < GROUND; ++dug) {
+  uint8_t m = 0, b = 0;
+  // GROUND - 1 blocks come out, not GROUND: the bottom course is bedrock and
+  // stays. The floor of a pit is a real block now rather than an abstract base
+  // plane the renderer and the picker each had to know about — which is what
+  // gives it a texture to draw and a face the selection box can be put on.
+  for (int dug = 0; dug < GROUND - 1; ++dug) {
     int guard = 0;
-    while (!mine(x, y, 64, m, b, o)) TEST_ASSERT_TRUE(++guard < 500);
+    while (!mineTop(x, y, 64, m, b)) TEST_ASSERT_TRUE(++guard < 500);
   }
-  TEST_ASSERT_EQUAL_UINT8(0, height(x, y));
-  // The base plane is bedrock and cannot be taken any further.
-  TEST_ASSERT_FALSE(mine(x, y, 100000, m, b, o));
+  TEST_ASSERT_EQUAL_UINT8(1, height(x, y));
+  TEST_ASSERT_EQUAL_UINT8(B_BEDROCK, matAt(x, y, 0));
+  // And it cannot be taken any further.
+  TEST_ASSERT_FALSE(mineTop(x, y, 100000, m, b));
 }
 
 static void test_border_is_unbreakable(void) {
   generate(11);
-  uint8_t m = 0, b = 0, o = 0;
+  uint8_t m = 0, b = 0;
   const uint8_t before = height(0, 5);
-  TEST_ASSERT_FALSE(mine(0, 5, 1000000, m, b, o));
+  TEST_ASSERT_FALSE(mineTop(0, 5, 1000000, m, b));
   TEST_ASSERT_EQUAL_UINT8(before, height(0, 5));
   TEST_ASSERT_FALSE(place(0, 5, B_PLANK));
 }
@@ -495,9 +603,9 @@ static void test_light_follows_its_source(void) {
   TEST_ASSERT_EQUAL_UINT8(0, light(x + LIGHT_MAX + 1, y));
 
   // Mine it back out and the light has to go with it.
-  uint8_t m = 0, b = 0, o = 0;
+  uint8_t m = 0, b = 0;
   int guard = 0;
-  while (!mine(x, y, 64, m, b, o)) TEST_ASSERT_TRUE(++guard < 500);
+  while (!mineTop(x, y, 64, m, b)) TEST_ASSERT_TRUE(++guard < 500);
   TEST_ASSERT_EQUAL_UINT8(B_TORCH, m);
   TEST_ASSERT_EQUAL_UINT8(0, light(x, y));
 }
@@ -511,8 +619,8 @@ static void test_lava_glows_and_is_unbreakable(void) {
   TEST_ASSERT_TRUE(light(x, y) > 0);
   TEST_ASSERT_TRUE(isHazard(B_LAVA));
   TEST_ASSERT_FALSE(isHazard(B_STONE));
-  uint8_t m = 0, b = 0, o = 0;
-  TEST_ASSERT_FALSE(mine(x, y, 1000000, m, b, o));
+  uint8_t m = 0, b = 0;
+  TEST_ASSERT_FALSE(mineTop(x, y, 1000000, m, b));
 }
 
 // place() used to ignore slabs completely, so a column could be raised
@@ -548,8 +656,8 @@ static void test_standable_reports_headroom(void) {
 static void test_degenerate_input(void) {
   generate(0);                                  // seed 0 must still produce a map
   TEST_ASSERT_EQUAL_UINT8(GROUND, height(W / 2, H / 2));
-  uint8_t m = 0, b = 0, o = 0;
-  TEST_ASSERT_FALSE(mine(-1, -1, 100, m, b, o));
+  uint8_t m = 0, b = 0;
+  TEST_ASSERT_FALSE(mineTop(-1, -1, 100, m, b));
   TEST_ASSERT_FALSE(place(-1, -1, B_PLANK));
   TEST_ASSERT_EQUAL_INT(0, explode(-50, -50, 2));
   TEST_ASSERT_EQUAL_UINT8(0, damage(-1, -1));
@@ -563,7 +671,7 @@ static void test_degenerate_input(void) {
 // Digging down produced dirt forever and never reached stone, coal or iron.
 // Cliff faces rendered the bands correctly, so you could see ore, mine it, and
 // get dirt. Ore was obtainable only where the generator wrote it onto a
-// surface, which made the whole upgrade economy nearly unreachable by digging.
+// surface, which made going underground pointless.
 static void test_digging_down_reaches_stone_and_ore(void) {
   world::generate(88);
 
@@ -574,18 +682,31 @@ static void test_digging_down_reaches_stone_and_ore(void) {
   for (int y = 20; y < 76 && !(sawStone && oreTotal); ++y) {
     for (int x = 20; x < 76; x += 3) {
       if (world::isBorder(x, y)) continue;
-      for (int i = 0; i < 40 && world::height(x, y) > 0; ++i) {
-        uint8_t m = 0, b = 0, o = 0;
+      for (int i = 0; i < 40 && world::height(x, y) > 1; ++i) {
+        uint8_t m = 0, b = 0;
         int guard = 0;
-        while (!world::mine(x, y, 4096, m, b, o) && ++guard < 200) {}
+        while (!world::mineTop(x, y, 4096, m, b) && ++guard < 200) {}
         if (guard >= 200) break;
         if (m == world::B_STONE) sawStone = true;
-        oreTotal += o;
+        // Ore is an item now rather than a separate currency, so what says a
+        // metal came off is the material, and how much of it is its own yield.
+        if (m == world::B_COAL || m == world::B_IRON) oreTotal += b;
       }
     }
   }
   TEST_ASSERT_TRUE(sawStone);
   TEST_ASSERT_TRUE(oreTotal > 0);
+}
+
+// The metals are the slowest things on the map to dig and the only reason to go
+// down. Their old ore yields moved onto dropBlocks when the currency went, and
+// a lump apiece for two thousand effort would make the mine not worth entering.
+static void test_the_metals_yield_more_than_a_single_lump(void) {
+  world::generate(88);
+  TEST_ASSERT_TRUE(world::info(world::B_COAL).dropBlocks >= 2);
+  TEST_ASSERT_TRUE(world::info(world::B_IRON).dropBlocks >= 3);
+  TEST_ASSERT_TRUE(world::info(world::B_IRON).dropBlocks
+                   > world::info(world::B_STONE).dropBlocks);
 }
 
 // The other half of the same anchor: building a column up and mining it back
@@ -597,9 +718,9 @@ static void test_a_built_column_mines_back_as_what_was_built(void) {
   for (int i = 0; i < 4; ++i) TEST_ASSERT_TRUE(world::place(x, y, world::B_BRICK));
 
   for (int i = 0; i < 4; ++i) {
-    uint8_t m = 0, b = 0, o = 0;
+    uint8_t m = 0, b = 0;
     int guard = 0;
-    while (!world::mine(x, y, 4096, m, b, o) && ++guard < 400) {}
+    while (!world::mineTop(x, y, 4096, m, b) && ++guard < 400) {}
     TEST_ASSERT_EQUAL_UINT8(world::B_BRICK, m);
   }
   TEST_ASSERT_EQUAL_UINT8(natural, world::height(x, y));
@@ -617,9 +738,9 @@ static void test_mining_mid_column_splits_it(void) {
   while (height(x, y) < 10) TEST_ASSERT_TRUE(place(x, y, B_DIRT));
   TEST_ASSERT_EQUAL_INT(0, runsAt(x, y, (RunView*)nullptr, 0));
 
-  uint8_t m, b, o;
+  uint8_t m, b;
   MineResult r = MINE_PROGRESS;
-  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b);
   TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
 
   TEST_ASSERT_EQUAL_UINT8(4, height(x, y));      // the column keeps what is below
@@ -644,9 +765,9 @@ static void test_a_split_run_keeps_its_soil_profile(void) {
   // What the untouched column reads at the heights that will end up in the run.
   const uint8_t was5 = matAt(x, y, 5), was6 = matAt(x, y, 6);
 
-  uint8_t m, b, o;
+  uint8_t m, b;
   MineResult r = MINE_PROGRESS;
-  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b);
   TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
 
   TEST_ASSERT_EQUAL_UINT8(was5, blockAt(x, y, 5));
@@ -674,9 +795,9 @@ static void test_filling_a_tunnel_merges_the_run_back_in(void) {
   const int x = W / 2 + 6, y = H / 2;
   while (height(x, y) < 10) TEST_ASSERT_TRUE(place(x, y, B_DIRT));
 
-  uint8_t m, b, o;
+  uint8_t m, b;
   MineResult r = MINE_PROGRESS;
-  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b, o);
+  for (int i = 0; i < 400 && r != MINE_BROKE; ++i) r = mine(x, y, 4, 4096, m, b);
   TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
   RunView rv[8];
   TEST_ASSERT_EQUAL_INT(1, runsAt(x, y, rv, 8));
@@ -699,11 +820,11 @@ static void test_a_column_can_be_split_without_limit(void) {
   const int x = W / 2 + 10, y = H / 2;
   while (height(x, y) < 20) TEST_ASSERT_TRUE(place(x, y, B_STONE));
 
-  uint8_t m, b, o;
+  uint8_t m, b;
   int splits = 0;
   for (int z = 2; z <= 16; z += 2) {
     MineResult r = MINE_PROGRESS;
-    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b, o);
+    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b);
     TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);      // never refused
     ++splits;
   }
@@ -735,12 +856,12 @@ static void test_looking_away_discards_banked_effort(void) {
   const int x = W / 2 + 10, y = H / 2;
   while (height(x, y) < 20) TEST_ASSERT_TRUE(place(x, y, B_STONE));
 
-  uint8_t m, b, o;
-  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 8, 16, m, b, o));
+  uint8_t m, b;
+  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 8, 16, m, b));
   TEST_ASSERT_TRUE(damage(x, y, 8) > 0);
 
   // One swing at a different block, and the first one's progress is gone.
-  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 10, 16, m, b, o));
+  TEST_ASSERT_EQUAL_UINT8(MINE_PROGRESS, mine(x, y, 10, 16, m, b));
   TEST_ASSERT_EQUAL_UINT8(0, damage(x, y, 8));
 }
 
@@ -769,10 +890,10 @@ static void test_mining_never_consumes_markers(void) {
   while (height(x, y) < 24) TEST_ASSERT_TRUE(place(x, y, B_STONE));
   const int before = marksFree();
 
-  uint8_t m, b, o;
+  uint8_t m, b;
   for (int z = 2; z <= 20; z += 2) {
     MineResult r = MINE_PROGRESS;
-    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b, o);
+    for (int i = 0; i < 900 && r != MINE_BROKE; ++i) r = mine(x, y, z, 4096, m, b);
     TEST_ASSERT_EQUAL_UINT8(MINE_BROKE, r);
     TEST_ASSERT_TRUE(marksFree() >= before);
   }
@@ -846,14 +967,18 @@ int main(int, char**) {
   RUN_TEST(test_tree_is_wood_under_leaves);
   RUN_TEST(test_chopping_a_tree_actually_yields_wood);
   RUN_TEST(test_a_tree_canopy_hangs_over_walkable_ground);
-  RUN_TEST(test_felling_a_tree_drops_its_canopy);
+  RUN_TEST(test_felling_a_tree_leaves_its_canopy_standing);
   RUN_TEST(test_a_house_has_posts_walls_and_a_roof);
   RUN_TEST(test_a_house_door_admits_and_its_windows_do_not);
   RUN_TEST(test_ore_is_below_the_dirt_band);
+  RUN_TEST(test_the_generator_places_no_light);
+  RUN_TEST(test_diamond_is_deep_and_rarer_than_iron);
+  RUN_TEST(test_diamond_cannot_reach_the_surface_field);
   RUN_TEST(test_above_column_is_base_plane);
   RUN_TEST(test_mine_takes_exactly_one_block);
   RUN_TEST(test_mining_reveals_what_is_underneath);
   RUN_TEST(test_digging_down_reaches_stone_and_ore);
+  RUN_TEST(test_the_metals_yield_more_than_a_single_lump);
   RUN_TEST(test_a_built_column_mines_back_as_what_was_built);
   RUN_TEST(test_mining_effort_resets_on_new_target);
   RUN_TEST(test_can_dig_below_ground_level);

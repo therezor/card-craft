@@ -72,6 +72,19 @@ PALETTES = {
         ("f", (118, 78, 42)),    # haft, mid
         ("g", (156, 110, 62)),   # haft, lit
     ],
+    # The sword shares the pickaxe's ramp exactly, and it has to: render.cpp
+    # swaps 'a'..'d' for the tier on whichever tool is in the hand, so the two
+    # families have to agree on which four indices are the metal.
+    "sword": [
+        ("#", (14, 14, 16)),
+        ("a", (74, 78, 86)),     # metal, shadow
+        ("b", (126, 131, 140)),  # metal, mid
+        ("c", (176, 181, 190)),  # metal, lit
+        ("d", (222, 226, 232)),  # metal, highlight
+        ("e", (74, 48, 28)),     # grip, shadow
+        ("f", (118, 78, 42)),    # grip, mid
+        ("g", (156, 110, 62)),   # grip, lit
+    ],
 }
 
 # ---- mobs: 16 wide, 24 tall -------------------------------------------------
@@ -363,11 +376,60 @@ PICK = ["""
 ............................##..
 """]
 
+# ---- the sword: 32 x 32 -----------------------------------------------------
+#
+# Laid out from its geometry, like the pickaxe, and for the same reason: a
+# blade on the diagonal cannot be typed in a row at a time. Placing it as
+# points along the diagonal was tried first and produced a lattice with a hole
+# between every pair of texels -- 45 degrees at unit steps does not join up.
+# What works is treating it as a REGION: rasterise the band where |row - col|
+# falls inside the blade's thickness, which is solid by construction.
+#
+# The tip is up and to the left because that is where the panel shows it. The
+# anchor in render.cpp puts the art's centre below the bottom edge, so what is
+# in frame is the top-left corner of the art and the grip runs off-screen into
+# the hand -- exactly the arrangement the pickaxe's head and haft use.
+SWORD = ["""
+................................
+..####..........................
+..#bc###........................
+..##bcd##.......................
+...##bcd##......................
+....##bcd##.....................
+.....#abcd##....................
+.....##abcd##...................
+......##abcd##..................
+.......##abcd##.................
+........##abcd##................
+.........##abcd##...............
+..........##abcd##..............
+...........##abcd##.............
+............##abcd##............
+.............##abcd##...........
+..............##abcd##...###....
+...............##abcd##.##a##...
+................##abcd###aaa#...
+.................##abcd#aaaa#...
+..................##ab#baaa##...
+...................###ccba##....
+...................##abcc##.....
+..................##aaab#e##....
+..................#aaaa##fe##...
+..................#aaa####fe##..
+..................##a##..##fe##.
+...................###....##fe##
+...........................##fgf
+............................#fgg
+............................##fg
+.............................###
+"""]
+
 SPRITES = {
     "zombie": ZOMBIE,
     "creeper": CREEPER,
     "skeleton": SKELETON,
     "pick": PICK,
+    "sword": SWORD,
 }
 
 MOB_ORDER = ["zombie", "creeper", "skeleton"]
@@ -411,7 +473,9 @@ def emit(path):
         "#pragma once\n\n#include <stdint.h>\n\nnamespace sprites {\n"
     )
 
-    for fam in ["zombie", "creeper", "skeleton", "pick"]:
+    # Order is the emit order, and it is fixed here rather than taken from
+    # SPRITES so that adding a family is a deliberate edit in two places.
+    for fam in ["zombie", "creeper", "skeleton", "pick", "sword"]:
         pal = PALETTES[fam]
         legend = {ch: i + 1 for i, (ch, _) in enumerate(pal)}
         frames = SPRITES[fam]
