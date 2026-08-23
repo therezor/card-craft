@@ -971,7 +971,7 @@ static void test_a_wall_span_maps_one_tile_per_block(void) {
     const int n = castColumn(c, x, -1, -1, -1, spans, res);
     for (int i = 0; i < n; ++i) {
       const Span& s2 = spans[i];
-      if (!s2.cap || s2.vStepQ8 == 0) continue;      // not a textured face
+      if (!s2.cap || s2.vStepQ12 == 0) continue;      // not a textured face
       if (s2.distQ8 == 0) continue;
       ++checked;
       if (s2.cap > 1) ++merged;
@@ -989,14 +989,21 @@ static void test_a_wall_span_maps_one_tile_per_block(void) {
       // what is checked.
       const float dist = (float)s2.distQ8 / 256.0f;
       const float rowsPerBlock = PROJ / dist;
-      const float tile = (float)(16 << 8);
-      TEST_ASSERT_FLOAT_WITHIN(rowsPerBlock, tile,
-                               (float)s2.vStepQ8 * rowsPerBlock);
+      const float tile = (float)(16 << 12);
+      // Two quantisations, not one, and the second used to hide inside the
+      // first. The step's own truncation is worth up to rowsPerBlock of the
+      // product. But the exact distance it was built from is not available
+      // here -- only distQ8, to a 256th of a cell -- and that error scales the
+      // whole tile: it is worth tile/(256*dist), which at close range is the
+      // LARGER of the two. It went unnoticed while the step was 8.8, because
+      // then the step's own quantum was sixteen times coarser and swallowed it.
+      const float tol = rowsPerBlock + tile / (256.0f * dist);
+      TEST_ASSERT_FLOAT_WITHIN(tol, tile, (float)s2.vStepQ12 * rowsPerBlock);
 
       // ...and v never runs past the world's height in tiles, which is what
       // says the step is anchored to blocks rather than to screen rows.
-      const uint32_t adv = (uint32_t)s2.vStepQ8 * (uint32_t)(s2.y1 - s2.y0);
-      TEST_ASSERT_TRUE(adv <= (uint32_t)(world::MAX_H + 1) * (uint32_t)(16 << 8));
+      const uint32_t adv = (uint32_t)s2.vStepQ12 * (uint32_t)(s2.y1 - s2.y0);
+      TEST_ASSERT_TRUE(adv <= (uint32_t)(world::MAX_H + 1) * (uint32_t)(16 << 12));
     }
   }
   TEST_ASSERT_TRUE(checked > 0);
@@ -1004,6 +1011,76 @@ static void test_a_wall_span_maps_one_tile_per_block(void) {
   // not five. Without this the test above would pass on a walker that never
   // merged anything.
   TEST_ASSERT_TRUE(merged > 0);
+}
+
+// Neighbouring columns of one wall must agree about vertical scale, closely
+// enough that a brick course cannot visibly stagger between them.
+//
+// This is the test for a real artefact. vStep is texels per screen row,
+// TEX_N * dNear / PROJ, so it SHRINKS as the player closes on a wall — and it
+// used to be stored as 8.8, where a quarter-cell away the whole value is 6.4
+// and rounds to 6. Adjacent columns of an oblique wall sit at slightly
+// different distances, rounded to different integers, and disagreed about
+// vertical scale by up to a sixth. Over a panel-tall face that walks a course
+// twenty rows up or down from one column to the next: the wall came apart into
+// a zigzag, worse the closer you stood. Q12 is sixteen times finer and holds
+// the same disagreement under a pixel.
+//
+// Stated as the thing the player would SEE — rows of stagger — rather than as a
+// bound on the fixed-point format, so it keeps its meaning if the format
+// changes again.
+static void test_neighbouring_columns_agree_on_vertical_scale(void) {
+  init();
+  world::generate(1234);
+  const int cx = world::W / 2, cy = world::H / 2;
+  // A long wall, and stand close to it and well off square: looked at head on
+  // every column is the same perpendicular distance away, which is the one
+  // arrangement in which this cannot go wrong.
+  for (int x = cx - 8; x <= cx + 8; ++x)
+    for (int k = 0; k < 5; ++k) world::place(x, cy + 2, world::B_BRICK);
+
+  Camera c = atSpawn(0.0f);
+  c.px = (float)cx + 0.5f;
+  c.py = (float)(cy + 1) + 0.30f;          // 0.3 cells off the face
+  c.z  = (float)world::groundAt(c.px, c.py) + EYE;
+  setAngle(c, 1.5708f - 0.62f);            // ~35 degrees off square
+  setPitch(c, HORIZON);
+
+  Span spans[MAX_SPANS];
+  ColumnResult res;
+  uint16_t step[VIEW_W];
+  for (int x = 0; x < VIEW_W; ++x) {
+    step[x] = 0;
+    const int n = castColumn(c, x, -1, -1, -1, spans, res);
+    // The nearest textured side face in the column is the wall.
+    uint16_t best = 0; uint16_t nearest = 0xFFFF;
+    for (int i = 0; i < n; ++i) {
+      const Span& s2 = spans[i];
+      if (!s2.cap || s2.vStepQ12 == 0) continue;
+      if (s2.distQ8 < nearest) { nearest = s2.distQ8; best = s2.vStepQ12; }
+    }
+    step[x] = best;
+  }
+
+  // How far a course would move between two columns that disagree: the
+  // fractional difference in scale, over a face as tall as the panel.
+  int pairs = 0;
+  float worst = 0.0f;
+  for (int x = 1; x < VIEW_W; ++x) {
+    if (!step[x] || !step[x - 1]) continue;
+    const float a = (float)step[x - 1], b = (float)step[x];
+    const float rows = (a > b ? a - b : b - a) / a * (float)VIEW_H;
+    if (rows > worst) worst = rows;
+    ++pairs;
+  }
+  TEST_ASSERT_TRUE(pairs > 100);            // it really did look at a wall
+  // Measured on this fixture: 9.0 rows at 8.8, 1.34 at Q12. The floor is not
+  // zero and cannot be -- neighbouring columns of an oblique wall ARE at
+  // different distances, so some of that 1.34 is honest perspective. Carrying
+  // the step at Q14 instead was tried and moved it to 1.29, which is how we
+  // know the rest is perspective and not precision: Q12 has already reached
+  // the floor, and finer buys nothing. Two rows is the line between them.
+  TEST_ASSERT_TRUE(worst < 2.0f);
 }
 
 // A merged span still has to start on a block boundary when nothing clipped it,
@@ -1041,12 +1118,29 @@ static void test_an_unclipped_merged_span_starts_on_a_tile(void) {
     const int n = castColumn(c, x, -1, -1, -1, spans, res);
     for (int i = 0; i < n; ++i) {
       const Span& s2 = spans[i];
-      if (s2.cap < 2 || s2.vStepQ8 == 0) continue;
-      // vStartQ8 is (y0 - top of the run) * step, so an unclipped span starts
-      // at zero. A clipped one starts wherever it was cut, and the renderer
-      // masks that back into the tile — which is exact because the uint16 wrap
-      // is itself a whole number of tiles (65536 = 16 * 4096).
-      if (s2.vStartQ8 == 0) ++checked;
+      if (s2.cap < 2 || s2.vStepQ12 == 0) continue;
+      // vStartQ12 is (y0 - top of the run) * step, so an unclipped span starts
+      // at the top of a tile. A clipped one starts wherever it was cut, and the
+      // uint16 wrap IS the tile — 16 texels at Q12 is 65536 exactly — so no
+      // masking is needed anywhere and there is no width to overflow.
+      //
+      // "At the top of a tile" means within ONE SCREEN ROW of the boundary, and
+      // measured the way the texture wraps -- from EITHER side. clampRow
+      // truncates, so y0 lands just ABOVE the run's true float top and the
+      // offset is slightly negative: the first row drawn belongs to the tail of
+      // the previous tile, and the wrap puts it there. Just under 65536 is the
+      // right answer, not a near miss of zero.
+      //
+      // This asked for exactly zero before, and got it for the wrong reason.
+      // At 8.8 the fraction of a row was worth less than one unit, so it
+      // truncated away -- and the negative case reached (uint16_t) straight
+      // from a negative float, which is undefined rather than modular. Q12
+      // resolves the fraction and startQ12 goes through int32 so the wrap is
+      // defined, which is why the bound can now be stated as what it always
+      // was.
+      const uint32_t d = s2.vStartQ12 < 65536u - s2.vStartQ12
+                       ? s2.vStartQ12 : 65536u - s2.vStartQ12;
+      if (d <= s2.vStepQ12) ++checked;
     }
   }
   TEST_ASSERT_TRUE(checked > 0);
@@ -1067,7 +1161,7 @@ static void test_flat_faces_carry_no_texture_step(void) {
     for (int i = 0; i < n; ++i) {
       if (spans[i].face != F_TOP && spans[i].face != F_BOT) continue;
       ++tops;
-      TEST_ASSERT_EQUAL_UINT16(0, spans[i].vStepQ8);
+      TEST_ASSERT_EQUAL_UINT16(0, spans[i].vStepQ12);
     }
   }
   TEST_ASSERT_TRUE(tops > 0);
@@ -1078,6 +1172,7 @@ int main(int, char**) {
   RUN_TEST(test_crosshair_is_panel_centre);
   RUN_TEST(test_a_wall_span_maps_one_tile_per_block);
   RUN_TEST(test_an_unclipped_merged_span_starts_on_a_tile);
+  RUN_TEST(test_neighbouring_columns_agree_on_vertical_scale);
   RUN_TEST(test_flat_faces_carry_no_texture_step);
   RUN_TEST(test_pick_returns_the_face_it_came_in_through);
   RUN_TEST(test_a_block_hanging_on_nothing_can_be_picked_and_mined);

@@ -71,6 +71,25 @@ void begin() {
   M5Cardputer.begin(cfg, true);
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setBrightness(160);
+
+  // The panel bus, at twice the clock M5GFX autodetects for this board.
+  //
+  // A frame is 240x135x2 = 64800 bytes, which at 40 MHz is 13 ms of wire time
+  // against a 17 ms frame of CPU. Half of it already overlaps the next frame's
+  // work -- the SPI transaction is held open across frames, see render::present
+  // -- but pushImageDMA queues the transfer in chunks and blocks on all but the
+  // last, so the other 6.5 ms is the CPU standing still. Doubling the clock
+  // halves both halves.
+  //
+  // setClock, not config(). Both write the same field, but config() re-runs the
+  // bus's pin setup and calls gpio_reset() on MOSI, MISO and SCLK on the way
+  // through; on a bus already up and driving a panel that detaches it. setClock
+  // exists for this -- it moves the frequency and clears the cached divider so
+  // the next beginTransaction recomputes it, which is all that had to happen.
+  if (auto* panel = M5Cardputer.Display.getPanel()) {
+    if (auto* bus = panel->getBus()) bus->setClock(80000000);
+  }
+
   M5Cardputer.Speaker.begin();
   M5Cardputer.Speaker.setVolume(140);
 }

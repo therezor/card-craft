@@ -16,6 +16,9 @@
 //  with the face it is on reads as a solid blob, not a world.
 // =============================================================================
 #include "render.h"
+#ifdef DEV_SERIAL
+#include "esp_cpu.h"
+#endif
 
 #include <esp_heap_caps.h>
 #include <math.h>
@@ -745,9 +748,17 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
   const int horizon = (int)cam.horizon;
 #ifdef DEV_SERIAL
   uint32_t fSpans = 0, fTall = 0, fPix = 0, fSeg = 0;
+  uint32_t castCy = 0;
+  const uint32_t colCy0 = esp_cpu_get_cycle_count();
 #endif
   for (int x = xStart; x < W; x += stride) {
+#ifdef DEV_SERIAL
+    const uint32_t c0 = esp_cpu_get_cycle_count();
+#endif
     const int n = raycast::castColumn(cam, x, selX, selY, selZ, spans, res);
+#ifdef DEV_SERIAL
+    castCy += esp_cpu_get_cycle_count() - c0;
+#endif
 
     // This column's ray, rebuilt the same way the walker builds it. A textured
     // floor needs to know which way it is looking, and recomputing it here is
@@ -832,18 +843,18 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
         const uint32_t vStep = 0;
 #else
         const uint8_t* col = s_tex[s.mat][((int)s.u * textures::TEX_N) >> 8];
-        uint32_t v = s.vStartQ8;
-        const uint32_t vStep = s.vStepQ8;
+        uint32_t v = s.vStartQ12;
+        const uint32_t vStep = s.vStepQ12;
 #endif
         const uint16_t* rowA = tbl[band];
         if (frac == 0) {
           for (int y = s.y0; y < s.y1; ++y, p += W, v += vStep)
-            *p = rowA[col[(v >> 8) & (textures::TEX_N - 1)]];
+            *p = rowA[col[(v >> 12) & (textures::TEX_N - 1)]];
         } else {
           const uint16_t* rowB = tbl[band + 1];
           int par = (int)s.y0 & 1;
           for (int y = s.y0; y < s.y1; ++y, p += W, v += vStep) {
-            const uint8_t t = col[(v >> 8) & (textures::TEX_N - 1)];
+            const uint8_t t = col[(v >> 12) & (textures::TEX_N - 1)];
             *p = (frac > thX + (par ? 4 : 0)) ? rowB[t] : rowA[t];
             par ^= 1;
           }
@@ -897,10 +908,12 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
         // dearer than the clipper calls it was meant to pay for. There are two
         // stores per boundary here and nothing at all per pixel.
         if (s.cap > 1) {
-          const float step  = (float)(textures::TEX_N << 8) / (float)s.vStepQ8;
-          const uint16_t off = (uint16_t)(s.vStartQ8 & ((textures::TEX_N << 8) - 1));
+          // A tile is 65536 in Q12, and vStartQ12 is already inside one by
+          // construction -- the uint16 wrapped it -- so the old mask is gone
+          // rather than rewritten.
+          const float step = 65536.0f / (float)s.vStepQ12;
           float yb = (float)s.y0
-                   + (float)((textures::TEX_N << 8) - off) / (float)s.vStepQ8;
+                   + (float)(65536u - s.vStartQ12) / (float)s.vStepQ12;
           const uint16_t bevel = s_bevel[s.mat][s.face][band];
           const uint16_t edge  = s_edge[s.mat][s.face][band];
           for (; yb < (float)s.y1; yb += step) {
@@ -914,6 +927,9 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
     }
   }
 #ifdef DEV_SERIAL
+  __atomic_fetch_add(&g_cyCast, castCy, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g_cyCols, esp_cpu_get_cycle_count() - colCy0,
+                     __ATOMIC_RELAXED);
   __atomic_fetch_add(&g_floorSpans, fSpans, __ATOMIC_RELAXED);
   __atomic_fetch_add(&g_floorTall,  fTall,  __ATOMIC_RELAXED);
   __atomic_fetch_add(&g_floorPix,   fPix,   __ATOMIC_RELAXED);
@@ -956,6 +972,12 @@ void startWorker() {
 
 #ifdef DEV_SERIAL
 uint32_t g_usWorld = 0, g_usMobs = 0, g_usSky = 0, g_usSel = 0, g_usShade = 0;
+uint32_t g_usPresent = 0, g_usWait = 0;
+// Cycles, not microseconds: both cores run drawColumns and micros() around
+// a per-column call would cost more than the call being measured. CCOUNT is
+// a register read, and a delta within one core is valid even though the two
+// cores' counters do not agree with each other.
+uint32_t g_cyCast = 0, g_cyCols = 0;
 
 // What the floor pass actually did, per frame: how many top-face spans reached
 // drawFloorSpan, how many of those were tall enough to take its stepped path
@@ -2075,15 +2097,73 @@ void drawHurt(const game::State& s) {
 // ---- present ----------------------------------------------------------------
 
 void present() {
+#ifdef DEV_SERIAL
+  const uint32_t t0 = micros();
+  struct Timer { uint32_t t; ~Timer() { g_usPresent = micros() - t; } } timer{t0};
+#endif
   // The transaction is held open across frames. startWrite/endWrite are
   // reference-counted in LovyanGFX, so the endWrite() inside pushImageDMA only
   // decrements the count instead of ending the transfer and waiting on it --
   // which is what lets the next frame's CPU work run while this frame is still
   // going out over SPI. Nothing else shares this bus, so holding CS is safe.
   if (!s_held) { s_disp->startWrite(); s_held = true; }
+#ifdef DEV_SERIAL
+  const uint32_t tw = micros();
+  s_disp->waitDMA();
+  g_usWait = micros() - tw;
+#endif
   s_disp->pushImageDMA(0, 0, W, H, (const lgfx::swap565_t*)s_buf[s_cur]);
   s_cur ^= 1;
 }
+
+#ifdef DEV_SERIAL
+// Did the panel actually receive what was sent?
+//
+// The bus clock is the one change whose failure mode is invisible from here: a
+// screenshot is built from the framebuffer, so it shows a perfect image no
+// matter what reached the wire. This asks the panel instead -- it reads the
+// ST7789's own memory back, at the 16 MHz read clock, which is unchanged, and
+// compares it against the buffer that was pushed.
+//
+// ONE ROW at a time. A strip buffer is a static array, and a static array is
+// spent against the same internal RAM the two framebuffers need; an eight-row
+// version of this cost 3840 bytes and took the board over the edge, where the
+// framebuffers fail to allocate and the boot dies with nothing on the wire.
+// 480 bytes is 135 read transactions instead of 17, which costs nothing here.
+//
+// An off-by-one per channel is tolerated: the panel stores 16-bit colour and
+// returns 18, and the round trip through LovyanGFX's conversion is not obliged
+// to land on the same low bit.
+void verifyPanel() {
+  flush();                                   // close the transaction, drain DMA
+  static uint16_t row[W];
+  const uint16_t* sent = (const uint16_t*)s_buf[s_cur ^ 1];  // present() flipped
+  // Both byte orders are counted, because which one readRect hands back is a
+  // property of the library, not of the bus, and guessing it wrong would report
+  // a perfect panel as totally corrupt. The smaller count is the real one.
+  uint32_t badSwap = 0, badPlain = 0, worst = 0;
+  auto diff = [](uint16_t a, uint16_t b) {
+    const int dr = ((a >> 11) & 31) - ((b >> 11) & 31);
+    const int dg = ((a >> 5) & 63) - ((b >> 5) & 63);
+    const int db = (a & 31) - (b & 31);
+    return (dr < 0 ? -dr : dr) + (dg < 0 ? -dg : dg) + (db < 0 ? -db : db);
+  };
+  for (int y = 0; y < H; ++y) {
+    s_disp->readRect(0, y, W, 1, row);
+    for (int x = 0; x < W; ++x) {
+      const uint16_t v = sent[y * W + x], b = row[x];
+      const uint16_t sw = (uint16_t)((v >> 8) | (v << 8));
+      const int ds = diff(sw, b), dp = diff(v, b);
+      if (ds > 3) ++badSwap;
+      if (dp > 3) ++badPlain;
+      const int d = ds < dp ? ds : dp;
+      if (d > 3 && (uint32_t)d > worst) worst = (uint32_t)d;
+    }
+  }
+  Serial.printf("panel: swapped %u / plain %u of %d differ (worst %u)\n",
+                (unsigned)badSwap, (unsigned)badPlain, W * H, (unsigned)worst);
+}
+#endif
 
 void flush() {
   if (s_held) { s_disp->endWrite(); s_held = false; }

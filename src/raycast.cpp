@@ -91,8 +91,20 @@ struct Painter {
   // face half hidden behind something nearer still shows the right half of
   // itself instead of restarting the pattern at the cut.
   float    fyTop   = 0.0f;
-  uint16_t vStepQ8 = 0;
+  uint16_t vStepQ12 = 0;
   uint8_t  zTop    = 0;
+
+  // Where in the tile this piece starts, wrapped.
+  //
+  // Through int32 rather than straight to uint16, because the product is texels
+  // times 4096 over the whole face and a tall close wall is hundreds of texels
+  // -- far outside a uint16, and converting an out-of-range float to an
+  // unsigned type is undefined, not modular. int32 holds it, and the mask does
+  // the wrap the texture wants anyway. Two's complement makes that right for a
+  // slightly negative rows-from-top as well, which float slack can produce.
+  static uint16_t startQ12(float rows, uint16_t stepQ12) {
+    return (uint16_t)((int32_t)(rows * (float)stepQ12) & 0xFFFF);
+  }
 
   bool paint(int a, int b, uint16_t distQ8, uint8_t mat, uint8_t face,
              uint8_t sel, uint8_t tint, uint8_t cap, uint8_t lit, uint8_t u,
@@ -122,8 +134,8 @@ struct Painter {
         s.y0 = (int16_t)a; s.y1 = (int16_t)b;
         s.distQ8 = distQ8; s.mat = mat; s.face = face;
         s.sel = sel; s.tint = tint; s.cap = cap; s.lit = lit; s.u = u;
-        s.vStepQ8  = vStepQ8;
-        s.vStartQ8 = (uint16_t)(((float)a - fyTop) * (float)vStepQ8);
+        s.vStepQ12 = vStepQ12;
+        s.vStartQ12 = startQ12((float)a - fyTop, vStepQ12);
         s.zTop     = zTop;
       }
       open[0].y1 = (int16_t)a;
@@ -145,8 +157,8 @@ struct Painter {
         s.y0 = (int16_t)c0; s.y1 = (int16_t)c1;
         s.distQ8 = distQ8; s.mat = mat; s.face = face;
         s.sel = sel; s.tint = tint; s.cap = cap; s.lit = lit; s.u = u;
-        s.vStepQ8  = vStepQ8;
-        s.vStartQ8 = (uint16_t)(((float)c0 - fyTop) * (float)vStepQ8);
+        s.vStepQ12 = vStepQ12;
+        s.vStartQ12 = startQ12((float)c0 - fyTop, vStepQ12);
         s.zTop     = zTop;
         any = true;
         if (c0 < topRow) topRow = c0;
@@ -320,7 +332,7 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
       // whatever you are standing under; the ground run has none, since
       // nothing can get beneath the base plane.
       if (!run.ground && cam.z < (float)run.base) {
-        paint.vStepQ8 = 0;
+        paint.vStepQ12 = 0;
         // The plane this face lies in, so the renderer can texture it the way
         // it textures a floor. It used to be left at zero, which is not a
         // height at all — the underside took the flat-colour path and a bridge
@@ -353,8 +365,15 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
       // a shear rather than a rotation, so one unit is always invNear pixels —
       // which makes this one multiply off a reciprocal the cell already has,
       // and no divide per span.
-      const uint16_t vStepQ8 =
-          (uint16_t)((float)(textures::TEX_N << 8) / invNear);
+      // TEX_N << 12 is 65536, so this is one whole tile per unit of 1/invNear.
+      // Bounded rather than trusted: dNear never reaches MAX_DIST, and at
+      // MAX_DIST this is 16 * 9 * 4096 / 160 = 3686, so the uint16 has better
+      // than sixteen times the headroom it needs. The assert is what says so if
+      // MAX_DIST is ever raised past 160 cells.
+      static_assert((double)(textures::TEX_N << 12) * MAX_DIST / PROJ < 65536.0,
+                    "vStepQ12 must fit a uint16 at the far clip");
+      const uint16_t vStepQ12 =
+          (uint16_t)((float)(textures::TEX_N << 12) / invNear);
 
       if (dNear > 0.001f) {
         // Only the blocks that can land somewhere still unpainted. A column is
@@ -424,7 +443,7 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
           fyb = fyt;
           if (yt < yb) {
             paint.fyTop = fyt;
-            paint.vStepQ8 = vStepQ8;
+            paint.vStepQ12 = vStepQ12;
             paint.zTop = 0;
             if (selHere) {
               if (yt < selGeo0) selGeo0 = yt;
@@ -443,7 +462,7 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
 
       // -- the top, seen from above
       if ((float)run.top < cam.z) {
-        paint.vStepQ8 = 0;
+        paint.vStepQ12 = 0;
         paint.zTop = (uint8_t)run.top;
         const uint8_t mat = world::matAt(mapX, mapY, run.top - 1);
         const float dz = cam.z - (float)run.top;

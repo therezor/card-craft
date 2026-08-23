@@ -158,6 +158,7 @@ void fpsCount() {
 uint32_t s_fpsSum = 0, s_cpuSum = 0, s_cpuMax = 0;
 int      s_fpsN = 0;
 char     s_fpsLine[24] = "";   // formatted for the serial line, not for the panel
+uint32_t s_usSfx = 0;          // the mixer's slice, measured where it is called
 
 void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
   s_fpsSum += frameUs;
@@ -183,6 +184,7 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
                 // two cannot be subtracted to get this. Every new static array
                 // is spent against this number.
                 "heap=%u heapmax=%u "
+                "present_us=%u wait_us=%u sfx_us=%u cast_us=%u draw_us=%u "
                 "fspans=%u ftall=%u fpix=%u fseg=%u\n",
                 fps, (unsigned)avgCpu, (unsigned)s_cpuMax, mobs,
                 (unsigned)render::g_usWorld, (unsigned)render::g_usMobs,
@@ -190,10 +192,18 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
                 (unsigned)render::g_usShade,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)render::g_usPresent, (unsigned)render::g_usWait,
+                (unsigned)s_usSfx,
+                // Cycles over 30 frames at 240 MHz, and both cores fold into the
+                // same accumulator, so this is CPU-microseconds per frame across
+                // the two of them -- not wall-clock, which is what world_us is.
+                (unsigned)(render::g_cyCast / (240u * 30u)),
+                (unsigned)((render::g_cyCols - render::g_cyCast) / (240u * 30u)),
                 (unsigned)render::g_floorSpans, (unsigned)render::g_floorTall,
                 (unsigned)render::g_floorPix, (unsigned)render::g_floorSeg);
   render::g_floorSpans = render::g_floorTall = 0;
   render::g_floorPix = render::g_floorSeg = 0;
+  render::g_cyCast = render::g_cyCols = 0;
 #endif
   s_fpsSum = s_cpuSum = s_cpuMax = 0;
   s_fpsN = 0;
@@ -995,6 +1005,8 @@ void loop() {
         Serial.printf("go: %s at (%d,%d), standing (%d,%d)\n",
                       house ? "house" : "tree", bx, by, sx, sy);
       }
+    } else if (cmd == 'q') {
+      render::verifyPanel();
     } else if (cmd == 'l') {
       // Up, then down, then let it drift home.
       s_look = (s_look == 0) ? 1 : (s_look == 1 ? -1 : 0);
@@ -1060,7 +1072,13 @@ void loop() {
   }
 #endif
 
+#ifdef DEV_SERIAL
+  const uint32_t tSfx = micros();
+#endif
   sfx::update(millis());
+#ifdef DEV_SERIAL
+  s_usSfx = micros() - tSfx;
+#endif
 
   fpsCount();
 

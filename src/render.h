@@ -137,6 +137,20 @@ const uint16_t* buildBuffer();
 // guesswork about which stage is expensive.
 extern uint32_t g_floorSpans, g_floorTall, g_floorPix, g_floorSeg;
 extern uint32_t g_usWorld, g_usMobs, g_usSky, g_usSel, g_usShade;
+// The panel push, split: how long present() stands still inside pushImageDMA,
+// and how much of the PREVIOUS frame's transfer was still in flight when it got
+// there. The second is the one that says the cross-frame overlap still works --
+// it should be a few microseconds, and a large number means a frame is being
+// spent waiting on the wire.
+extern uint32_t g_usPresent, g_usWait;
+// Walking the world against drawing it, in CPU cycles summed over both cores.
+extern uint32_t g_cyCast, g_cyCols;
+
+// Reads the panel's own memory back and compares it against the frame that was
+// pushed. The bus clock is the one setting whose failure is invisible from a
+// screenshot, which is taken from the framebuffer and so looks perfect however
+// the wire behaved.
+void verifyPanel();
 #endif
 
 // Brings up the second core's column worker. Call once, after reserve() and

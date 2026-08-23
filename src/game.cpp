@@ -48,20 +48,26 @@ constexpr float TURN_SPEED    = 2.7f;    // radians/second
 // How far the player can reach to mine or to place, as a distance from the eye
 // to the block face — the same number for both, as Minecraft uses.
 //
-// The floor under this is not taste, it is geometry. At the resting tilt the
-// aim ray leaves the eye at EYE = 1.2 above the ground and descends
-// TILT / PROJ = 0.1875 per cell, so the crosshair meets flat ground at
-// 1.2 / 0.1875 = 6.40 cells out, which is 6.51 away from the eye. A board with
-// no pitch keys never leaves that tilt (see hal.h), so a reach below 6.51 would
-// make open ground unmineable on it — Minecraft's own 4.5 is not available to
-// us. 6.6 is the tightest round number that clears it, and the 0.09 of margin
-// it leaves is what would break first if TILT or EYE were ever retuned.
+// It was 6.6, and 6.6 was not chosen for feel — it was the smallest number the
+// geometry allowed. At the resting tilt the aim ray leaves the eye at EYE = 1.2
+// and descends TILT / PROJ = 0.1875 per cell, so the crosshair meets flat
+// ground 6.40 cells out, 6.51 from the eye; anything shorter cannot reach the
+// floor it is pointing at. Reach was pinned to that, and the cost was a player
+// who could pull a block out of a cliff face from most of seven cells away.
 //
-// It was 5.5, against TILT 38. Raising the camera to look ahead rather than at
-// the floor is what moved it: a shallower tilt pushes the ground contact out,
-// and this has to follow or the player cannot dig at their feet. It is the same
-// number for placement, so the raise also lets you build a little further away.
-constexpr float REACH         = 6.6f;
+// 5.0 unpins it, and what pays for the difference is the look keys. Below 6.51
+// open flat ground is out of reach AT REST: the crosshair sits on it and
+// nothing highlights until the player tilts down, which for 5.0 is about ten
+// rows of the 250 the shear allows — a tap, not a hold. Every other case is
+// unaffected, because anything with height to it — a wall, a pit floor, the
+// block you are standing against — is nearer than the flat-ground contact and
+// was always well inside reach.
+//
+// This is the number to move if that trade reads wrong. Toward 6.51 gives the
+// floor back at rest and the long arm with it; toward Minecraft's 4.5 tightens
+// the arm and asks for more of a look-down. It is the same number for placing,
+// so it sets how far away you can build as well.
+constexpr float REACH         = 5.0f;
 constexpr float MELEE_REACH   = 1.9f;
 constexpr float MELEE_DOT     = 0.55f;   // roughly a 110 degree swing arc
 constexpr int   SWING_TICKS   = 18;

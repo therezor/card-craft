@@ -23,6 +23,24 @@ static State fresh(uint32_t seed = 4242) {
   return s;
 }
 
+// Flat open ground is out of reach at the resting tilt.
+//
+// That is the game's rule and not an accident of this fixture: the crosshair
+// meets flat ground 6.51 from the eye and REACH is 5.0, so a player standing on
+// open ground has nothing in range until they tilt down -- see REACH in
+// game.cpp for why the two numbers are no longer pinned together. Every test
+// below that digs or builds on flat ground therefore has to do what a player
+// does, and this is that, in one line.
+//
+// Written through s.pitch rather than through the camera, because tick()
+// rebuilds cam.horizon from s.pitch every tick and would undo it otherwise.
+// Twenty rows puts the contact about four cells out, comfortably inside reach
+// without being so steep the aim lands on the block underfoot.
+static void lookDown(State& s, int rows = 20) {
+  s.pitch -= (float)rows;
+  raycast::setPitch(s.cam, (int)(s.pitch + 0.5f));
+}
+
 // Enough health to stand still through a whole night. Tests that are about the
 // clock, the dawn card or the wave director should not also be a test of
 // whether an idle player survives — which, now that the mobs actually reach
@@ -645,6 +663,7 @@ static void test_a_run_starts_with_empty_hands(void) {
 // when the last is spent.
 static void test_a_material_claims_a_slot_and_gives_it_back(void) {
   State s = fresh();
+  lookDown(s);
   for (int i = 0; i < SLOT_N; ++i) TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[i]);
 
   Input act; act.act = true;
@@ -746,6 +765,7 @@ static void test_only_a_block_can_be_placed(void) {
 // Building places what is held, and spends that material rather than a pile.
 static void test_building_places_the_held_block(void) {
   State s = fresh();
+  lookDown(s);
   s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);
   hold(s, world::B_BRICK, 5);
   s.inv[world::B_DIRT]  = 5;
@@ -2331,6 +2351,7 @@ static void test_a_jump_carries_forward_on_its_own(void) {
 // put the pillar straight back.
 static void test_building_is_refused_in_mid_air(void) {
   State s = fresh();
+  lookDown(s);
   run(s, Input{}, 30);
   hold(s, world::B_STONE, 40);
 
@@ -2493,6 +2514,7 @@ static void test_a_wall_stops_an_arrow(void) {
 // position and a material, so the simulation hands those over separately.
 static void test_breaking_a_block_reports_where_it_broke(void) {
   State s = fresh();
+  lookDown(s);
   Input act; act.act = true;
   tick(s, act);
   TEST_ASSERT_TRUE(s.aimValid);

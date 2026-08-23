@@ -51,9 +51,11 @@ constexpr float PROJ = 160.0f;
 // against; shallower pushes it out of reach.
 //
 // It was 38 — 5 cells — and the view sat noticeably down at the floor. Every
-// pixel of tilt removed pushes the ground contact further out, and REACH in
-// game.cpp has to move with it or open ground stops being mineable at rest;
-// the two numbers are a pair and neither can be retuned alone.
+// pixel of tilt removed pushes the ground contact further out. REACH in
+// game.cpp used to be pinned to that contact distance, so the two numbers could
+// not be retuned apart; it is shorter than the contact now and the look keys
+// cover the difference, so changing this no longer forces a change there. What
+// it does change is how far the player has to tilt down to dig at their feet.
 constexpr int TILT = 30;
 constexpr int HORIZON = VIEW_H / 2 - TILT;
 
@@ -193,12 +195,32 @@ struct Span {
   uint8_t  u;
 
   // ...and how far down the face it starts, with how much of the texture each
-  // screen row covers, both 8.8. This is the other half of a texture
-  // coordinate, and the half the grain tile never had: it indexed by screen
-  // row, so the pattern slid over a block as the camera moved instead of
-  // sitting on it. Zero on faces that take the flat path.
-  uint16_t vStartQ8;
-  uint16_t vStepQ8;
+  // screen row covers. This is the other half of a texture coordinate, and the
+  // half the grain tile never had: it indexed by screen row, so the pattern slid
+  // over a block as the camera moved instead of sitting on it. Zero on faces
+  // that take the flat path.
+  //
+  // Q12 — texels times 4096 — and the twelve is load-bearing twice over.
+  //
+  // It was 8.8, and 8.8 is what made a close wall warp. The step is texels per
+  // screen row, TEX_N * dNear / PROJ, so it SHRINKS as the player approaches: a
+  // quarter-cell away it is 6.4, which 8.8 rounds to 6. Neighbouring columns of
+  // one flat wall sit at slightly different dNear, so they rounded to different
+  // integers and disagreed about vertical scale by up to a sixth, which walks a
+  // brick course several rows up or down between one column and the next. That
+  // is the staircase, and it got worse the closer you stood, because the value
+  // being rounded got smaller while the face it had to describe got taller.
+  //
+  // Measured as rows of stagger between neighbouring columns, on a wall 0.3
+  // cells away and 35 degrees off square: 9.0 at 8.8, 1.34 here. The rest is
+  // not precision and cannot be removed — neighbouring columns of an oblique
+  // wall ARE at different distances, and carrying the step at Q14 instead still
+  // measured 1.29.
+  //
+  // And TEX_N << 12 is 65536 exactly, so a uint16 start wraps at precisely one
+  // tile. The wrap IS the modulo; no masking, and no width to overflow.
+  uint16_t vStartQ12;
+  uint16_t vStepQ12;
 
   // For a top face: the world height of the surface being looked down on.
   // A floor's texture coordinates are a function of how far the ray has
