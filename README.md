@@ -36,13 +36,15 @@ Your score is nights survived. It is saved on the device.
   <img src="docs/img/mobs.png" width="49%">
   <img src="docs/img/night.png" width="49%">
 </p>
-<p align="center"><i>They find you in the daylight too. At night you mostly hear them first.</i></p>
+<p align="center"><i>A sword answers them in daylight. At night you mostly hear them first.</i></p>
 
 <p align="center">
   <img src="docs/img/craft.png" width="49%">
   <img src="docs/img/recipes.png" width="49%">
 </p>
 <p align="center"><i>Lay a recipe out yourself, or pick it from the book.</i></p>
+
+<p align="center"><img src="docs/img/title.png" width="49%"></p>
 
 ## Controls
 
@@ -53,9 +55,10 @@ Right hand moves, left hand acts.
 | Move, turn | arrows |
 | Mine, attack | `W` — hold it |
 | Build | `A` |
-| Look up, down | `E` `S` — both together recentres |
+| Look up, down | `E` `S` |
+| Centre the view | `ENTER` |
 | Jump | `SPACE` |
-| Pick a block | `D`, or `1`–`9` |
+| Pick a block | `1`–`9` |
 | Drop | `Q` |
 | Craft | `TAB` |
 | Confirm, back | `ENTER`, `ESC` |

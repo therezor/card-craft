@@ -32,7 +32,7 @@ struct Buttons {
   // Looking up and down. Outside the four-button core on purpose: a board with
   // no keys to spare leaves these false and plays at the fixed downward tilt,
   // which is exactly how the game shipped. Nothing depends on them.
-  bool lookUp = false, lookDown = false;
+  bool lookUp = false, lookDown = false, lookCentre = false;
   // Held, and passed straight through to game::Input. The repeat that empties a
   // stack is paced by the simulation, not here. A board with no key to spare
   // leaves it false and simply cannot throw anything away.
@@ -67,7 +67,7 @@ struct Buttons {
   bool buildEdge = false;
   // Beyond the four-button core. A board without these keeps one block type
   // and no crafting bench, which is a smaller game but still a whole one.
-  bool cycleEdge = false, craftEdge = false;
+  bool craftEdge = false;
 
   // A hotbar slot named outright: 0 for none, 1..9 for the number key pressed
   // this frame. Cycling with one key works and is what a board with no number
@@ -85,10 +85,11 @@ struct Caps {
   const char* kBuild;   // e.g. "A"
   const char* kConfirm; // e.g. "ENTER"
   const char* kBack;    // e.g. "ESC"
-  const char* kCycle;   // e.g. "D"
   const char* kCraft;   // e.g. "TAB"
   const char* kDrop;    // e.g. "Q", or nullptr where the board has no drop key
   const char* kLook;    // e.g. "E S", or nullptr where the board has no pitch
+  const char* kCentre;  // puts the view back at rest, or nullptr where the
+                        // board has no key to spare for it
   const char* kJump;    // e.g. "SPACE", or nullptr where the board has no jump
 };
 

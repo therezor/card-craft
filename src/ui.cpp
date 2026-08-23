@@ -404,7 +404,7 @@ void controlsCard(const char* footer) {
   rows[n++] = { c.kBuild,   "BUILD" };
   if (c.kJump) rows[n++] = { c.kJump, "JUMP" };
   if (c.kLook) rows[n++] = { c.kLook, "LOOK" };
-  rows[n++] = { c.kCycle,   "SLOT" };
+  if (c.kCentre) rows[n++] = { c.kCentre, "CENTRE VIEW" };
   rows[n++] = { "1-9",      "PICK SLOT" };
   if (c.kDrop) rows[n++] = { c.kDrop, "DROP" };
   rows[n++] = { c.kCraft,   "CRAFT" };

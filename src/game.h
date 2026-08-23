@@ -208,6 +208,9 @@ struct Input {
   // these false and plays exactly as it always has, at the fixed tilt and on
   // the ground.
   bool lookUp = false, lookDown = false;
+  // Puts the view back at its resting tilt in one press. A board with no key to
+  // spare leaves it false and recentres by holding lookUp and lookDown together.
+  bool lookCentre = false;
   // Held, not an edge -- for a reason worth stating, because "jump" reads like
   // an edge. main.cpp builds one Input per FRAME and feeds it to as many as
   // MAX_CATCHUP ticks, so an edge stored here would take off once per tick and
@@ -588,7 +591,6 @@ uint32_t tick(State& s, const Input& in);
 
 // Moves the selection along the bar, wrapping. Skips nothing: an empty slot is
 // still selectable, because an empty hand is a thing you can choose to hold.
-void cycleBlock(State& s, int delta);
 
 // Selects a slot outright, the way a number key does. Out-of-range is ignored.
 void selectSlot(State& s, int index);

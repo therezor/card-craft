@@ -117,20 +117,29 @@ def grab(ser, timeout):
 
 # The README set, as (name, setup commands, frames to grab).
 #
-# Order matters: `mobs` comes after the scenery shot because 'm' flattens a
-# 25x25 yard around the player to pose in. The 'cc' in the first setup opens and
-# closes the craft card, which stocks the bar so the hand is holding something.
-# A space in a setup string is a pause, not a command.
+# Order matters twice. `mobs` is after the scenery because 'm' flattens a 25x25
+# yard around the player to pose in, and 'g' cycles house then tree, so the
+# second one is the tree. `title` is last only because 'y' can reach it from
+# anywhere; it does not have to be.
+#
+# One frame for `mobs`, taken at once: 'm' poses them at seven cells and they
+# walk straight at you, so a second frame a moment later is a creeper filling
+# the panel.
+#
+# 'cc' opens and closes the craft card, which stocks the bar. 'x' puts a pickaxe
+# in the hand and 'z' a sword -- the held item is most of what makes a shot look
+# like a game rather than a renderer. A space is a pause, not a command.
 #
 # More than one frame where the scene is alive: 'm' poses mobs at seven cells
 # and they will land a blow, which paints a red border over the shot. Grab a
 # few and keep the clean one.
 TOUR = [
-    ("hero",    "ncc dg", 1),
-    ("craft",   "c",      1),
-    ("recipes", "r",      1),
-    ("mobs",    "rcim",   4),
-    ("night",   "k",      4),
+    ("hero",    "ncc dxgg",   1),
+    ("craft",   "c",          1),
+    ("recipes", "r",          1),
+    ("mobs",    "rc izm",     1),
+    ("night",   "k",          3),
+    ("title",   "y",          1),
 ]
 
 
@@ -145,15 +154,26 @@ def send(ser, cmd, settle=0.6):
 
 def fps_off(ser):
     """The frame counter is a persisted setting, so it may be on from a previous
-    session. 'f' toggles it and echoes the new state."""
-    for _ in range(2):
+    session, and it lands in the corner of every shot. 'f' toggles it and echoes
+    the new state -- but that echo shares the wire with the frame-time telemetry,
+    so read a generous window and never assume a toggle that was not confirmed.
+    Toggling blindly is worse than not toggling: it can turn the thing on."""
+    for _ in range(4):
         ser.reset_input_buffer()
-        send(ser, "f", 0.3)
-        for line in ser.read(256).decode("ascii", "replace").splitlines():
-            if line.startswith("showfps="):
-                if line.endswith("0"):
-                    return True
-                break
+        send(ser, "f", 0.1)
+        state = None
+        deadline = time.time() + 2.0
+        buf = ""
+        while state is None and time.time() < deadline:
+            buf += ser.read(256).decode("ascii", "replace")
+            for line in buf.splitlines():
+                if line.startswith("showfps="):
+                    state = line.strip()[-1]
+                    break
+        if state == "0":
+            return True
+        if state is None:
+            return False        # never toggle again on no answer
     return False
 
 
@@ -174,7 +194,12 @@ def run_tour(ser, args):
         for i in range(frames):
             if i:
                 time.sleep(args.interval)
-            _, rows = grab(ser, args.timeout)
+            # One retry: the CDC drops writes when the host is not draining it,
+            # and a grab that lands in the middle of that comes back empty.
+            rows = grab(ser, args.timeout)[1]
+            if not rows:
+                time.sleep(1.0)
+                rows = grab(ser, args.timeout)[1]
             if not rows:
                 print(f"  {name}: grab {i + 1} failed", file=sys.stderr)
                 continue
@@ -198,7 +223,10 @@ def main():
 
     args.out.mkdir(parents=True, exist_ok=True)
     with serial.Serial(args.port, 115200, timeout=1.0) as ser:
-        time.sleep(0.4)
+        # A tour is normally run straight after an upload, and the CDC takes a
+        # moment to settle after the reset that ends one. Grabs made before it
+        # does come back empty.
+        time.sleep(2.0 if args.tour else 0.4)
         if args.tour:
             return 0 if run_tour(ser, args) else 1
 

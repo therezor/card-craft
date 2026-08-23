@@ -28,8 +28,8 @@ constexpr float MOVE_SPEED    = 3.1f;    // cells/second
 // that takes four seconds to cross it is one you stop using.
 //
 // There is no return speed. Pitch is a held position, exactly like the facing
-// angle next to it, and holding both keys recentres it — a view that drifts
-// back to rest the moment you stop asking cannot be pointed at a canopy.
+// angle next to it, and Input::lookCentre puts it back — a view that drifts back
+// to rest the moment you stop asking cannot be pointed at a canopy.
 constexpr float PITCH_SPEED  = 320.0f;
 
 // How hard the eye is pulled toward the height of the ground under it, and how
@@ -345,10 +345,6 @@ uint8_t heldBlock(const State& s) {
 uint16_t heldCount(const State& s) {
   const uint8_t b = heldBlock(s);
   return b < world::B_COUNT ? s.inv[b] : (uint16_t)0;
-}
-
-void cycleBlock(State& s, int delta) {
-  s.sel = (uint8_t)((s.sel + delta % SLOT_N + SLOT_N) % SLOT_N);
 }
 
 void selectSlot(State& s, int index) {
@@ -1968,13 +1964,13 @@ uint32_t tick(State& s, const Input& in) {
   if (in.right) s.angle += turn;
   raycast::setAngle(s.cam, s.angle);
 
-  // Pitch is a horizon offset, not a rotation — see raycast::Camera. Holding
-  // both keys recentres, which costs no extra key on a board that has two to
-  // spare and none at all on a board that has neither.
+  // Pitch is a horizon offset, not a rotation — see raycast::Camera. One key
+  // puts it back at rest; holding both look keys does the same, so a board with
+  // no third key to spare can still recentre.
   {
     const float step = PITCH_SPEED / (float)TICK_HZ;
     float h = s.pitch;
-    if (in.lookUp && in.lookDown) {
+    if (in.lookCentre || (in.lookUp && in.lookDown)) {
       h = (float)raycast::HORIZON;
     } else if (in.lookUp) {
       h += step;

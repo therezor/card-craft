@@ -489,10 +489,6 @@ void loop() {
         ui::craftCard(s_game, cardFoot());
         break;
       }
-      if (b.cycleEdge && !s_lockout) {
-        game::cycleBlock(s_game, 1);
-        sfx::play(sfx::kMenuMove);
-      }
       if (b.slotPick && !s_lockout) {
         game::selectSlot(s_game, (int)b.slotPick - 1);
         sfx::play(sfx::kMenuMove);
@@ -508,8 +504,9 @@ void loop() {
       in.act   = b.act && !s_lockout;
       in.build = b.build && !s_lockout;
       in.drop  = b.drop  && !s_lockout;
-      in.lookUp   = b.lookUp;
-      in.lookDown = b.lookDown;
+      in.lookUp     = b.lookUp;
+      in.lookDown   = b.lookDown;
+      in.lookCentre = b.lookCentre;
       // Lockout-gated like the other acting keys, so the press that dismissed a
       // card cannot also launch the player the instant play resumes.
       in.jump  = b.jump  && !s_lockout;
@@ -592,13 +589,6 @@ void loop() {
         if (b.slotPick)
           sfx::play(game::gridSetFromSlot(s_game, b.slotPick) ? sfx::kMenuMove
                                                               : sfx::kCraftFail);
-        // ...and the cycle key steps a cell backwards, so overshooting costs
-        // one press rather than a full lap.
-        if (b.cycleEdge && game::gridOnCell(s_game)) {
-          game::gridCycle(s_game, -1);
-          sfx::play(sfx::kMenuMove);
-        }
-
         if (cancel || b.craftEdge) {
           resume();
         } else if (confirm) {
@@ -752,6 +742,40 @@ void loop() {
         ++n;
       }
       Serial.printf("spawned=%d night\n", n);
+    } else if (cmd == 'y') {
+      // Back to the title card, which is otherwise reachable only by quitting
+      // through the pause menu. The board boots into it, so without this the
+      // screenshot tour can only photograph it on the first run after a flash.
+      ui::rerollSplash(micros());
+      s_scr = SCR_TITLE;
+      s_titleSel = 0;
+      s_lockout = LOCKOUT_FRAMES;
+      Serial.printf("title\n");
+    } else if (cmd == 'x' || cmd == 'z') {
+      // Put a tool in the hand and select it -- 'x' a pickaxe, 'z' a sword. The
+      // held item is drawn in first person and there is no way to reach one
+      // over the wire otherwise: crafting takes a keypress on the craft card.
+      const uint8_t kind = (cmd == 'z') ? (uint8_t)game::TK_SWORD
+                                        : (uint8_t)game::TK_PICK;
+      const uint8_t item = game::toolId(kind, game::TT_IRON);
+      int slot = -1;
+      for (int i = 0; i < game::SLOT_N; ++i)
+        if (s_game.slot[i] == item) { slot = i; break; }
+      if (slot < 0)
+        for (int i = 0; i < game::SLOT_N; ++i)
+          if (s_game.slot[i] == game::SLOT_EMPTY) { slot = i; break; }
+      if (slot < 0) slot = 0;
+      s_game.slot[slot] = item;
+      s_game.dur[slot]  = game::toolInfo(kind, game::TT_IRON).durability;
+      s_game.sel = (uint8_t)slot;
+      Serial.printf("held=%s slot=%d\n",
+                    game::toolInfo(kind, game::TT_IRON).name, slot);
+    } else if (cmd == 'w') {
+      // Freeze the swing at a frame worth photographing. The arc is what makes
+      // a held tool read as held rather than as a sticker in the corner, and a
+      // grab lands wherever the animation happens to be otherwise.
+      s_game.toolPhase = (uint8_t)((s_game.toolPhase + 3) % game::TOOL_ANIM);
+      Serial.printf("swing=%d\n", (int)s_game.toolPhase);
     } else if (cmd == 's') {
       static const char* const kName[] = { "title", "play", "pause", "craft",
                                           "recipes", "controls", "dead" };
@@ -941,14 +965,27 @@ void loop() {
       static int which = 0;
       const bool house = ((which++ & 1) == 0);
       const uint8_t want = house ? world::B_WOOD : world::B_LEAVES;
+      // A tree's crown is a SLAB, so its cells are topped with whatever the
+      // ground is. Looking for leaves in topMat finds the odd leaf that landed
+      // on a column and almost never an actual canopy.
       // Nearest the middle of the map, not the first one scanned: the first is
       // always the one hard against the bedrock ring, and a photograph of a
       // tree with the border wall behind it is a photograph of the border wall.
       int bx = -1, by = -1, best = 1 << 30;
       for (int y = 3; y < world::H - 3; ++y)
         for (int x = 3; x < world::W - 3; ++x) {
-          if (world::topMat(x, y) != want
-              || world::height(x, y) < world::GROUND + 3) continue;
+          // A trunk is a wood column with a leaf slab over it or beside it,
+          // which is what separates a tree from a house post or a dead snag.
+          bool leafy = false;
+          for (int k = 0; k < 5 && !leafy; ++k) {
+            const int lx = x + (k == 1) - (k == 2), ly = y + (k == 3) - (k == 4);
+            leafy = world::hasSlab(lx, ly)
+                    && world::slabMat(lx, ly) == world::B_LEAVES;
+          }
+          const bool hit = world::topMat(x, y) == world::B_WOOD
+                        && world::height(x, y) >= world::GROUND + 3
+                        && (house ? !leafy : leafy);
+          if (!hit) continue;
           const int dx = x - world::W / 2, dy = y - world::H / 2;
           if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; bx = x; by = y; }
         }
@@ -957,7 +994,12 @@ void loop() {
         // A spot to stand: far enough back to get the whole thing in frame,
         // and somewhere a body could actually be.
         int sx = -1, sy = -1;
-        for (int r = 10; r >= 6 && sx < 0; --r)
+        // A tree is photographed from inside the draw distance or it is behind
+        // the fog, and eight blocks at seven cells is taller than the panel --
+        // so the distance cannot fix the framing and the pitch has to. Stand
+        // near the fog line and tilt up; see below.
+        const int rFar = house ? 10 : 8, rNear = house ? 6 : 6;
+        for (int r = rFar; r >= rNear && sx < 0; --r)
           for (int a = 0; a < 24 && sx < 0; ++a) {
             const float th = (float)a * 0.2618f;
             const int tx = bx + (int)(cosf(th) * (float)r);
@@ -982,6 +1024,10 @@ void loop() {
         s_game.angle  = atan2f((float)by + 0.5f - s_game.cam.py,
                                (float)bx + 0.5f - s_game.cam.px);
         raycast::setAngle(s_game.cam, s_game.angle);
+        // Tilted up for a tree, level for a house. Part way, not the full stop
+        // the look keys reach: 'l' goes to sixty degrees, which is all sky.
+        s_game.pitch = (float)(raycast::HORIZON + (house ? 0 : 44));
+        raycast::setPitch(s_game.cam, (int)(s_game.pitch + 0.5f));
         Serial.printf("go: %s at (%d,%d), standing (%d,%d)\n",
                       house ? "house" : "tree", bx, by, sx, sy);
       }

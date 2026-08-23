@@ -608,15 +608,9 @@ static void test_mining_files_drops_by_material(void) {
   TEST_ASSERT_EQUAL_UINT16(0, s.inv[world::B_IRON]);
 }
 
-static void test_hotbar_cycles_and_wraps(void) {
+static void test_a_number_key_names_a_slot(void) {
   State s = fresh();
   givePick(s);                                         // slot 0, the first free
-  TEST_ASSERT_TRUE(heldIsTool(s));
-  cycleBlock(s, 1);
-  TEST_ASSERT_EQUAL_UINT8(1, s.sel);
-  for (int i = 0; i < SLOT_N; ++i) cycleBlock(s, 1);
-  TEST_ASSERT_EQUAL_UINT8(1, s.sel);                   // a full lap
-  cycleBlock(s, -1);
   TEST_ASSERT_TRUE(heldIsTool(s));
 
   // A number key names a slot outright, and an out-of-range one is ignored
@@ -2173,6 +2167,27 @@ static void test_pitch_holds_where_it_is_left(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, rest, s.pitch);
 }
 
+// One key does it too, from either direction. The chord is the fallback for a
+// board with no key to spare; where there is one, a chord on a keyboard this
+// size is not a thing anybody wants to play with.
+static void test_one_key_recentres_the_view(void) {
+  State s = fresh();
+  const float rest = s.pitch;
+
+  Input up; up.lookUp = true;
+  run(s, up, 20);
+  TEST_ASSERT_TRUE(s.pitch > rest + 20.0f);
+  Input centre; centre.lookCentre = true;
+  run(s, centre, 1);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, rest, s.pitch);
+
+  Input down; down.lookDown = true;
+  run(s, down, 20);
+  TEST_ASSERT_TRUE(s.pitch < rest - 20.0f);
+  run(s, centre, 1);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, rest, s.pitch);
+}
+
 // ---- the jump ---------------------------------------------------------------
 
 // Terrain is generated, so a test about standing on flat ground has to go and
@@ -2823,7 +2838,7 @@ int main(int, char**) {
   RUN_TEST(test_a_mob_that_has_never_moved_is_drawn_front_on);
   RUN_TEST(test_every_heading_picks_a_view);
   RUN_TEST(test_mining_files_drops_by_material);
-  RUN_TEST(test_hotbar_cycles_and_wraps);
+  RUN_TEST(test_a_number_key_names_a_slot);
   RUN_TEST(test_a_run_starts_with_empty_hands);
   RUN_TEST(test_a_material_claims_a_slot_and_gives_it_back);
   RUN_TEST(test_a_full_bar_spills_what_it_cannot_hold);
@@ -2886,6 +2901,7 @@ int main(int, char**) {
   RUN_TEST(test_a_jump_carries_forward_on_its_own);
   RUN_TEST(test_building_is_refused_in_mid_air);
   RUN_TEST(test_pitch_holds_where_it_is_left);
+  RUN_TEST(test_one_key_recentres_the_view);
   RUN_TEST(test_looking_down_reaches_the_full_stop);
   RUN_TEST(test_a_whiff_does_not_lock_out_a_real_swing);
   RUN_TEST(test_invulnerability_swallows_a_second_blow);

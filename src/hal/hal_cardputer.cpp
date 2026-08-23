@@ -24,7 +24,6 @@ static Buttons s_prev;
 // their previous state is tracked here rather than inferred from s_prev.
 static bool s_prevEnter = false;
 static bool s_prevPause = false;
-static bool s_prevCycle = false;
 static bool s_prevCraft = false;
 // One bit per number key, so a held '3' selects slot three once rather than
 // every frame — the same edge rule the rest of this file applies.
@@ -39,8 +38,8 @@ static uint16_t s_prevSlot = 0;
 //                right of it, so the camera pair is one finger apart and up
 //                is above down under the hand as well as on the panel.
 //
-// D falls just off the square and cycles the hotbar; SPACE, under the thumb,
-// jumps. No key means two things, which is the rule this layout is built on --
+// SPACE, under the thumb, jumps. Slots are picked by number: no key means two
+// things, which is the rule this layout is built on --
 // and it is why ENTER alone confirms. Aliasing confirm onto the act key would
 // mean the mine key confirms every card in the game.
 static const Caps s_caps = {
@@ -54,12 +53,14 @@ static const Caps s_caps = {
   // the top-left corner is where ESC lives on every keyboard they have ever
   // used, and that is what a hint is for.
   /*kBack*/ "ESC",
-  /*kCycle*/ "D",
   /*kCraft*/ "TAB",
   /*kDrop*/  "Q",
   // E sits directly above S on this keyboard, so up is up and down is down
   // under the fingers as well as on the panel.
   /*kLook */ "E S",
+  // ENTER means nothing else while playing, and a chord of E and S is awkward
+  // on a keyboard this size.
+  /*kCentre*/ "ENTER",
   /*kJump */ "SPACE",
 };
 
@@ -114,10 +115,10 @@ void update() {
   // simulation paces the repeat that empties a stack.
   b.drop  = kb.isKeyPressed('q');
   // Right column of the square: E over S, one row apart, so the pair reads as
-  // up and down without a hint. Both together recentres the view; the game
-  // handles that, not the HAL.
-  b.lookUp   = kb.isKeyPressed('e');
-  b.lookDown = kb.isKeyPressed('s');
+  // up and down without a hint. ENTER puts the view back at rest.
+  b.lookUp     = kb.isKeyPressed('e');
+  b.lookDown   = kb.isKeyPressed('s');
+  b.lookCentre = st.enter;
   // Held, not edged. The frame builds one Input and hands it to as many as four
   // catch-up ticks, so an edge computed here would take off four times; the
   // rising edge is latched in the simulation instead, where it is seen once.
@@ -127,7 +128,6 @@ void update() {
   // "back" would have been actively wrong.
   const bool pause = kb.isKeyPressed('`');
   // D falls just off the square and steps the hotbar; TAB opens crafting.
-  const bool cyc = kb.isKeyPressed('d');
   const bool crf = st.tab;
 
   b.leftEdge  = b.left  && !s_prev.left;
@@ -146,7 +146,6 @@ void update() {
   b.navDown  = b.backEdge;
   b.navLeft  = b.leftEdge;
   b.navRight = b.rightEdge;
-  b.cycleEdge = cyc   && !s_prevCycle;
   b.craftEdge = crf   && !s_prevCraft;
 
   // The number row picks a hotbar slot directly. Lowest key wins if two are
@@ -162,7 +161,6 @@ void update() {
 
   s_prevEnter = st.enter;
   s_prevPause = pause;
-  s_prevCycle = cyc;
   s_prevCraft = crf;
   s_btn = b;
 }
