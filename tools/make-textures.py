@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
 """Generate src/textures.h from the block art below.
 
-Blocks used to be a flat colour per material with one shared 8x8 noise tile
-modulating brightness over it — which world.h was careful to call "not a
-texture", because it was not one: the tile carried no colour of its own and was
-indexed by SCREEN ROW rather than by a position on the block's face, so it read
-as grain rather than as a surface.
+A real texture that costs nothing extra. A texel is one byte and an index; it
+picks one of TEXELS authored colours, and render.cpp runs each of those through
+the same distance/torch/daylight shading it runs a single colour through. The
+inner loop is two loads either way.
 
-This makes it a real texture without making it cost anything. A texel is still
-one byte and still an index, exactly as before; what changes is what it indexes.
-It used to pick one of four brightness steps of the material's single colour. It
-now picks one of TEXELS authored colours, and render.cpp runs each of those
-through the same distance/torch/daylight shading it already ran the single
-colour through. The inner loop is the same two loads it always was.
-
-That is the difference between grain and a texture: an amplitude ramp of one
-colour cannot draw a grass side, because a grass side is brown with a green lip
-on it. Two hues is the whole point.
+The alternative — one shared noise tile modulating the brightness of a single
+per-material colour — is grain rather than a surface: it carries no colour of
+its own and is indexed by SCREEN ROW rather than by a position on the block's
+face. An amplitude ramp of one colour cannot draw a grass side, because a grass
+side is brown with a green lip on it. Two hues is the whole point.
 
     ./tools/make-textures.py           # rewrite src/textures.h
     ./tools/make-textures.py --show    # unpack the result and print it back

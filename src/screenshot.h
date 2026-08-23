@@ -12,10 +12,9 @@
 //      <w*h*2 raw bytes, RGB565 big-endian>
 //      >>SHOT\n
 //
-//  The host asks for one by sending 's'; main.cpp owns the command byte (it
-//  also answers 'b' for the benchmark) and calls capture() here. Interactive
-//  rather than a scripted tour, because the screens worth capturing are the
-//  ones mid-play.
+//  The host asks for one by sending 's'; main.cpp owns the command byte and
+//  calls capture() here. The other dev commands there pose a scene first — see
+//  tools/grab-screenshots.py --tour.
 // =============================================================================
 #pragma once
 

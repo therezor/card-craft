@@ -69,10 +69,9 @@ static Mob& poseMob(State& s, int slot, uint8_t kind, float dist) {
   return m;
 }
 
-// Puts a material on the bar and selects it. The old hotbar was a fixed table
-// of six, so a test could cycle until the one it wanted came up; slots are
-// claimed on pickup now, and a material nobody has mined has no slot to cycle
-// to — the loop that used to do this spins forever.
+// Puts a material on the bar and selects it. Slots are claimed on pickup, so a
+// material nobody has mined has no slot to cycle to — a test must not try to
+// cycle to one, or it spins forever.
 static void hold(State& s, uint8_t mat, uint16_t n) {
   s.inv[mat] = n;
   for (int i = 0; i < SLOT_N; ++i)
@@ -105,8 +104,7 @@ static void giveTool(State& s, uint8_t kind, uint8_t tier) {
   selectSlot(s, 0);
 }
 
-// The tool the game used to hand out for free, which is what most of the
-// mining tests below were written against.
+// A basic pickaxe, which is what most of the mining tests below assume.
 static void givePick(State& s) { giveTool(s, TK_PICK, TT_WOOD); }
 
 // Lays cells into the crafting grid, left to right, and fills the rest.
@@ -142,10 +140,8 @@ static void test_daylight_stays_in_range(void) {
   }
 }
 
-// Dawn is dawn and nothing else. It used to stop the game on a shop card that
-// spent an ore currency on stat upgrades — the "bonus after the wave" — and
-// both went together: with no waves to be paid for surviving, there is nothing
-// for a card to interrupt. The sun comes up, the mobs burn off, play continues.
+// Dawn is dawn and nothing else: the sun comes up, the mobs burn off, play
+// continues. Nothing interrupts it with a card.
 static void test_dawn_just_turns_the_day_over(void) {
   State s = fresh();
   survivable(s);
@@ -167,10 +163,9 @@ static void test_dawn_just_turns_the_day_over(void) {
 
 // ---- the night holds a population, not a wave -------------------------------
 
-// The night used to be a budget: 3 + 2 per night handed out at dusk, paid down
-// to zero, and then nothing until morning. That made a night a countable
-// quantity of monsters, and the second half of one you had cleared was empty.
-// A cap has no such shape — the dark keeps topping itself up.
+// The night is a population, not a budget. A budget handed out at dusk makes a
+// night a countable quantity of monsters, and the second half of one you have
+// cleared is empty; a cap has no such shape — the dark keeps topping itself up.
 static void test_the_night_keeps_topping_itself_up(void) {
   State s = fresh();
   survivable(s);
@@ -208,9 +203,8 @@ static void test_the_population_respects_its_cap(void) {
   }
 }
 
-// All three kinds turn up from the first night. The mix used to unlock creepers
-// on night two and skeletons on night four, which is a difficulty dial rather
-// than a dark full of things.
+// All three kinds turn up from the first night. Unlocking them on a night
+// counter is a difficulty dial rather than a dark full of things.
 static void test_every_kind_can_show_up_on_night_one(void) {
   State s = fresh();
   survivable(s);
@@ -442,8 +436,8 @@ static void test_mobs_close_in_even_when_walled_in(void) {
 
 // ---- mob behaviour ----------------------------------------------------------
 
-// Mobs used to walk all the way into the player, which fills the screen with
-// one sprite and hides everything behind it. They now hold at arm's length.
+// Mobs hold at arm's length. Walking all the way in fills the screen with one
+// sprite and hides everything behind it.
 static void test_mobs_hold_at_standoff(void) {
   State s = fresh();
   survivable(s);
@@ -496,11 +490,10 @@ static void test_attacks_are_telegraphed(void) {
   Input idle;
   run(s, idle, DAY_TICKS + 1);
 
-  // Two shapes of warning, because there are now two shapes of attacker on
-  // night one. A zombie or a skeleton commits to a blow and telegraphs it; a
-  // creeper lights a fuse and hisses. Both are a beat of notice before the
-  // damage, which is the thing being claimed — the test used to be able to
-  // say "telegraph" only because night one held nothing but zombies.
+  // Two shapes of warning, because there are two shapes of attacker on night
+  // one. A zombie or a skeleton commits to a blow and telegraphs it; a creeper
+  // lights a fuse and hisses. Both are a beat of notice before the damage,
+  // which is the thing being claimed.
   bool sawWarning = false, hurtWithoutWarning = false;
   for (int i = 0; i < 60 * 40 && !s.dead; ++i) {
     const uint32_t ev = tick(s, idle);
@@ -600,8 +593,8 @@ static void test_walling_in_summons_creepers(void) {
 
 // ---- inventory and crafting -------------------------------------------------
 
-// Mining used to pour everything into one counter. What comes off has to be
-// filed under the material it came from, or choosing where to dig means nothing.
+// What comes off has to be filed under the material it came from, or choosing
+// where to dig means nothing.
 static void test_mining_files_drops_by_material(void) {
   State s = fresh();
   Input act; act.act = true;
@@ -636,12 +629,8 @@ static void test_hotbar_cycles_and_wraps(void) {
   TEST_ASSERT_EQUAL_UINT8(5, s.sel);
 }
 
-// A run opens with nothing in it, including slot 0.
-//
-// This is the inverse of what used to be locked down here: the pickaxe was
-// pinned to slot 0 for the life of the run, on the reasoning that a board with
-// no inventory screen has to keep the tool reachable. The tool is crafted now,
-// so the thing worth asserting is that the game does not quietly hand one over.
+// A run opens with nothing in it, including slot 0. The tool is crafted, so the
+// thing worth asserting is that the game does not quietly hand one over.
 static void test_a_run_starts_with_empty_hands(void) {
   State s = fresh();
   for (int i = 0; i < SLOT_N; ++i) {
@@ -689,14 +678,10 @@ static void test_a_material_claims_a_slot_and_gives_it_back(void) {
   TEST_ASSERT_EQUAL_UINT8(SLOT_EMPTY, s.slot[0]);
 }
 
-// What the bar cannot hold is spilled on the floor, not swallowed.
-//
-// This is the inverse of what used to be locked down here. giveItem took a
-// material unconditionally and let the count sit in inv[] with no slot to show
-// it -- "nothing is ever lost, it is only temporarily unplaceable". It was
-// lost in every sense that matters: you could not see it, select it or place
-// it, and the game never said so. A full bar now drops the block where it
-// broke, which is a thing you can look at and decide about.
+// What the bar cannot hold is spilled on the floor, not swallowed. A count
+// sitting in inv[] with no slot to show it is lost in every sense that matters:
+// you cannot see it, select it or place it, and the game never says so. A full
+// bar drops the block where it broke.
 static void test_a_full_bar_spills_what_it_cannot_hold(void) {
   State s = fresh();
   const uint8_t fill[SLOT_N] = {
@@ -941,12 +926,8 @@ static void test_bare_hands_can_chop_wood(void) {
   TEST_ASSERT_EQUAL_UINT16(3, s.inv[world::B_WOOD]);
 }
 
-// Matching is shaped, and a shape may sit anywhere it fits.
-//
-// This test used to assert the opposite -- that a multiset was the whole
-// recipe -- and it is inverted rather than merely repaired, because the
-// property it guarded is the one that was deliberately given up. What survives
-// is its real point: a player must not have to hit one exact corner.
+// Matching is shaped, and a shape may sit anywhere it fits: a player must not
+// have to hit one exact corner.
 static void test_a_shape_matches_wherever_it_fits(void) {
   State s = fresh();
   // A sword is a blade over a handle. Left column...
@@ -958,9 +939,7 @@ static void test_a_shape_matches_wherever_it_fits(void) {
 
   // The same holds for a different two-cell recipe in a different material, so
   // this is a property of the matcher and not of one lucky row in the table.
-  // (It used to check a ONE-cell recipe in all four corners -- planks, back
-  // when they came from a single log. There is no one-cell recipe left to
-  // check: planks are two logs stacked now.)
+  // Two cells rather than one, because there is no one-cell recipe left.
   layGrid(s, { world::B_WOOD, CELL_EMPTY, world::B_WOOD, CELL_EMPTY });
   TEST_ASSERT_EQUAL_UINT8(R_PLANK, matchGrid(s.grid));
   layGrid(s, { CELL_EMPTY, world::B_WOOD, CELL_EMPTY, world::B_WOOD });
@@ -1004,9 +983,8 @@ static void test_the_right_materials_in_the_wrong_shape_are_named(void) {
 }
 
 // Planks cost two logs and pay four. Pinned because it is a balance decision
-// rather than a mechanism: it was one log for three, which made wood the one
-// material nobody had to think about, and the whole early game is measured from
-// this number.
+// rather than a mechanism: cheaper and wood becomes the one material nobody has
+// to think about, and the whole early game is measured from this number.
 static void test_planks_take_two_logs_and_give_four(void) {
   State s = fresh();
   s.inv[world::B_WOOD] = 2;
@@ -1027,13 +1005,12 @@ static void test_planks_take_two_logs_and_give_four(void) {
   TEST_ASSERT_FALSE(craftGrid(t));
   TEST_ASSERT_EQUAL_UINT16(1, t.inv[world::B_WOOD]);
 
-  // ...and one log alone spells nothing at all now, where it used to be planks.
+  // ...and one log alone spells nothing at all.
   layGrid(t, { world::B_WOOD, CELL_EMPTY, CELL_EMPTY, CELL_EMPTY });
   TEST_ASSERT_EQUAL_UINT8(R_NONE, matchGrid(t.grid));
 }
 
-// All four cells are finally worth something. A full grid used to be, by
-// construction, nothing at all -- no recipe reached past three.
+// All four cells are worth something: at least one recipe reaches past three.
 static void test_the_four_cell_recipes_craft(void) {
   State s = fresh();
 
@@ -1674,9 +1651,9 @@ static void holdTicks(State& s, Mob& m, float x, float y, int ticks) {
   }
 }
 
-// Range checks used to be flat, so a zombie at the foot of a five-block pillar
-// was "1.2 cells away" from a player standing on top of it and hit them
-// straight through the rock. That defeats the whole vertical dimension.
+// Range checks are three-dimensional. Flat, a zombie at the foot of a
+// five-block pillar is "1.2 cells away" from a player standing on top of it and
+// hits them straight through the rock, which defeats the vertical dimension.
 static void test_melee_cannot_reach_up_a_pillar(void) {
   State s = fresh();
   survivable(s);
@@ -1774,9 +1751,9 @@ static void test_a_wandering_mob_does_not_beeline(void) {
   TEST_ASSERT_TRUE(fabsf(d1 - d0) < 6.0f);   // ...and not converging
 }
 
-// The regression guard on the stuck counter. A wanderer makes no progress
-// toward the player by design, and the give-up rule used to read that as a mob
-// that had failed and cull it.
+// The guard on the stuck counter. A wanderer makes no progress toward the
+// player by design, and the give-up rule must not read that as a failed mob and
+// cull it.
 static void test_a_wandering_mob_is_not_despawned_for_wandering(void) {
   State s = fresh();
   survivable(s);
@@ -2174,12 +2151,9 @@ static void test_a_swing_at_nothing_still_swings(void) {
   TEST_ASSERT_TRUE(whiffs <= 20);
 }
 
-// The view stays where it is put.
-//
-// It used to drift back to the resting tilt the moment neither look key was
-// held, which meant the camera pushed back against the player: you could look
-// up at a canopy but not keep looking at it. Pitch is a held position now, the
-// same as the facing angle.
+// The view stays where it is put. Pitch is a held position, the same as the
+// facing angle — a view that drifts back to rest cannot be pointed at a canopy
+// and kept there.
 static void test_pitch_holds_where_it_is_left(void) {
   State s = fresh();
   const float rest = s.pitch;
@@ -2399,9 +2373,9 @@ static void test_a_whiff_does_not_lock_out_a_real_swing(void) {
   TEST_ASSERT_TRUE(s.mobs[0].hp < before);
 }
 
-// Two mobs landing blows a tick apart used to take two hearts with no window to
-// answer in. Nothing else in the game paces them: the per-mob cooldown does not
-// know the other mob exists.
+// Two mobs landing blows a tick apart must not take two hearts with no window
+// to answer in. Nothing else paces them: the per-mob cooldown does not know the
+// other mob exists.
 static void test_invulnerability_swallows_a_second_blow(void) {
   State s = fresh();
   s.maxHp = s.hp = 20;
@@ -2573,10 +2547,10 @@ static void test_effects_do_not_disturb_the_simulation(void) {
 
 // ---- building against a face ------------------------------------------------
 
-// The bug this locks down: placing used to grow whatever column the crosshair
-// landed on, so aiming at the SIDE of a wall stacked another block on its top
-// instead of putting one beside it. There was no way to build outward, which
-// means there was no way to build a floor.
+// The bug this locks down: grow whatever column the crosshair lands on and
+// aiming at the SIDE of a wall stacks another block on its top instead of
+// putting one beside it. There is then no way to build outward, and so no way
+// to build a floor.
 static void test_placing_against_a_side_face_builds_outward_not_upward(void) {
   State s = fresh();
   s.angle = 0.0f; raycast::setAngle(s.cam, s.angle);

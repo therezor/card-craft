@@ -15,14 +15,9 @@
 //  put back: a tunnel, an overhang, a bridge, a roof, a cave mouth and a tower
 //  are all just bits, and a column can have as many holes in it as it likes.
 //
-//  This replaces a heightmap plus a pool of at most three floating "runs" per
-//  cell. That cap was not an implementation detail the player never saw — it
-//  was two refusals in the rules, MINE_NO_ROOM and PLACE_NO_ROOM, and there
-//  were places the world simply would not let you dig.
-//
 //  Geometry and material are kept apart, which is the other half of it:
-//  removing a block cannot change what anything is made of, so mining — the
-//  common edit, and the one that used to be refused — allocates nothing.
+//  removing a block cannot change what anything is made of, so mining
+//  allocates nothing and can never be refused for want of room.
 //
 //  Materials below the surface are computed, not stored: a column keeps its
 //  height and the material of its top block, and everything under that is a
@@ -59,13 +54,11 @@ enum Block : uint8_t {
   B_COUNT
 };
 
-// A biome changes the shape of the ground as well as its colour. It used to be
-// only the colour — one noise field with three palettes over it — and the
-// result was a map whose horizon looked the same everywhere you stood, which
-// is the opposite of what a biome is for. Each one now carries its own
-// amplitude and its own roughness, so plains are lowland you get caught in the
+// A biome changes the shape of the ground as well as its colour: each carries
+// its own amplitude and roughness, so plains are lowland you get caught in the
 // open on, desert rolls in long smooth dunes, and tundra climbs into jagged
-// peaks with a snow line on them.
+// peaks with a snow line on them. Colour alone gives every horizon the same
+// shape, which is the opposite of what a biome is for.
 //
 // Forest shares the plains surface and the plains ground: what makes it a
 // forest is that the trees are dense enough to lose a mob in.
@@ -85,12 +78,10 @@ uint8_t emission(uint8_t b);
 // True for materials that hurt whatever is standing on them.
 bool isHazard(uint8_t b);
 
-// Square, and no longer a power of two: 96 rather than 64 because objects made
-// of three blocks cannot have a silhouette, and 128 does not fit — six bytes a
+// Square, and deliberately not a power of two. 128 does not fit: six bytes a
 // cell against two 64.8 KB framebuffers leaves 128x128 nineteen kilobytes short
-// of the S3's internal RAM. The only code that assumed a shift was the flow
-// field's cell decode, which now divides; the compiler turns a constant divide
-// into a multiply and the BFS runs three times a second.
+// of the S3's internal RAM. Nothing may assume a shift — the flow field's cell
+// decode divides, and a constant divide is a multiply anyway.
 constexpr int W = 96;
 constexpr int H = 96;
 
@@ -99,12 +90,10 @@ constexpr int H = 96;
 // below and twenty-four above, over a base plane of bedrock that cannot be dug
 // out.
 //
-// It used to be three and six, and six blocks of headroom is the reason the
-// world read as a handful of large cubes rather than as objects: a house was
-// three blocks, a hill was four, and nothing built out of three blocks has a
-// shape. Height is the one dimension that is free here — a column is one byte
-// whether it counts to nine or to thirty-two — so this costs no memory at all
-// and buys towers, cliffs, tall trees and a mine you can descend.
+// Generous on purpose. Height is the one dimension that is free here — a column
+// is one word whether it counts to nine or to thirty-two — and nothing built out
+// of three blocks has a silhouette. This buys towers, cliffs, tall trees and a
+// mine you can descend, for no memory at all.
 constexpr int GROUND = 8;
 constexpr int MAX_H  = GROUND + 24;
 
@@ -130,16 +119,13 @@ struct BlockInfo {
   // against this table so the two cannot drift apart.
   uint8_t r, g, b;
   uint16_t toughness;   // total effort to break; 0 means unbreakable
-  // How many of itself a block yields when it comes off. There used to be a
-  // second yield beside it, dropOre, feeding an abstract upgrade currency; the
-  // dawn shop it was spent in is gone, so coal and iron are items you hold like
-  // any other and their richness is spelled here instead.
+  // How many of itself a block yields when it comes off. Coal and iron are
+  // items you hold like any other, so their richness is spelled here rather
+  // than in an abstract currency.
   uint8_t  dropBlocks;
 
-  // There used to be a `speckle` byte here: how strongly the material broke up
-  // across its own face, driving the amplitude of one shared noise tile. The
-  // per-material texture in textures.h replaced it — the art says how broken
-  // up a surface is, in colour rather than in amplitude, which is what lets
+  // How broken up a surface looks is carried by the per-material texture in
+  // textures.h, in colour rather than in noise amplitude — which is what lets
   // coal read as black lumps in grey rock instead of as darker grey.
 };
 
@@ -171,12 +157,9 @@ uint8_t topMat(int x, int y);
 bool    isBorder(int x, int y);
 
 // Everything the renderer needs about one cell, fetched in a single call.
-//
-// The walker used to ask five separate questions per grid step — height, slab
-// base, slab top, slab material, light — each a cross-module call that has to
-// re-check bounds and recompute the index, and none of which the compiler can
-// inline because they live in another translation unit. At ~30 cells a column
-// and 240 columns that was the single largest line item in a frame.
+// Asking separately — height, slab base, slab top, slab material, light — is
+// five cross-module calls per grid step, each re-checking bounds and
+// recomputing the index, at ~30 cells a column and 240 columns a frame.
 struct RunView { uint8_t base, top, mat; };   // occupies [base, top)
 
 // Everything the renderer needs about one cell, fetched in a single call.
@@ -185,9 +168,8 @@ struct RunView { uint8_t base, top, mat; };   // occupies [base, top)
 // is 32, so a column is exactly one word, and the runs a walker wants come out
 // of it with a bit scan rather than a list walk.
 //
-// This used to carry a copied array of up to three runs, and that cap was the
-// reason the game had to refuse a tunnel or a shelf. A mask has no cap: a
-// column can have as many holes in it as it has blocks.
+// A mask has no cap: a column can have as many holes in it as it has blocks,
+// so no tunnel or shelf can ever be refused for want of room.
 struct Cell {
   uint32_t solid;     // bit z = (x, y, z) is solid
   uint8_t  h;         // blocks in the run resting on the base plane
@@ -295,10 +277,8 @@ enum MineResult : uint8_t {
 // anonymous pile.
 //
 // Taking a block out of the middle of a column splits it: the part above goes
-// on standing. That is a tunnel, and it used to be refusable — a cell could
-// only describe three holes, so there were places the world would not let you
-// dig. A column is a bitmask now, so a hole is a cleared bit and there is
-// nothing left to run out of. Mining cannot be refused for want of room.
+// on standing. That is a tunnel. A column is a bitmask, so a hole is a cleared
+// bit and mining cannot be refused for want of room.
 MineResult mine(int x, int y, int z, int effort,
                 uint8_t& dropMat, uint8_t& dropBlocks);
 

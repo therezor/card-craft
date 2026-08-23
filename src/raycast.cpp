@@ -334,10 +334,9 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
       if (!run.ground && cam.z < (float)run.base) {
         paint.vStepQ12 = 0;
         // The plane this face lies in, so the renderer can texture it the way
-        // it textures a floor. It used to be left at zero, which is not a
-        // height at all — the underside took the flat-colour path and a bridge
-        // deck seen from below was a single shade of grey while every other
-        // face of the same block carried its material's grain.
+        // it textures a floor. Must be a real height: zero sends the underside
+        // down the flat-colour path, and a bridge deck seen from below comes
+        // out one shade of grey.
         paint.zTop = (uint8_t)run.base;
         const float dz = cam.z - (float)run.base;
         const int ya = clampRow(horizon + dz * invFar);
@@ -376,13 +375,10 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
           (uint16_t)((float)(textures::TEX_N << 12) / invNear);
 
       if (dNear > 0.001f) {
-        // Only the blocks that can land somewhere still unpainted. A column is
-        // up to MAX_H blocks tall and every one of them used to cost a loop
-        // turn, two clamps and a rejected paint() call — and close to a tall
-        // cliff almost all of them project off the top of the panel, so the
-        // walker spent most of its time discarding geometry it had just
-        // computed. Measured on a 32-block world: 41.7 ms worst-case column
-        // walk before, and the frame rate floor went with it.
+        // Only the blocks that can land somewhere still unpainted. Close to a
+        // tall cliff almost every block of a column projects off the top of the
+        // panel, and walking them all is the walker's worst case by a wide
+        // margin.
         //
         // Row of the underside of block k is horizon + (cam.z - k) * invNear,
         // which falls as k rises, so the two bounds inverting is what "no
@@ -403,22 +399,15 @@ int castColumn(const Camera& cam, int x, int selX, int selY, int selZ,
           if (hi2 < kHi) kHi = hi2;
           if (kLo < run.base) kLo = run.base;
         }
-        // One span per RUN of like blocks, not one per block.
+        // One span per RUN of like blocks, not one per block. A six-high stone
+        // wall is a single span and the pixels are identical, because a face's
+        // texture coordinate is a function of world height: v keeps
+        // accumulating and wraps every TEX_N texels, which is once a block.
         //
-        // This is where the walker's worst case was. Every block of every
-        // column used to be its own candidate: a loop turn, two clamps and a
-        // full trip through the clipper, ~30,000 times a frame — which is why
-        // paint() carries a hand-written fast path at all. A six-high stone
-        // wall is one span now, and the pixels it produces are identical,
-        // because a face's texture coordinate is a function of world height:
-        // v simply keeps accumulating and wraps every TEX_N texels, which is
-        // once a block, exactly as it did when each block emitted its own.
-        //
-        // The run breaks where the material does — and below the natural
-        // surface that is often every block, because the ore lattice is seeded
-        // per position. That is not a defect: the scene that costs the frame is
-        // a close face of uniform stone or something a player built, and both
-        // of those merge whole.
+        // The run breaks where the material does — below the natural surface
+        // that is often every block, since the ore lattice is seeded per
+        // position. The scenes that cost the frame are close faces of uniform
+        // stone or something a player built, and both merge whole.
         //
         // It also breaks at the selected block, which has to stay its own span:
         // `sel` picks a different shade table for the whole span, and the
@@ -574,21 +563,11 @@ bool pick(const Camera& cam, float maxDist, Hit& hit) {
     const bool  down  = zFar <= zNear;
 
     // One 32-bit load answers the whole column, and it is the whole column that
-    // has to be answered.
-    //
-    // This used to be two questions — "how tall is the ground here" and "is
-    // there a slab in the way" — and it got both wrong in the same way. The
-    // ground column was the only thing that could be a target, so a block
-    // hanging in mid-air could not be mined at all: a bridge deck, a roof, a
-    // tree crown, anything the player had built out over nothing. And a slab
-    // was treated as an opaque blocker that returned NO hit, so aiming at one
-    // aimed at nothing. It also only ever consulted the LOWEST floating run, so
-    // a second deck above the first was not even in the conversation.
-    //
-    // A block is a bit at a z. Scanning the mask in ray order finds whichever
-    // one the ray meets first, and a ground column is just the low bits of the
-    // same word — so the two branches this replaces are one, and it can no
-    // longer matter what is holding the block up.
+    // has to be answered. A block is a bit at a z: scanning the mask in ray
+    // order finds whichever one the ray meets first, and a ground column is
+    // just the low bits of the same word. So a bridge deck, a roof or a tree
+    // crown is as pickable as the ground, and it never matters what is holding
+    // the block up.
     const uint32_t solid = world::cellAt(mapX, mapY).solid;
 
     int   bz = -2;          // the block struck, or -2 for none in this cell

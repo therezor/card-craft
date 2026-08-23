@@ -19,27 +19,25 @@ namespace world {
 // (a black block is indistinguishable from a far-away anything).
 // Toughness is in effort, and the player supplies EFFORT_PER_TICK of it at
 // TICK_HZ — so 960/second at level zero, and a value here divided by 960 is
-// roughly the seconds that block takes by hand. These are set so grass comes
-// away in under half a second and iron takes a committed two, because with
-// one-metre cubes rather than full-height walls the old numbers broke eight
-// blocks a second and mining had no weight at all.
+// roughly the seconds that block takes by hand. Grass comes away in under half
+// a second and iron takes a committed two: with one-metre cubes, anything
+// faster breaks blocks by the handful and mining has no weight at all.
 // Distance fog pulls every colour toward the same grey, so blocks have to be
-// separated by *brightness* as much as by hue — two materials the same hue and
-// the same value are the same block as soon as they are six cells away. The
-// warm family in particular used to be four near-identical browns (dirt, wood,
-// plank, iron); they are now spread from very dark to very light.
+// separated by *brightness* as much as by hue — two materials of the same hue
+// and the same value are the same block as soon as they are six cells away. The
+// warm family (dirt, wood, plank, iron) is spread from very dark to very light
+// for exactly that reason.
 //
 // Rough luminance of each, for reference: wood 67, coal 80, dirt 102, brick
 // 116, leaves 90, grass 132, stone 131, plank 155, iron 179, sand 208,
 // torch 208, snow 241, lava 132, bedrock 46, masonry 103.
 //
-// Masonry is cut stone and it is deliberately not B_STONE. Two reasons, and
-// the second is the one that forces it. It is darker and cooler than natural
-// rock, so a tower standing against a stone hillside is still a tower. And it
-// is a *structure* material: matAt makes a structure column out of itself all
-// the way down, while a non-structure one gets the soil profile — so a keep
-// built out of B_STONE would have had two courses of dirt inside it, one
-// block under its own battlements.
+// Masonry is cut stone and it is deliberately not B_STONE. It is darker and
+// cooler than natural rock, so a tower against a stone hillside is still a
+// tower — and, the part that forces it, it is a *structure* material: matAt
+// makes a structure column out of itself all the way down, while a
+// non-structure one gets the soil profile. A keep built out of B_STONE would
+// have two courses of dirt inside it, one block under its own battlements.
 static const BlockInfo kInfo[B_COUNT] = {
   // name       r    g    b   tough  blk
   { "grass",   82, 168,  62,   360,   1 },   // saturated green
@@ -99,16 +97,13 @@ static inline bool outside(int x, int y) {
 // A column is a 32-bit occupancy mask, one bit a block, and MAX_H is exactly
 // 32 so the world's full height is exactly one word.
 //
-// What this replaces is a heightmap plus a pool of up to three floating "runs"
-// a cell could carry above it. That model could not describe a fourth hole, and
-// the two refusals the game had to carry -- MINE_NO_ROOM and PLACE_NO_ROOM --
-// were both the pool saying so. A bitmask has no such limit: any block anywhere
-// can be taken out or put back, a column can be swiss cheese, and the walker
-// finds its runs with a bit scan instead of chasing a linked list.
+// A bitmask has no cap: any block anywhere can be taken out or put back, a
+// column can be swiss cheese, and the walker finds its runs with a bit scan
+// rather than by chasing a list.
 //
 // Geometry and material are separate concerns here, which is the other half of
-// the change. Removing a block cannot alter what anything is made of, so mining
-// -- the common edit, and the one that used to be refused -- never allocates.
+// it. Removing a block cannot alter what anything is made of, so mining never
+// allocates and can never be refused.
 static uint32_t g_solid[W * H];
 
 // The height the terrain generator left this column at, and the material of the
@@ -116,10 +111,10 @@ static uint32_t g_solid[W * H];
 // over stone over ore falls out of depth below g_surf, so it costs no memory
 // and cannot drift out of step with the terrain.
 //
-// Both are terrain, not state: mining and building do not move them. That is
-// the fix for a bug this file already documents -- measuring depth from the
-// CURRENT height meant digging down re-exposed the dirt band forever and stone
-// was unreachable. g_surf is the anchor; nothing but the generator writes it.
+// Both are terrain, not state: mining and building must not move them. Measure
+// depth from the CURRENT height instead and digging down re-exposes the dirt
+// band forever, putting stone out of reach. Nothing but the generator writes
+// g_surf.
 static uint8_t g_surf[W * H];
 
 // The natural surface material and the torch light, one byte for both.
@@ -337,8 +332,7 @@ static inline uint8_t gtopAt(int i) {
 // a column can reach, so returning it would make the top HEADROOM blocks of the
 // world behave as though something were resting on them.
 // True where the cell carries anything above its ground column -- a roof, a
-// bridge deck, a tree crown, a shelf a player built. What used to be "this cell
-// has a run in its list".
+// bridge deck, a tree crown, a shelf a player built.
 static inline bool hasFloating(int i) {
   const int h = ghAt(i);
   return h < MAX_H && (g_solid[i] >> h) != 0u;
@@ -374,11 +368,9 @@ static inline void solidClear(int i, int a, int b) {
   // Layer zero is bedrock and never comes out, whatever asks. Minecraft's floor
   // is a course of bedrock for the same reason: without it the bottom of a pit
   // is not a block, and a thing that is not a block has no texture to draw, no
-  // face to outline and nothing for a pick to bite on. It used to be a "base
-  // plane" that the renderer and the picker each had to special-case, and the
-  // selection box could not be drawn on it at all because no span belonged to
-  // it. Making it an ordinary block deletes all of that: it is unbreakable
-  // because its toughness is zero, which is a rule the world already had.
+  // face to outline and nothing for a pick to bite on. An ordinary block needs
+  // no special case anywhere -- it is unbreakable because its toughness is
+  // zero, which is a rule the world already had.
   if (a < 1) a = 1;
   if (b > MAX_H) b = MAX_H;
   if (a >= b) return;
@@ -564,11 +556,9 @@ void generate(uint32_t seed) {
 // you navigate by, and a quarry is the only place ore is visible from the
 // surface.
 //
-// All of it is sized against a world twenty-four blocks tall. At the six it
-// used to be, every one of these was three or four blocks and the whole map
-// read as a scattering of large cubes — which is a resolution problem and not
-// a modelling one. A keep is eighteen blocks now, a tree is nine, and the
-// blocks look small because there are enough of them to make a shape.
+// All of it is sized against a world twenty-four blocks tall: a keep is
+// eighteen blocks, a tree is nine, and the blocks look small because there are
+// enough of them to make a shape.
 
 // Free ground: at the untouched height, not built on, and — the part that is
 // easy to forget — nothing already hanging over it. Without the slab test a
@@ -607,13 +597,10 @@ static void setCol(int x, int y, int h, uint8_t top);
 
 // Cuts a level platform and reports the height it settled on.
 //
-// Buildings used to demand ground already at exactly GROUND. That was nearly
-// free on a world six blocks tall, where four fifths of the map was dead flat;
-// on one that actually has hills it meant three seeds in ten had no house on
-// them at all and two had no castle, because the footprint never found a
-// perfectly level patch big enough. A builder picks a spot and cuts a
-// platform, so this does too — and a village on a levelled shelf is a better
-// thing to look at than a village that is not there.
+// A builder picks a spot and cuts a platform, so this does too. Demanding
+// ground already at exactly GROUND leaves three seeds in ten with no house at
+// all, because on a world with hills the footprint never finds a perfectly
+// level patch big enough.
 //
 // The mean rather than the minimum, so a site is half cut and half filled and
 // the platform does not sit in a pit. Cutting exposes whatever was under the
@@ -648,9 +635,7 @@ static int levelArea(int x0, int y0, int w, int d) {
 //
 // Terrain underneath is left alone: g_surf does not move, so a trunk grown on a
 // hillside still has that hillside's soil profile under it rather than becoming
-// wood all the way down. What used to make that work was matAt special-casing
-// isStructure() materials; it is markers now, and the marker says exactly the
-// same thing the special case did.
+// wood all the way down. The marker says so; matAt needs no special case.
 static void setCol(int x, int y, int h, uint8_t top) {
   if (outside(x, y) || isBorder(x, y)) return;
   if (h < 1) h = 1;              // the bedrock course; see solidClear
@@ -682,32 +667,16 @@ static inline int groundOf(int x, int y) {
 
 // A trunk with a canopy that hangs out over open ground.
 //
-// The old tree was a column of leaves with shorter columns of leaves beside it,
-// and it read as a shrub for a reason no amount of tuning was going to fix: a
-// canopy is leaves *over air*, one cell out from a trunk that is not underneath
-// them, and a heightmap cannot say that. Leaves standing on the ground are a
-// bush however tall you make them.
+// A canopy is leaves *over air*, one cell out from a trunk that is not
+// underneath them, and a heightmap cannot say that — leaves standing on the
+// ground are a bush however tall you make them. Slabs can say it, so the crown
+// is slabs and what you get is a tree you walk *under*.
 //
-// Slabs can say it — the same second run per cell that roofs a ruin and spans
-// an arch. So the crown is slabs, and what you get is a tree you walk *under*
-// rather than a green post you walk around.
-//
-// A short trunk carrying a crown three cells across, not a mast with a plate
-// on top and not a hedge you cannot see past.
-//
-// The shape this replaces was a nine-to-eleven block trunk under a crown three
-// deep, which from any distance reads as two or three green blocks on a stick.
-// Almost all of that was trunk, and the fix for that was a six-log trunk under
-// a five-across crown — right for a view that reached seventeen cells, and
-// wrong now that render::BANDS closes the fog at ten.
-//
-// A block subtends PROJ / d pixels, so at five cells one block is 32 rows of a
-// 135-row panel: four blocks is the whole screen. An eight-block tree with a
-// five-wide crown could only be seen entire from about the fog line, where it
-// is already grey, and up close it was a green wall. Four or five logs under a
-// 3x3 crown is a tree you can stand next to and still read as a tree — and the
-// crown is still leaves *over air*, which is the thing that separates it from
-// a bush.
+// Sized against the draw distance, not against a real tree. A block subtends
+// PROJ / d pixels, so at five cells one block is 32 rows of a 135-row panel and
+// four blocks fill the screen. Four or five logs under a 3x3 crown is a tree
+// you can stand next to and still read as a tree; anything taller can only be
+// seen entire from around the fog line, where it is already grey.
 //
 // Layers, measured from the first z above the top log:
 //
@@ -761,16 +730,10 @@ static bool placeTree(int x, int y, uint32_t& rng) {
     // certainly be found holding the bag.
     if (!standable(nx, ny)) return;
     // Where the ground under a leaf comes up, the leaf comes up with it rather
-    // than being dropped. This used to be a flat refusal — anything with less
-    // than HEADROOM of air under it was simply not placed — and that was
-    // survivable while a crown was five across and the skirt sat three clear
-    // of the ground. It is not now: the crown is eight cells, the skirt clears
-    // the ground by exactly HEADROOM, and so a single cell of rise took a leaf
-    // off. Trees on any kind of slope came out visibly half bald.
-    //
-    // Lifting instead of refusing is also the more honest shape. A canopy over
-    // a hillside is not flat in the first place, and what the rule is actually
-    // protecting is the air underneath, which lifting preserves exactly.
+    // than being dropped. Refusing instead takes a leaf off for every cell of
+    // rise — the skirt clears the ground by exactly HEADROOM — and trees on any
+    // slope come out visibly half bald. What the rule protects is the air
+    // underneath, which lifting preserves exactly.
     const int lift = (int)ghAt(idx(nx, ny)) + HEADROOM;
     if (lift > base) base = lift;
     // Unless the ground has risen into the crown itself, which is where a
@@ -781,10 +744,9 @@ static bool placeTree(int x, int y, uint32_t& rng) {
     setSlab(nx, ny, base, top, B_LEAVES);
   };
 
-  // The whole crown, one ring of it. There used to be a second ring two cells
-  // out — a 5x5 with its corners knocked off — and at a ten-cell draw distance
-  // that ring was most of the screen from anywhere you could see its colour.
-  // What it bought was a ragged outline; what it cost was the view.
+  // The whole crown, one ring of it. A second ring two cells out is most of the
+  // screen from anywhere close enough to see its colour: it buys a ragged
+  // outline and costs the view.
   static const int kR1[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
 
   for (int i = 0; i < 8; ++i) {
@@ -930,10 +892,8 @@ static bool placeSpire(int x, int y, uint32_t& rng) {
 static bool placeSnag(int x, int y, uint32_t& rng) {
   if (!flatAt(x, y) || biomeAt(x, y) != BIOME_TUNDRA) return false;
   rng = rng * 1664525u + 1013904223u;
-  // The height of a live spruce, less its crown. It used to be six to eight,
-  // which was fine beside a ten-block tree and is not beside a six-block one:
-  // a dead trunk standing taller than every living tree around it reads as a
-  // mistake rather than as a snag.
+  // The height of a live spruce, less its crown. A dead trunk standing taller
+  // than every living tree around it reads as a mistake rather than as a snag.
   //
   // Still deliberately clear of a house's corner post, which is a bare wood
   // column of the same material and now tops out at base + 4. Two bare wood
@@ -1235,18 +1195,14 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
   // flat — cutting into the side of a rise is what a quarry looks like — but a
   // tall hill would leave a cliff the player cannot climb back out of.
   //
-  // Scanned one cell wider than the pit, because the wall you have to climb is
-  // not made only of terraces. The rim ring is cut to GROUND - 1, so whatever
-  // stands immediately outside it is the last step out, and this guard used to
-  // stop at the pit's own edge and never look at it. A quarry that landed in a
-  // dip came out as a hole ringed by untouched hillside, and every terrace
-  // inside it was climbable right up to a wall that was not.
+  // Scanned one cell WIDER than the pit: the rim ring is cut to GROUND - 1, so
+  // whatever stands immediately outside it is the last step out. Stop at the
+  // pit's own edge and a quarry that lands in a dip is a hole ringed by
+  // untouched hillside, climbable right up to a wall that is not.
   //
-  // What the ring owes the player is a way out, not a low horizon all the way
-  // round: a pit cut into the side of a rise is the shape this is for, and
-  // demanding every outside cell be steppable refused so many sites that whole
-  // seeds came out with no quarry at all. So the ring is counted rather than
-  // required, and a handful of exits is enough.
+  // The ring is counted rather than required. What it owes the player is a way
+  // out, not a low horizon all the way round -- demanding every outside cell be
+  // steppable refuses so many sites that whole seeds come out with no quarry.
   int exits = 0;
   for (int y = cy - r - 1; y <= cy + r + 1; ++y)
     for (int x = cx - r - 1; x <= cx + r + 1; ++x) {
@@ -1270,12 +1226,10 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
       }
       // Not onto ground that has already been cut. A quarry reads the material
       // it exposes out of the column it is about to shorten, so a second one
-      // laid over the floor of the first asks for the material of a layer that
-      // is no longer there — and matAt answers B_BEDROCK, which isBorder() then
-      // reports as the edge of the map. The result was a patch of unmineable,
-      // unclearable "border" in the middle of the world, and the spawn pad
-      // skipped over it because that is exactly what it is told to do with
-      // border cells.
+      // laid over the floor of the first asks for a layer that is no longer
+      // there — matAt answers B_BEDROCK, isBorder() reports that as the edge of
+      // the map, and the result is a patch of unmineable "border" in the middle
+      // of the world that the spawn pad then skips over.
       if (isStructure(gtopAt(i)) || hasFloating(i)) return false;
       if (ghAt(i) > GROUND + 3 || ghAt(i) < GROUND) return false;
     }
@@ -1315,8 +1269,7 @@ static bool placeQuarry(int cx, int cy, int r, uint32_t& rng) {
 }
 
 // A rock arch: a span of stone bridging two points of high ground, with a gap
-// underneath you can walk through. Purely a landmark, and the clearest possible
-// demonstration that the world is no longer a pure heightmap.
+// underneath you can walk through. Purely a landmark.
 static bool placeArch(int cx, int cy, int len, bool alongX, uint32_t& rng) {
   const int hx = alongX ? len / 2 : 1, hy = alongX ? 1 : len / 2;
   for (int y = cy - hy; y <= cy + hy; ++y)
@@ -1351,11 +1304,10 @@ static bool placeCave(int cx, int cy, int len, bool alongX, uint32_t& rng) {
     if (outside(x, y) || isBorder(x, y)) return false;
     if (isStructure(gtopAt(idx(x, y))) || hasFloating(idx(x, y))) return false;
     // It has to run into a hill, or there is nothing to be inside of — and
-    // tall enough at EVERY cell, the mouth included. The mouth used to be
-    // allowed down to GROUND + 1, where the roof lands at or under the floor
-    // plus HEADROOM and setSlab quietly declines to make it: the floor was
-    // still cut, so what the generator produced was a bare patch of hillside
-    // stone at ground level with open sky over it. Expressed against HEADROOM
+    // tall enough at EVERY cell, the mouth included. Allow a lower mouth and
+    // the roof lands under the floor plus HEADROOM, where setSlab quietly
+    // declines to make it: the floor is still cut, so what comes out is a bare
+    // patch of hillside stone with open sky over it. Expressed against HEADROOM
     // rather than as a 3, because it is setSlab's rule that decides this.
     if (ghAt(idx(x, y)) < GROUND + HEADROOM + 1) return false;
   }
@@ -1512,12 +1464,9 @@ bool isBorder(int x, int y) {
 // Material at z, with no solidity test: the step function first, then the soil
 // profile the markers defer to.
 //
-// This is one function where there used to be two. matAt answered for the
-// ground column and blockAt answered for the runs floating over it, each with
-// its own depth anchor -- a run carried a `surf` field for exactly that, so a
-// piece split off a hillside still read grass over dirt over stone. With the
-// mask there is no such distinction: a block is at a z, and z is all the depth
-// anchor a soil profile needs.
+// One function, because with the mask there is no distinction to make between
+// the ground column and a run floating over it: a block is at a z, and z is all
+// the depth anchor a soil profile needs.
 static uint8_t matAtIdx(int i, int z) {
   // The floor of the world, under everything and answerable before the markers
   // are consulted: a player cannot place over it because it is never air, and
@@ -1532,8 +1481,8 @@ static uint8_t matAtIdx(int i, int z) {
   // on top, a band of dirt, then stone with ore seeded by position so a given
   // column always digs the same.
   //
-  // Measured from g_surf, the height the generator left this column at. See
-  // g_surf for what measuring from the current height did.
+  // Measured from g_surf, the height the generator left this column at, never
+  // from the current height. See g_surf.
   const int depth = (int)g_surf[i] - 1 - z;
   if (depth <= 0) return smatOf(i);
   if (depth == 1) return B_DIRT;
@@ -1570,9 +1519,9 @@ Cell cellAt(int x, int y) {
   }
   const int i = idx(x, y);
   // The whole column in one 32-bit load. This call exists because five separate
-  // cross-module questions per grid step was the largest line item in a frame;
-  // the mask answers all the geometry ones at once, and there is no longer a
-  // run list to copy out -- which also means no cap on what it can describe.
+  // cross-module questions per grid step is the largest line item in a frame;
+  // the mask answers all the geometry ones at once, with no run list to copy
+  // out and no cap on what it can describe.
   c.solid = g_solid[i];
   c.h     = (uint8_t)colHeight(c.solid);
   c.top   = c.h == 0 ? smatOf(i) : matAtIdx(i, c.h - 1);
@@ -1611,9 +1560,8 @@ uint8_t slabMat(int x, int y) {
 }
 bool hasSlab(int x, int y) { return slabTop(x, y) != 0; }
 
-// Every floating run of a cell, ascending. `cap` is the caller's array size:
-// a column's run count is unbounded now, so the caller has to say how many it
-// can take rather than the world declaring a limit it no longer has.
+// Every floating run of a cell, ascending. `cap` is the caller's array size: a
+// column's run count is unbounded, so the caller says how many it can take.
 int runsAt(int x, int y, RunView* out, int cap) {
   if (outside(x, y) || cap <= 0) return 0;
   const int i = idx(x, y);
@@ -1653,12 +1601,9 @@ static void setSlab(int x, int y, int base, int top, uint8_t mat) {
   if (base < 0) base = 0;
   if (top <= base) return;
   const int i = idx(x, y);
-  // The generator used to have exactly one slot per cell, so a second call
-  // silently replaced the first. Keeping that: any floating run this one
-  // overlaps is cleared whole before it goes in. The generator leans on it --
-  // placeTree lays its crown down in layers over the same cells, and a house
-  // sets its eaves and then its roof -- and made the old last-call-wins rule
-  // part of those shapes.
+  // Last call wins: any floating run this one overlaps is cleared whole before
+  // it goes in. The generator leans on that -- placeTree lays its crown down in
+  // layers over the same cells, and a house sets its eaves and then its roof.
   const int h = ghAt(i);
   for (int z = h; z < MAX_H; ) {
     if (!((g_solid[i] >> z) & 1u)) { ++z; continue; }
@@ -1680,12 +1625,9 @@ uint8_t topMat(int x, int y) {
   return gtopAt(idx(x, y));
 }
 
-// Air reports the base plane, which is this file's long-standing convention for
-// "nothing here" and what every caller already tests against.
-//
-// matAt and blockAt have converged: they used to differ because matAt answered
-// for the ground column and blockAt for the runs floating over it, each with
-// its own depth anchor. There is one column now, so there is one answer.
+// Air reports the base plane, which is this file's convention for "nothing
+// here" and what every caller tests against. There is one column, so matAt and
+// blockAt give one answer.
 uint8_t matAt(int x, int y, int z) {
   return blockAt(x, y, z);
 }
@@ -1854,11 +1796,8 @@ MineResult mine(int x, int y, int z, int effort,
   const BlockInfo& bi = kInfo[m];
   if (bi.toughness == 0) return MINE_NOTHING;
 
-  // There is no MINE_NO_ROOM here any more, and its absence is the point of the
-  // whole model. It used to be asked before any effort was banked -- "would the
-  // hole this leaves need a run this cell cannot hold" -- because a cell could
-  // only describe three holes, and digging into the wrong hillside was simply
-  // refused. Taking a block out is one cleared bit now. It cannot fail.
+  // There is no MINE_NO_ROOM, and its absence is the point of the whole model.
+  // Taking a block out is one cleared bit. It cannot fail.
 
   if (x != s_mineX || y != s_mineY || z != s_mineZ) {
     s_mineX = x; s_mineY = y; s_mineZ = z; s_effort = 0;
@@ -1938,8 +1877,7 @@ PlaceResult place(int x, int y, int z, uint8_t mat) {
   // ground. markSetRange writes both.
   //
   // The only way this fails is the marker pool being empty world-wide, which
-  // takes thousands of distinct placements -- not the four-in-one-column that
-  // PLACE_NO_ROOM used to mean.
+  // takes thousands of distinct placements.
   // The bit goes down BEFORE the marker, and the order is load-bearing:
   // markSetRange normalises, and normalising drops any marker whose range holds
   // no solid block. Written the other way round the marker describes air for
@@ -1986,9 +1924,9 @@ int explode(int cx, int cy, int radius) {
       n += take;
     }
   }
-  // A blast leaves whatever it did not reach standing, leaves included. It used
-  // to sweep the canopy afterwards, which meant a creeper going off under a
-  // tree took the tree with it.
+  // A blast leaves whatever it did not reach standing, leaves included -- no
+  // canopy sweep afterwards, or a creeper going off under a tree takes the
+  // whole tree with it.
   if (n) { resetDamage(s_mineX, s_mineY); rebuildLight(); }
   return n;
 }

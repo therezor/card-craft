@@ -61,13 +61,9 @@ uint16_t         s_mineChirp = 0;
 // ---- audio ------------------------------------------------------------------
 
 // Every event that fired this frame, each on the channel its role belongs to.
-//
-// This used to be a priority chain that played exactly one sound and discarded
-// the other twelve, because a single voice was all there was. It is not: the
-// Cardputer's speaker is an I2S amplifier and M5Unified mixes eight channels
-// through it. Mining while a creeper hisses at you is now two sounds, which is
-// what it always should have been — the hiss is the only warning the player
-// gets, and it used to be silenced by a pickaxe.
+// The speaker is an I2S amplifier and M5Unified mixes eight channels through
+// it, so mining while a creeper hisses at you is two sounds rather than a coin
+// toss between them — the hiss is the only warning the player gets.
 void playEvents(uint32_t ev) {
   // The three cues that need a subject read it off State. An event is a bit and
   // a bit cannot say WHICH — which material is under the pick, which mob was
@@ -146,13 +142,9 @@ void fpsCount() {
 
 // ---- frame-time telemetry ---------------------------------------------------
 //
-// Reported over USB and no longer drawn on the panel. There used to be a second
-// line under the counter above carrying the frame period, the average CPU cost
-// and the worst one -- useful while the renderer was being optimised, and two
-// numbers too many to have burnt into the corner of a game now that a player
-// can switch the frame rate on for themselves. The measurements are unchanged;
-// only the drawing is gone, so the benchmark and the figures in the README
-// still come from exactly what they always did.
+// Frame period, average CPU cost and the worst one, reported over USB. Never
+// drawn on the panel: the player-facing frame counter above is the only thing
+// that belongs in the corner of a game.
 
 #ifdef SHOW_FPS
 uint32_t s_fpsSum = 0, s_cpuSum = 0, s_cpuMax = 0;
@@ -209,26 +201,21 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
   s_fpsN = 0;
 }
 
-// Top left, where the objective line used to be.
+// Top left.
 #endif
 
 #ifdef DEV_SERIAL
 // Synthetic play, so the frame rate can be measured the same way twice. Held
 // forward + turn + mine sweeps the camera over the whole island and keeps the
-// mining path hot; left running it walks into dusk and meets a real wave,
-// which is the case the 30 fps target actually has to survive.
-// The world every benchmark run measures. Any value would do; what matters is
-// that it never changes, so two runs are comparable.
+// mining path hot; left running it walks into dusk and meets a real wave.
+// Any seed would do; what matters is that it never changes.
 constexpr uint32_t BENCH_SEED = 0xCA2DC4A7u;
 bool     s_bench = false;
 uint32_t s_benchFrames = 0;
 
-// Holds a look key down: -1 down, 0 neither, +1 up. Pitch is the one control
-// that cannot be exercised over a serial link, and it is the control that says
-// whether a canopy or a bridge deck is in frame at all — the same reason the
-// 't' command exists. It drives the real Input flags rather than writing the
-// horizon, so what gets measured is the clamp and the drift as the game runs
-// them, not a value poked past both.
+// Holds a look key down: -1 down, 0 neither, +1 up. Drives the real Input flags
+// rather than writing the horizon, so what gets measured is the clamp and the
+// drift as the game runs them, not a value poked past both.
 int8_t   s_look = 0;
 #endif
 
@@ -271,9 +258,9 @@ const char* menuFoot() {
 
 const char* cardFoot() {
   static char foot[44];
-  // Short on purpose: the card is 168 px and this used to be 185, so it ran off
-  // both ends and over the hotbar. The arrows need no hint -- the cursor is
-  // visible and moving it is the first thing anyone tries.
+  // Short on purpose: the card is 168 px wide and a longer hint runs off both
+  // ends and over the hotbar. The arrows need no hint -- the cursor is visible
+  // and moving it is the first thing anyone tries.
   snprintf(foot, sizeof(foot), "%s OK   %s BACK",
            hal::caps().kConfirm, hal::caps().kBack);
   return foot;
@@ -537,8 +524,7 @@ void loop() {
         in.left  = !in.right;
       }
       // After the bench block, which clears the whole Input: a benchmark run at
-      // full pitch is the measurement worth having now that the world carries
-      // four times the overhangs it used to.
+      // full pitch is the measurement worth having.
       if (s_look > 0)      in.lookUp   = true;
       else if (s_look < 0) in.lookDown = true;
 #endif
@@ -547,21 +533,15 @@ void loop() {
       uint32_t ev = 0;
 #ifdef DEV_SERIAL
       if (s_bench) {
-        // Exactly one tick a frame, and the wall clock ignored.
-        //
-        // The benchmark is otherwise not comparable between two builds, which
-        // is the only thing it exists for. Catch-up ticks are driven by elapsed
-        // time, so a build that renders more slowly takes MORE ticks per frame,
-        // walks further per frame, and by a few seconds in is standing
-        // somewhere else entirely looking at a different scene. That is a
-        // feedback loop, not noise: measured over forty windows it put two runs
-        // of the SAME build 12% apart on frame rate and 33% apart on CPU.
-        //
-        // Pinned at one tick per frame the walk is frame-indexed, so window N
-        // covers the same simulated moment in every build and the question the
-        // benchmark answers becomes "what did this frame cost". The game runs
-        // slower than real time while benching, which does not matter — nothing
-        // here is measuring how the game feels.
+        // Exactly one tick a frame, and the wall clock ignored. This is what
+        // makes two runs comparable, which is the only thing the benchmark is
+        // for: catch-up ticks are driven by elapsed time, so a slower build
+        // takes more ticks per frame, walks further, and a few seconds in is
+        // looking at a different scene. That feedback loop puts two runs of the
+        // SAME build 12% apart on frame rate. Pinned at one tick per frame the
+        // walk is frame-indexed and window N is the same simulated moment in
+        // every build. The game runs slower than real time while benching,
+        // which does not matter — nothing here measures how the game feels.
         s_tickAccum = 0;
         ev |= game::tick(s_game, in);
         steps = 1;
@@ -1019,23 +999,19 @@ void loop() {
       s_benchFrames = 0;
       if (s_bench) {
         // A fixed seed, and always a fresh world — not startRun()'s random one,
-        // and not whatever the player happened to be standing in.
-        //
-        // The benchmark used to measure a different island every time it ran,
-        // which makes it useless for the only thing a benchmark is for: telling
-        // whether a change made things slower. Two runs of the SAME build came
-        // back at 37 fps and 75 fps purely because one of them was looking at a
-        // house and the other at open ground.
+        // and not whatever the player happened to be standing in. A benchmark
+        // that measures a different island every run cannot tell whether a
+        // change made things slower: a house in frame against open ground is
+        // worth 37 fps against 75.
         game::begin(s_game, BENCH_SEED);
         s_scr = SCR_PLAY;
         s_lockout = LOCKOUT_FRAMES;
         s_tickAccum = 0;
         s_lastUs = micros();
-        // Jump straight into the small hours. A benchmark run in daylight
-        // measures no mobs at all; the frame rate that has to hold is the one
-        // with the dark full to its cap, and the spawner fills it in about
-        // seven seconds from here rather than the ten real minutes it would
-        // take to arrive at honestly.
+        // Jump straight into the small hours. A run in daylight measures no
+        // mobs at all; the frame rate that has to hold is the one with the dark
+        // full to its cap, and the spawner fills it in about seven seconds from
+        // here.
         s_game.night = 10;
         s_game.phase = game::PH_NIGHT;
         s_game.phaseTick = 0;

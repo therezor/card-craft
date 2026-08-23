@@ -10,9 +10,7 @@
 //  beep() is the whole difference between a sound and a beep.
 //
 //  Channels are fixed by role rather than allocated, so a cue can never cut a
-//  more important one. main.cpp used to pick exactly one event per frame and
-//  drop the other twelve, because a single voice was all there was — mining
-//  while something bit you was silent about one of the two.
+//  more important one: mining while something bites you is two sounds.
 // =============================================================================
 #pragma once
 
@@ -68,8 +66,7 @@ struct Cue {
 // The cues the game plays. Named rather than numbered so main.cpp reads as a
 // list of what happened, not a table of frequencies.
 // Digging, breaking and placing come in three material families rather than one
-// cue apiece. A pickaxe in dirt and a pickaxe in iron used to be the same sound,
-// which is most of the reason mining read as a UI event rather than as work.
+// cue apiece, so a pickaxe in dirt and a pickaxe in iron are different work.
 enum MatClass : uint8_t { MC_SOFT, MC_STONE, MC_WOOD, MC_COUNT };
 
 // Which family a block belongs to. Soft is anything you would use a shovel on,

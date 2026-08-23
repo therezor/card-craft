@@ -798,10 +798,10 @@ TIER_PALETTES = {
 # Three 16x16 cells, mirrored and recoloured into the tier palettes.
 #
 # These three are the reference sheet's own pixels, mirrored and recoloured.
-# Nothing is redrawn. An earlier pass laid the pickaxe out from geometry and a
-# later one doubled the cells to 32x32 with scale2x; both drifted off the
-# source -- the shading stopped following the form and started following the
-# curve -- and both were thrown away. Recolouring is the whole job here.
+# Nothing is redrawn, and nothing should be: laying the shape out from geometry
+# or upscaling it with scale2x both drift off the source, because the shading
+# stops following the form and starts following the curve. Recolouring is the
+# whole job here.
 #
 # Mirrored because the sheet holds tips up-RIGHT with handles off the
 # bottom-LEFT, and render.cpp anchors held items head-top-left with the handle
@@ -997,8 +997,8 @@ MOB_ORDER = ["zombie", "creeper", "skeleton"]
 # V * WALK + N, and everything from VIEWS * WALK onward is an attack pose
 # reached from the mob's windup rather than from its stride.
 #
-# Two numbers rather than the single "where the walk cycle stops" this used to
-# be: with one view that was the same fact, and with three it stopped being.
+# Two numbers rather than a single "where the walk cycle stops": with more than
+# one view those are different facts.
 VIEWS = {"zombie": 3, "creeper": 3, "skeleton": 3}
 WALK  = {"zombie": 2, "creeper": 2, "skeleton": 2}
 

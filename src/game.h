@@ -18,9 +18,8 @@ namespace game {
 
 constexpr int TICK_HZ      = 60;
 // Three minutes of light, two of dark. Long enough that a day is something you
-// spend rather than something you race, which is what the phase bar used to be
-// compensating for: at sixty seconds the only way to know where you were in the
-// day was to read a meter, and now the only way is to look at the sky.
+// spend rather than something you race, and long enough that the sky is a fine
+// enough clock on its own -- there is no phase meter to read.
 constexpr int DAY_TICKS    = 180 * TICK_HZ;
 constexpr int NIGHT_TICKS  = 120 * TICK_HZ;
 constexpr int MAX_MOBS     = 24;
@@ -40,14 +39,11 @@ constexpr uint8_t NOISE_TICKS = 30;
 
 enum Phase : uint8_t { PH_DAY, PH_NIGHT };
 
-// What a mob is doing, as distinct from what it is. Mobs used to have exactly
-// one behaviour -- walk at the player, forever, from the tick they spawned --
-// so the only variable a night had was how many of them there were.
+// What a mob is doing, as distinct from what it is.
 //
 // MS_HUNT is zero on purpose. Every posed mob in the host tests and in the
-// serial dev commands is a zeroed Mob{}, and zero has to keep meaning "behaves
-// the way mobs behaved before this enum existed" or a dozen combat tests go
-// quiet without failing.
+// serial dev commands is a zeroed Mob{}, and zero has to keep meaning "walk at
+// the player" or a dozen combat tests go quiet without failing.
 enum MobState : uint8_t {
   MS_HUNT = 0,     // has the player, and is closing
   MS_ALERT,        // heading for where they were; will not attack on the way
@@ -68,10 +64,7 @@ enum MobKind : uint8_t {
 // Nine slots along the bottom of the panel, and what is in the selected one
 // decides what the two action keys do.
 //
-// Every slot starts empty, including the first. The pickaxe used to be pinned
-// to slot 0 for the life of the run on the reasoning that a board with no
-// inventory screen has to keep the tool reachable -- and that was true right
-// up until the tool became something you make. A run now opens with nothing in
+// Every slot starts empty, including the first. A run opens with nothing in
 // your hands at all, and the first pickaxe is the first thing the day is for.
 constexpr int SLOT_N = 9;
 
@@ -305,10 +298,9 @@ constexpr int MAX_SPARKS = 16;
 
 // ---- projectiles ------------------------------------------------------------
 
-// The skeleton used to be a hitscan: it telegraphed for 26 ticks and then took
-// a heart off you from seven cells away with nothing drawn in between. There
-// was no way to read it and no way to answer it. An arrow you can see coming
-// and step out of is what turns that into a fight.
+// A real projectile, not a hitscan. Seven cells is too far to take a heart off
+// someone with nothing drawn in between: an arrow you can see coming and step
+// out of is what turns a telegraph into a fight.
 constexpr int   MAX_ARROWS  = 8;
 constexpr float ARROW_SPEED = 9.0f;    // cells/second
 constexpr int   ARROW_LIFE  = 3 * TICK_HZ;
@@ -390,10 +382,9 @@ struct Drop {
 
 struct Mob {
   float   x, y;
-  // The surface it is standing on. It used to be derived from the terrain on
-  // the spot, on the reasoning that a body always stands on world::groundAt —
-  // which stopped being true the moment a cell could offer more than one place
-  // to stand. A mob on a bridge deck and a mob under it are in the same cell.
+  // The surface it is standing on. Carried rather than derived from the terrain:
+  // a cell can offer more than one place to stand, and a mob on a bridge deck
+  // and a mob under it are in the same cell.
   uint8_t z;
   int16_t hp;
   uint8_t kind;
@@ -455,23 +446,18 @@ struct State {
   raycast::Camera cam;
   float    angle = 0.0f;
 
-  // Ten hearts, Minecraft's number. It used to be six, on the reasoning that a
-  // short bar makes the +2 upgrade read as a real gain — and that upgrade is
-  // gone, so what is left is a fixed bar, and a fixed bar of six against mobs
-  // that hit for up to four is two mistakes from over.
+  // Ten hearts, Minecraft's number. The bar is fixed, and a fixed bar of six
+  // against mobs that hit for up to four is two mistakes from over.
   int16_t  hp = 10, maxHp = 10;
   uint16_t inv[world::B_COUNT] = {0};   // how much of each material is held
 
   // What is in each hotbar slot: a tool id, SLOT_EMPTY, or a world::Block.
   //
-  // For materials the counts live in inv[], but the two are now the same fact:
-  // inv[m] is non-zero exactly when m has a slot. A material used to be able to
-  // sit in inv[] with nothing on the bar to show it -- held, uncountable and
-  // unplaceable -- and what closed that hole was giving the bar a real
-  // capacity: a material with nowhere to go is spilled on the floor as a Drop
-  // instead of swallowed. A tool was always this way round: the slot IS the
-  // tool, there is nowhere else for it to be, and that is why crafting one
-  // needs a free slot.
+  // For materials the counts live in inv[], and the two are the same fact:
+  // inv[m] is non-zero exactly when m has a slot. The bar is a real capacity,
+  // so a material with nowhere to go is spilled on the floor as a Drop rather
+  // than swallowed into a count with nothing on the bar to show it. For a tool
+  // the slot IS the tool, which is why crafting one needs a free slot.
   uint8_t  slot[SLOT_N];
   uint8_t  sel = 0;                     // which slot is selected, 0..SLOT_N-1
 

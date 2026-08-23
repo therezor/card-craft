@@ -36,14 +36,9 @@ namespace render {
 // a block at BANDS cells is entirely fog colour, and raycast::MAX_DIST is set
 // one cell past it so the walker stops exactly where the haze finishes.
 //
-// Ten rather than sixteen. See raycast::MAX_DIST for what that measured; the
-// short version is that the frame time only responds once the fog closes inside
-// where a column typically finishes painting, and sixteen was nowhere near it.
-//
-// It pays twice regardless: RUNGS sizes s_shade, s_edge, s_bevel and
-// s_shadeSel, so the shorter ramp hands back about six kilobytes of internal
-// RAM, which on this board is margin against the two framebuffers rather than a
-// rounding error.
+// Short on purpose. RUNGS sizes s_shade, s_edge, s_bevel and s_shadeSel, so
+// every band costs internal RAM — which on this board is margin against the two
+// framebuffers rather than a rounding error.
 constexpr int BANDS   = 10;
 
 // Rungs below band 0, where a block is brighter than the ambient light of the
@@ -71,22 +66,19 @@ constexpr int RUNGS   = LIT + BANDS;
 // out of distance -- a last cell drawn at less than full fog is a visible edge
 // with nothing behind it, which is the one thing fog exists to prevent.
 //
-// The old curve was a smoothstep across the whole ramp, which is symmetric and
-// so did neither: it put real haze three cells out and only closed on the very
-// last band it had. Squared, and saturating one band early:
+// Squared rather than a smoothstep, and saturating a band early, which is what
+// serves both ends: a smoothstep is symmetric, so it hazes the block in front of
+// you and only closes on the very last band it has.
 //
 //   cells   0     1     2     3     4     5     6     7     8     9
-//   was   0.00  0.04  0.13  0.26  0.41  0.59  0.74  0.87  0.96  1.00
-//   now   0.00  0.02  0.06  0.14  0.25  0.39  0.56  0.77  1.00  1.00
+//           0.00  0.02  0.06  0.14  0.25  0.39  0.56  0.77  1.00  1.00
 //
-// The near half is about half as hazy as it was, and the far end is solid two
-// cells before the walker stops rather than arriving exactly on time. Those two
-// cells of nothing-but-fog are the margin the cut-off hides inside.
+// Solid two cells before the walker stops, and those two cells of
+// nothing-but-fog are the margin the cut-off hides inside.
 //
-// One function, two callers -- the block shade tables and the mob shading both
-// want this and used to spell it out separately, which is a drift waiting to
-// happen: blocks fogging on a different curve from the mobs standing among them
-// is exactly the sort of thing nobody sees and everybody feels.
+// One function, two callers -- the block shade tables and the mob shading. They
+// must not drift: blocks fogging on a different curve from the mobs standing
+// among them is the sort of thing nobody sees and everybody feels.
 static inline float fogAt(int band) {
   float t = (float)band / (float)(BANDS - 2);
   if (t > 1.0f) t = 1.0f;
@@ -106,19 +98,16 @@ static lgfx::swap565_t* s_buf[2] = { nullptr, nullptr };
 static int             s_cur = 0;
 static bool            s_held = false;   // SPI transaction kept open, see present()
 
-// [material][face][distance band]. Three faces, because with no textures the
-// only thing giving a cube its edges is that its top, its north face and its
-// east face are three different brightnesses.
-// [material][face][rung][grain]. The last axis used to be a single bit of
-// per-block wobble; it is four levels now, and that is what carries surface
-// detail without a texture fetch. A vertical face is hit at one horizontal
-// position per screen column — see raycast::Span::u — so a face needs no
-// interpolation across a span, only an index down it, and the whole cost of
-// giving stone grain is one byte loaded from a shared noise tile per pixel.
+// [material][face][rung][grain]. Three faces, because the thing giving a cube
+// its edges is that its top, its north face and its east face are three
+// different brightnesses. The last axis is four levels of surface detail: a
+// vertical face is hit at one horizontal position per screen column — see
+// raycast::Span::u — so a face needs no interpolation across a span, only an
+// index down it, and grain costs one byte loaded per pixel.
 //
 // Amplitude is per material, so snow stays smooth and coal reads as stone shot
-// through with black. Flat faces (tops, undersides) use levels 0 and 2 for the
-// old per-block wobble.
+// through with black. Flat faces (tops, undersides) use levels 0 and 2 as a
+// per-block wobble.
 constexpr int TEXELS = textures::TEXELS;
 
 // The texel tiles, copied out of flash into internal RAM at startup.
@@ -126,12 +115,9 @@ constexpr int TEXELS = textures::TEXELS;
 // They are `static const` in the generated header, which puts them in .rodata
 // — and on this chip .rodata is external flash reached through the instruction
 // cache. The wall loop reads them at a position that jumps with the material
-// and the ray's angle, which is close to the worst access pattern a cache can
-// be given: measured, leaving them in flash cost 4.9 ms a frame, nearly
-// doubling the walker. Four kilobytes of SRAM buys all of it back.
-//
-// The shared 8x8 grain tile this replaced never showed the problem because 64
-// bytes stay resident whatever you do to them.
+// and the ray's angle, close to the worst access pattern a cache can be given,
+// and leaving them there costs 4.9 ms a frame. Four kilobytes of SRAM buys all
+// of it back.
 static uint8_t s_tex[world::B_COUNT][textures::TEX_N][textures::TEX_N];
 
 // Top faces, for the materials whose top is not their side, and a per-material
@@ -154,10 +140,8 @@ static bool    s_texReady = false;
 // area of the panel. Build did it with a table and so does this: the divides
 // are done once at startup and the loop is a load and two multiplies.
 //
-// Note this is NOT the floor-span merging that was tried and rejected here
-// before (see raycast.h). That replaced a flat fill with a per-row shade
-// computation across merged spans; this keeps one span per cell and one shade
-// per span, and only changes what colour each pixel reads.
+// One span per cell and one shade per span; this table only changes what colour
+// each pixel reads.
 // Covers every (row - horizon) the pitch allows: the horizon reaches -213
 // looking fully down, and a row can be VIEW_H - 1, so the largest offset is
 // 347. Rounded up. Undersized, this clamps, and a clamped reciprocal is a
@@ -213,20 +197,15 @@ static const uint8_t kGrain[64] = {
 // Precomputed rather than blended per pixel: selection changes once a tick,
 // the pixels it covers are redrawn sixty times a second.
 //
-// It carries the tint dimension for the same reason s_shade does. It used to be
-// a plain [band] table read from its own branch in the span loop, which meant a
-// highlighted block lost both the per-block wobble and the fog dither and sat
-// there visibly flatter and more banded than the blocks around it. Same shape,
-// same loop, and the highlight becomes a table swap instead of a special case.
-// The highlight table, for the one block the crosshair is on.
+// Same shape as s_shade, so the highlight is a table swap in the span loop
+// rather than a special case — a branch there would cost the highlighted block
+// its per-block wobble and its fog dither, and it would sit visibly flatter than
+// the blocks around it.
 //
-// It used to mirror s_shade exactly — every material, every face, every rung —
-// which is 21 KB describing fifteen materials when at most one of them is
-// selected at a time. On a board whose two framebuffers leave about eight
-// kilobytes of internal RAM spare, that was most of the remaining headroom
-// spent on a table that is 14/15 unread. It is built for the selected material
-// instead, which is 1.4 KB and rebuilt only when the selection or the hour
-// changes.
+// Built for the SELECTED material only: mirroring s_shade across all fifteen
+// would be 21 KB to describe the one that is selected, against 1.4 KB here,
+// rebuilt when the selection or the hour changes. The two framebuffers leave
+// about eight kilobytes of internal RAM spare.
 static uint16_t s_shadeSel[raycast::F_COUNT][RUNGS][TEXELS];
 static int      s_selShadeMat = -1;
 static int      s_selQuantum = -2;
@@ -234,12 +213,10 @@ static int      s_selQuantum = -2;
 // The outline colour. One value for every material and every hour: the box is
 // the same box wherever it lands, and Minecraft draws it black.
 //
-// It used to be picked per material by luminance — near-black on snow, white on
-// wood or coal — so mining across a snow line changed the colour of the
-// highlight halfway through and two blocks side by side got two different
-// boxes. Reading the outline as "this is the block" is worth more than reading
-// it against every possible background; at night it is faint, which is also
-// true of the game this is imitating.
+// Not picked per material by luminance: that changes the colour of the
+// highlight halfway through mining across a snow line, and gives two blocks side
+// by side two different boxes. Reading the outline as "this is the block" is
+// worth more than reading it against every possible background.
 constexpr uint16_t C_SEL_EDGE = pack(8, 8, 10);
 
 // Topmost painted row per column, sampled at ZBUCKETS distances. drawWorld
@@ -457,11 +434,10 @@ void shadeFor(float dl, int horizon) {
     }
   }
 
-  // Night is dark but never unplayable: below about a third ambient the flat
-  // colours stop being distinguishable from each other and the game turns into
-  // guesswork rather than tension. The floor is a little higher than that now,
-  // because the measured result of 0.34 against a near-black fog was a panel
-  // you genuinely could not read.
+  // Night is dark but never unplayable: below about a third ambient the colours
+  // stop being distinguishable from each other and the game turns into guesswork
+  // rather than tension. Against a near-black fog even 0.34 is a panel you
+  // cannot read, so the floor sits above it.
   s_amb = 0.42f + 0.58f * dl;
 
   // Moonlight is blue, and a flat dim version of the daylight palette is not
@@ -470,17 +446,14 @@ void shadeFor(float dl, int horizon) {
   // "unlit", and it costs one lerp per material per frame.
   const float night = (1.0f - dl) * 0.30f;
 
-  // Everything above is per-frame: it is a handful of lerps and a 135-entry
-  // gradient, and the gradient has to be rebuilt anyway because it shears with
-  // the pitch. Everything below is the material tables, and those are a very
-  // different proposition — 14 materials x 4 faces x 22 rungs x 4 grain levels,
-  // measured at 6.4 ms a frame, which was half the frame budget.
+  // Everything above is per-frame: a handful of lerps and a 135-entry gradient,
+  // which has to be rebuilt anyway because it shears with the pitch.
   //
-  // They depend on one number: the hour. And the hour takes a hundred seconds
-  // to cross its whole range. Rebuilding them sixty times a second was spending
-  // half of every frame recomputing a value that had not changed. Quantising
-  // the day into 512 steps rebuilds them about ten times a second, which is far
-  // finer than the eye can follow a sunset, and gives the frame back.
+  // Everything below is the material tables — 14 materials x 4 faces x 22 rungs
+  // x 4 grain levels, and 6.4 ms a frame to rebuild, half the budget. They
+  // depend on one number, the hour, and the hour takes a hundred seconds to
+  // cross its range. Quantising the day into 512 steps rebuilds them about ten
+  // times a second, far finer than the eye can follow a sunset.
   const int quantum = (int)(dl * 512.0f);
   if (quantum == s_shadeQuantum && s_shadeBuilt) return;
   s_shadeQuantum = quantum;
@@ -509,18 +482,16 @@ void shadeFor(float dl, int horizon) {
       // A quarter of the amplitude per level, so the four levels span it.
       for (int d = 0; d < RUNGS; ++d) {
         // Below LIT the block is lifted from the hour's ambient toward fully
-        // lit; at LIT it is exactly the ambient near colour the table used to
-        // start at; past that it fades into fog as before.
+        // lit; at LIT it is exactly the ambient near colour; past that it fades
+        // into fog.
         const float ambD = (d < LIT)
             ? amb + (1.0f - amb) * (float)(LIT - d) / (float)LIT
             : amb;
         const float t = (d < LIT) ? 0.0f : fogAt(d - LIT);
 
-        // Every colour the material's texture is made of, run through exactly
-        // the shading the single face colour used to get. That is what makes a
-        // texture free here: the per-pixel work is still one byte indexing this
-        // table, and the table is the same size it was when the last axis meant
-        // "one of four brightness steps" instead of "one of eight colours".
+        // Every colour the material's texture is made of, run through the same
+        // shading. That is what makes a texture nearly free here: the per-pixel
+        // work is one byte indexing this table, whatever the last axis means.
         //
         // Entry 0 is the material's own colour, so anything that reads
         // BlockInfo directly — particles, the HUD swatch, distant fog — still
@@ -595,22 +566,16 @@ static void selectMaterial(int mat) {
 // ---- world ------------------------------------------------------------------
 
 // One stripe of columns. Split out from drawWorld so the two cores can each
-// take half: measurement put 8.5 ms of a frame in the walker and only 2.4 ms
-// in the pixel writes, so halving the walker is the whole optimisation.
+// take half — the walker is most of the frame, so halving it is most of the win.
 // One textured floor span.
 //
-// Deliberately its own function and deliberately not inlined. The span loop
-// this used to sit inside already keeps a dozen values live — the span, the
-// shade rows, the dither parity, the framebuffer pointer — and the floor path
-// adds a dozen more: two texture coordinates, two steps, four span constants,
-// the tile, two palette rows. Xtensa has sixteen visible registers, so inlined
-// it spilled the inner loop to the stack and every floor pixel paid for it.
-//
-// That was the entire cost, and it took four wrong theories to find. A probe
-// that textured every pixel and a probe that stored a constant measured the
-// same 12 ms walker, which is the shape of a bottleneck that is not in the
-// arithmetic at all. A call gets a fresh register window; the same arithmetic
-// then costs what it looks like it should.
+// Deliberately its own function and deliberately NOT inlined. The span loop
+// already keeps a dozen values live — the span, the shade rows, the dither
+// parity, the framebuffer pointer — and the floor path adds a dozen more: two
+// texture coordinates, two steps, four span constants, the tile, two palette
+// rows. Xtensa has sixteen visible registers, so inlined it spills the inner
+// loop to the stack and every floor pixel pays for it. A call gets a fresh
+// register window.
 static void __attribute__((noinline))
 drawFloorSpan(uint16_t* p, const raycast::Span& s,
               const uint16_t (*tbl)[TEXELS], int band, int frac, int thX,
@@ -628,8 +593,7 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
         // A ceiling is a floor above your head. The same plane, the same
         // arithmetic, and the only difference is that dz and (row - horizon)
         // are both negative — so their ratio, which is the only thing that
-        // matters, comes out identical. Undersides used to take the flat-colour
-        // path instead, and the underside of a bridge was one grey rectangle.
+        // matters, comes out identical.
         const bool ceiling = (s.face == raycast::F_BOT);
 
         const float dz = cam.z - (float)s.zTop;
@@ -666,11 +630,9 @@ drawFloorSpan(uint16_t* p, const raycast::Span& s,
         //
         // The walker emits one span per cell, so a frame is a few thousand
         // floor spans and most of them are two or three pixels tall — a distant
-        // cell seen edge-on. The per-pixel work was never the problem: a probe
-        // that textured every floor pixel and one that stored a constant
-        // measured the same, 12.0 ms of walker either way. What cost 4.2 ms a
-        // frame was the SETUP, paid once per span whatever its height, and the
-        // two integer divides in it above all.
+        // cell seen edge-on. The per-pixel work is not the problem; the SETUP
+        // is, paid once per span whatever its height, and its two integer
+        // divides above all.
         //
         // So: a short span takes one sample and fills, which is what it would
         // have looked like anyway at two pixels tall. A tall one — the handful
@@ -835,9 +797,9 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
         // construction, and one tile per block is what makes brick courses line
         // up and a grass lip sit on the top edge instead of eight of them.
 #ifdef NO_TEXTURES
-        // A/B control: same loop shape, same two loads, but the index comes
-        // from the old shared 8x8 grain tile by screen row instead of from a
-        // wall-space texture coordinate.
+        // Textures compiled out: same loop shape and the same two loads, but
+        // the index comes from a shared 8x8 grain tile by screen row rather
+        // than from a wall-space texture coordinate.
         const uint8_t* col = kGrain + ((((int)s.u >> 2) & 7) << 3);
         uint32_t v = 0;
         const uint32_t vStep = 0;
@@ -900,13 +862,11 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
         // A span covers a whole run of like blocks now, so the boundaries
         // between them fall INSIDE it and need ruling too.
         //
-        // Found by arithmetic, out here, rather than by watching the texture
-        // coordinate wrap inside the pixel loop. That was the obvious way to do
-        // it — v wraps exactly once a block, so a wrap is a boundary — and it
-        // was measured at +726 us a frame against the 183 us the merging saves.
-        // A compare and an unpredictable branch on every wall pixel is simply
-        // dearer than the clipper calls it was meant to pay for. There are two
-        // stores per boundary here and nothing at all per pixel.
+        // Found by arithmetic out here, NOT by watching the texture coordinate
+        // wrap inside the pixel loop. The wrap is a boundary and testing for it
+        // is the obvious way, but a compare and an unpredictable branch on every
+        // wall pixel costs far more than the merging saves. Two stores per
+        // boundary here, and nothing at all per pixel.
         if (s.cap > 1) {
           // A tile is 65536 in Q12, and vStartQ12 is already inside one by
           // construction -- the uint16 wrapped it -- so the old mask is gone
@@ -1010,11 +970,10 @@ uint32_t g_floorSpans = 0, g_floorTall = 0, g_floorPix = 0, g_floorSeg = 0;
 // line in mid-air.
 //
 // Everything here is proportional to the *outline*, never to the area inside
-// it. The first version tested every row of every selected column and hashed
-// every pixel for the crack stipple; measured on the bench that cost 1.5 ms
-// average and 5.7 ms on a frame where the target filled the panel — for an
-// outline. Walking the two uncovered row ranges per side instead, and drawing
-// cracks as a few short segments, is the same picture for a fortieth of it.
+// it. Testing every row of every selected column and hashing every pixel for
+// the crack stipple costs 5.7 ms on a frame where the target fills the panel;
+// walking the two uncovered row ranges per side, and drawing cracks as a few
+// short segments, is the same picture for a fortieth of it.
 
 static void drawSelBox(int selX, int selY) {
   if (selX < 0) return;
@@ -1507,10 +1466,8 @@ void emit(const game::Spark& sp) {
       break;
     }
     case game::SP_HIT:
-      // Blood. It used to be a pale yellow spark -- three of them, once the
-      // magnitude had scaled the count down -- which read as a glint off the
-      // sword rather than as damage done. A landed blow is the one piece of
-      // feedback the player gets at range, and it has to be unmistakable.
+      // Blood, not a spark: a landed blow is the one piece of feedback the
+      // player gets at range and it has to be unmistakable.
       r = 200; g = 30; b = 30;
       count = 18; spread = 2.6f; rise = 2.2f; ttl = 22.0f; size = 2;
       break;
@@ -1637,10 +1594,8 @@ void drawParticles(const raycast::Camera& cam) {
 // needs nothing here.
 //
 // A TOOL is its own sprite, the same art the first-person view and the hotbar
-// use. It used to be a cube too, in the tier's mid metal, which meant a dropped
-// pickaxe and a dropped sword were the same grey box and the only way to tell
-// them apart was to walk over one. A silhouette is the whole point of a dropped
-// item: it says what is worth crossing the room for.
+// use. A silhouette is the whole point of a dropped item: it says what is worth
+// crossing the room for, which a coloured box cannot.
 //
 // It bobs. A stationary flat square on ground of a similar colour is genuinely
 // hard to find, and the bob is what separates "an item is lying there" from a
@@ -1831,27 +1786,23 @@ static const SwingFrame kSwing[game::TOOL_ANIM] = {
 // steps. The texel array, its dimensions, the palette and the anchor all differ
 // per family, so the caller passes those and everything below is shared.
 //
-// The palette SIZE still has to agree, because the blit builds one fixed-length
-// table on the stack. Dimensions no longer do: the hand is 17x25 against the
-// tools' 16x16, which is the whole reason the width is a parameter. Say the
-// palette constraint here rather than discovering it as a stack overrun —
-// make-sprites.py is free to give a family more colours, and this is the line
-// that stops it doing so silently.
+// The palette SIZE has to agree, because the blit builds one fixed-length table
+// on the stack; dimensions do not, which is why the width is a parameter (the
+// hand is 17x25 against the tools' 16x16). Said here rather than discovered as
+// a stack overrun if make-sprites.py ever gives a family more colours.
 static_assert(sprites::SWORD_W == sprites::PICK_W &&
               sprites::SWORD_H == sprites::PICK_H &&
               sprites::SWORD_COLOURS == sprites::PICK_COLOURS &&
               sprites::HAND_COLOURS == sprites::PICK_COLOURS,
               "held-item art must share a palette size, and the two tools a size");
 
-// The palette comes in whole. A tool's tier used to be four indices swapped
-// inside one palette; the art is a vanilla-style pack now and a tier is a
-// different palette end to end, so the caller picks it and this just packs it.
+// The palette comes in whole: a tier is a different palette end to end, so the
+// caller picks it and this just packs it.
 //
-// The caller places it. This used to take a SwingFrame and work the arc out
-// itself, which meant the hand and the tool each rotated about their own centre
-// — and a rotation about two different centres is not one rigid body, so the
-// handle walked out of the fingers as the swing progressed. drawTool turns the
-// frame into an anchor and an angle for both, about the grip they share.
+// The caller places it, too. The hand and the tool must rotate about the grip
+// they SHARE — rotation about two different centres is not one rigid body, and
+// the handle walks out of the fingers as the swing progresses. drawTool turns
+// the frame into one anchor and one angle for both.
 static void blitHeld(const uint8_t* art, int aw, int ah,
                      const uint8_t (*srcPal)[3], int cx, int cy,
                      int SCALE, int angDeg) {
@@ -1867,24 +1818,16 @@ static void blitHeld(const uint8_t* art, int aw, int ah,
   for (int i = 1; i < sprites::PICK_COLOURS; ++i)
     pal[i] = pack(srcPal[i][0], srcPal[i][1], srcPal[i][2]);
 
-  // The swing leans as well as moves, which it did not used to.
+  // The swing leans as well as moves, and the direction of the loop is what
+  // makes that work. It walks the *destination* — every panel pixel the tool
+  // could cover — and asks each one which source texel it came from, by
+  // rotating it backwards. A hole is then impossible by construction: every
+  // pixel in the box is written or deliberately skipped.
   //
-  // Three ways of leaning it were tried before and all three were worse than
-  // not leaning it: rotating and walking the *source* drops destination pixels
-  // at any angle off ninety degrees, so a one-texel outline tears open and the
-  // tool comes apart mid-swing; walking the source with oversized blocks closes
-  // the holes and smears the edges into lumps; and a per-row shear keeps the
-  // texels square but slides the head sideways off its own handle.
-  //
-  // What follows is the fourth way, and the difference is the direction. It
-  // walks the *destination* — every panel pixel the tool could cover — and asks
-  // each one which source texel it came from, by rotating it backwards. A hole
-  // is then impossible by construction: every pixel in the box is written or
-  // deliberately skipped, because the loop is over the pixels being filled
-  // rather than over the texels doing the filling. Nearest-neighbour, so no
-  // colour is invented and the palette stays exactly the nine entries above.
-  //
-  // f.ang was already in the table and had never been read.
+  // Walking the SOURCE instead drops destination pixels at any angle off ninety
+  // degrees, which tears a one-texel outline open and comes apart mid-swing.
+  // Nearest-neighbour, so no colour is invented and the palette stays exactly
+  // the nine entries above.
   const int hw = aw / 2, hh = ah / 2;
 
   // The backwards rotation, in 16.16, with the texel-to-pixel scale folded in
@@ -1933,8 +1876,7 @@ static void blitHeld(const uint8_t* art, int aw, int ah,
 // keep in step with the palette, and the palette is already the answer.
 // cx, cy is where the cube's centre goes and ang is the swing's angle — both
 // handed down by drawTool, so a held block orbits the grip and turns with the
-// arm exactly as a tool does. It used to take the SwingFrame and apply its own
-// translation, which left it the one held item that ignored the swing's turn.
+// arm exactly as a tool does.
 static void drawHeldBlock(uint8_t mat, int cx, int cy, int ang) {
   // The material's OWN texture, sampled the way a wall samples it, not a flat
   // fill of its average colour. A held block that is a plain orange square
@@ -2038,9 +1980,9 @@ void drawTool(const game::State& s) {
   const bool tool = game::isTool(held);
   const bool sword = tool && game::toolKind(held) == game::TK_SWORD;
 
-  // The swing's reach, in eighths. 12 is the 3/2 every held item used to share;
-  // the sword takes more, because a sword is swung and a pickaxe is driven, and
-  // one table of offsets serving both made them the same gesture.
+  // The swing's reach, in eighths. The sword takes more than the pickaxe: a
+  // sword is swung and a pickaxe is driven, and one reach for both makes them
+  // the same gesture.
   const int amp = sword ? 17 : 12;
   const int ang = (int)f.ang * amp / 12;
   const int dx  = (int)f.dx * amp / 8;

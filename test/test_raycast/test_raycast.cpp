@@ -90,13 +90,8 @@ static void test_pitch_is_clamped_to_its_range(void) {
   TEST_ASSERT_EQUAL_INT(HORIZON - PITCH_DOWN, c.horizon);
 }
 
-// Both stops have to reach a steep angle, and the same one either way.
-//
-// This used to check only that looking up cleared level by "a useful margin",
-// because up was the generous direction and down was deliberately kept short.
-// Both are about sixty degrees now, and the property worth pinning is that the
-// two agree: a look control that goes further up than down is one the player
-// has to think about.
+// Both stops have to reach a steep angle, and the same one either way. A look
+// control that goes further up than down is one the player has to think about.
 static void test_both_stops_reach_a_steep_angle_and_match(void) {
   Camera c = atSpawn(0.0f);
   setPitch(c, HORIZON + PITCH_UP);
@@ -244,13 +239,9 @@ static void test_the_visible_extent_is_clipped_but_the_geometry_is_not(void) {
   TEST_ASSERT_TRUE(clipped > 8);
 }
 
-// This test used to assert the opposite, and the change is the feature: slabs
-// were terrain, so they could not be mined or built into, and lighting a bridge
-// deck because the crosshair was on the cell underneath pointed at a block the
-// player could not act on. Runs are ordinary blocks now — you can dig a roof
-// out and build a floor in mid-air — so a run block is a legitimate target and
-// must be selectable. What must NOT happen is the whole cell lighting up: the
-// selection is one block.
+// Runs are ordinary blocks — you can dig a roof out and build a floor in
+// mid-air — so a run block is a legitimate target and must be selectable. What
+// must NOT happen is the whole cell lighting up: the selection is one block.
 static void test_a_run_block_can_be_the_selection(void) {
   init();
   world::generate(555);
@@ -338,12 +329,9 @@ static void test_the_crosshair_is_always_inside_the_selection(void) {
   TEST_ASSERT_TRUE(checked > 200);        // the sweep actually aimed at things
 }
 
-// This used to assert that a target column marked its top block at sel level 2
-// and the rest of itself at level 1. Both levels existed for one reason: mining
-// always removed the topmost block, so the block being pointed at and the block
-// about to break were different, and the outline had to describe both at once.
-// Mining takes the block under the crosshair now, so there is exactly one thing
-// to mark — and marking a whole column again would light up a six-block stack.
+// Mining takes the block under the crosshair, so there is exactly one thing to
+// mark and one sel level to mark it with. Marking a whole column would light up
+// a six-block stack.
 static void test_the_selection_is_one_block_not_a_column(void) {
   init();
   world::generate(2024);
@@ -811,9 +799,9 @@ static void test_degenerate_input(void) {
 
 // ---- picking a block and a face ---------------------------------------------
 
-// The bug this locks down: pick() used to name a cell and nothing else, so
-// "which face am I pointing at" had no answer and a block built against a wall
-// had nowhere to go but on top of it.
+// The bug this locks down: name a cell and nothing else and "which face am I
+// pointing at" has no answer, so a block built against a wall has nowhere to go
+// but on top of it.
 static void test_pick_returns_the_face_it_came_in_through(void) {
   init();
   world::generate(1234);
@@ -849,8 +837,8 @@ static void test_a_block_hanging_on_nothing_can_be_picked_and_mined(void) {
   world::generate(4242);
   const int cx = world::W / 2, cy = world::H / 2;
 
-  // Three cells east, dig the column down and leave one block hanging where
-  // its top used to be. Nothing holds it up in any direction.
+  // Three cells east, dig the column down and leave one block hanging at the
+  // old top. Nothing holds it up in any direction.
   const int fx = cx + 3, fy = cy;
   uint8_t dm, db;
   while (world::height(fx, fy) > world::GROUND - 3)
@@ -983,20 +971,14 @@ static void test_a_wall_span_maps_one_tile_per_block(void) {
       // by that, or the pattern slides over the block as the camera moves
       // instead of sitting on it.
       //
-      // This used to be stated as "a span never covers more than one tile",
-      // which was the same thing only while every span was exactly one block.
-      // Spans cover whole runs now; the anchoring is what mattered and it is
-      // what is checked.
       const float dist = (float)s2.distQ8 / 256.0f;
       const float rowsPerBlock = PROJ / dist;
       const float tile = (float)(16 << 12);
-      // Two quantisations, not one, and the second used to hide inside the
-      // first. The step's own truncation is worth up to rowsPerBlock of the
-      // product. But the exact distance it was built from is not available
-      // here -- only distQ8, to a 256th of a cell -- and that error scales the
-      // whole tile: it is worth tile/(256*dist), which at close range is the
-      // LARGER of the two. It went unnoticed while the step was 8.8, because
-      // then the step's own quantum was sixteen times coarser and swallowed it.
+      // Two quantisations, not one. The step's own truncation is worth up to
+      // rowsPerBlock of the product; and the exact distance it was built from is
+      // not available here -- only distQ8, to a 256th of a cell -- an error that
+      // scales the whole tile, worth tile/(256*dist), which at close range is
+      // the LARGER of the two.
       const float tol = rowsPerBlock + tile / (256.0f * dist);
       TEST_ASSERT_FLOAT_WITHIN(tol, tile, (float)s2.vStepQ12 * rowsPerBlock);
 
@@ -1017,14 +999,12 @@ static void test_a_wall_span_maps_one_tile_per_block(void) {
 // enough that a brick course cannot visibly stagger between them.
 //
 // This is the test for a real artefact. vStep is texels per screen row,
-// TEX_N * dNear / PROJ, so it SHRINKS as the player closes on a wall — and it
-// used to be stored as 8.8, where a quarter-cell away the whole value is 6.4
-// and rounds to 6. Adjacent columns of an oblique wall sit at slightly
-// different distances, rounded to different integers, and disagreed about
-// vertical scale by up to a sixth. Over a panel-tall face that walks a course
-// twenty rows up or down from one column to the next: the wall came apart into
-// a zigzag, worse the closer you stood. Q12 is sixteen times finer and holds
-// the same disagreement under a pixel.
+// TEX_N * dNear / PROJ, so it SHRINKS as the player closes on a wall: at 8.8,
+// a quarter-cell away the whole value is 6.4 and rounds to 6. Adjacent columns
+// of an oblique wall sit at slightly different distances, round to different
+// integers, and disagree about vertical scale by up to a sixth — over a
+// panel-tall face that walks a course twenty rows between one column and the
+// next, and the wall comes apart into a zigzag. Q12 holds it under a pixel.
 //
 // Stated as the thing the player would SEE — rows of stagger — rather than as a
 // bound on the fixed-point format, so it keeps its meaning if the format
@@ -1076,10 +1056,8 @@ static void test_neighbouring_columns_agree_on_vertical_scale(void) {
   TEST_ASSERT_TRUE(pairs > 100);            // it really did look at a wall
   // Measured on this fixture: 9.0 rows at 8.8, 1.34 at Q12. The floor is not
   // zero and cannot be -- neighbouring columns of an oblique wall ARE at
-  // different distances, so some of that 1.34 is honest perspective. Carrying
-  // the step at Q14 instead was tried and moved it to 1.29, which is how we
-  // know the rest is perspective and not precision: Q12 has already reached
-  // the floor, and finer buys nothing. Two rows is the line between them.
+  // different distances, so most of that 1.34 is honest perspective and a finer
+  // format buys nothing. Two rows is the line between the two.
   TEST_ASSERT_TRUE(worst < 2.0f);
 }
 
@@ -1093,11 +1071,8 @@ static void test_an_unclipped_merged_span_starts_on_a_tile(void) {
   // A scene built rather than found. A merged run only yields an UNCLIPPED span
   // when the top of it lands on the panel, and the resting tilt leaves only
   // HORIZON rows of sky — 29 of them — so a run's top has to sit under
-  // 29 * d / PROJ blocks above the eye to be in frame at all. The five-high
-  // pillar two cells away this used to rely on breaks that by a mile: it fills
-  // the screen and is clipped every time. It passed anyway because the natural
-  // terrain out at fifteen-odd cells supplied unclipped spans of its own, and
-  // pulling the fog in to MAX_DIST took that away.
+  // 29 * d / PROJ blocks above the eye to be in frame at all. A tall pillar
+  // close by fills the screen and is clipped every time.
   //
   // So: flatten a corridor and stand one two-block cap at the far end of it.
   // Nine cells out and 0.8 of a block above the eye, which is comfortably
@@ -1131,13 +1106,10 @@ static void test_an_unclipped_merged_span_starts_on_a_tile(void) {
       // the previous tile, and the wrap puts it there. Just under 65536 is the
       // right answer, not a near miss of zero.
       //
-      // This asked for exactly zero before, and got it for the wrong reason.
-      // At 8.8 the fraction of a row was worth less than one unit, so it
-      // truncated away -- and the negative case reached (uint16_t) straight
-      // from a negative float, which is undefined rather than modular. Q12
-      // resolves the fraction and startQ12 goes through int32 so the wrap is
-      // defined, which is why the bound can now be stated as what it always
-      // was.
+      // Not exactly zero: Q12 resolves the fraction of a row that 8.8 truncated
+      // away, and startQ12 goes through int32 so the negative case wraps
+      // modularly rather than reaching (uint16_t) from a negative float, which
+      // is undefined.
       const uint32_t d = s2.vStartQ12 < 65536u - s2.vStartQ12
                        ? s2.vStartQ12 : 65536u - s2.vStartQ12;
       if (d <= s2.vStepQ12) ++checked;

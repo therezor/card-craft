@@ -24,15 +24,12 @@ constexpr float MOVE_SPEED    = 3.1f;    // cells/second
 
 // Looking up and down, in horizon pixels per second.
 //
-// Scaled with the range: the sweep is 560 pixels end to end now rather than
-// 150, and at the old 130 a full look from floor to sky took four seconds. A
-// look control you have to wait out is one you stop using.
+// Scaled with the range: the sweep is 560 pixels end to end, and a look control
+// that takes four seconds to cross it is one you stop using.
 //
-// There is no return speed any more. The view used to drift back to the
-// resting tilt whenever neither key was held, which meant the camera pushed
-// back against the player the moment they stopped asking — you could not look
-// up at a canopy and keep looking at it. Pitch is a held position now, exactly
-// like the facing angle next to it, and holding both keys recentres it.
+// There is no return speed. Pitch is a held position, exactly like the facing
+// angle next to it, and holding both keys recentres it — a view that drifts
+// back to rest the moment you stop asking cannot be pointed at a canopy.
 constexpr float PITCH_SPEED  = 320.0f;
 
 // How hard the eye is pulled toward the height of the ground under it, and how
@@ -222,19 +219,17 @@ constexpr float    FACE_SMOOTH   = 0.12f;
 static uint32_t s_aiTick = 0;
 
 
-// The tool table. Mining effort is per tick against world::EFFORT_PER_TICK's
-// 16, so a wooden pickaxe is exactly the tool the game used to hand out for
-// free and every tier above it is new ground.
+// The tool table. Mining effort is per tick against world::EFFORT_PER_TICK's 16.
 //
 // Swords all mine at hand speed. That is the whole reason to have two tools
 // rather than one good one: holding the sword costs you the ability to dig,
 // holding the pickaxe costs you the ability to fight, and the hotbar is a
 // choice you keep making instead of a label.
 //
-// Diamond's damage is 127 rather than 4. Nothing on the map has more than
-// three hearts, so anything above three is already a one-hit kill -- naming it
-// 127 says the one-hit is the POINT of the tier, and keeps it a one-hit if mob
-// health is ever retuned upward.
+// Diamond's damage is 127 rather than 4. Nothing on the map has more than three
+// hearts, so anything above three is already a one-hit kill -- naming it 127
+// says the one-hit is the POINT of the tier, and keeps it one if mob health is
+// ever retuned upward.
 static const ToolInfo kTool[TK_COUNT][TT_COUNT] = {
   // pickaxes:  name        dur  effort  dmg
   { { "WOOD PICK",           60,     16,   1 },
@@ -264,11 +259,10 @@ const ToolInfo& toolInfo(uint8_t kind, uint8_t tier) {
 // teaches the recipe rather than merely accepting it, and the recipe book can
 // draw a recipe as the arrangement it actually is.
 //
-// No two rows are the same NORMALISED PATTERN. That is the invariant now, and
-// it is weaker than the old one -- it used to be "no two rows are the same
-// multiset", which is what left BRICKS and STONE PICK competing for "3 stone"
-// and what kept every recipe under four cells. Shape is what buys the room for
-// MASONRY, TORCHES and SALVE below to exist at all.
+// No two rows are the same NORMALISED PATTERN. That is the invariant, and it is
+// deliberately weaker than "no two rows are the same multiset" -- which would
+// leave BRICKS and STONE PICK competing for "3 stone" and cap every recipe under
+// four cells. Shape is what buys the room for MASONRY, TORCHES and SALVE.
 //
 // Every row here is stored already shifted to the top-left, which is what makes
 // fillGrid() lay out a grid matchGrid() is guaranteed to recognise.
@@ -293,8 +287,8 @@ static const RecipeInfo kRecipe[R_COUNT] = {
   //  [S][ ]
   { "BRICKS",  { world::B_STONE, world::B_STONE, world::B_STONE, CELL_EMPTY },
     world::B_BRICK, 3, 0 },
-  //  [S][S]   a full square of stone. Masonry had no recipe at all before this
-  //  [S][S]   -- it existed only in the structures the generator puts down.
+  //  [S][S]   a full square of stone -- otherwise masonry exists only in the
+  //  [S][S]   structures the generator puts down.
   { "MASONRY", { world::B_STONE, world::B_STONE, world::B_STONE, world::B_STONE },
     world::B_MASONRY, 4, 0 },
   //  [L][L]
@@ -377,12 +371,10 @@ bool canAccept(const State& s, uint8_t mat) {
 // is all of them or none: stacks do not have a cap, so the only question is
 // whether the material has a slot at all.
 //
-// It used to take them unconditionally and let the count sit in inv[] with no
-// slot to show it -- "nothing is ever lost, it is only temporarily unplaceable"
-// was the rule. That rule is gone, and the reason is that it was invisible: you
-// mined masonry with a full bar, the game said nothing, and you owned a
-// material you could not see, select or place. What will not fit is spilled on
-// the floor now, where it is a thing you can look at and decide about.
+// What will not fit is spilled on the floor, where it is a thing you can look
+// at and decide about. Taking it unconditionally into inv[] with no slot to show
+// it is invisible: you mine masonry with a full bar, the game says nothing, and
+// you own a material you cannot see, select or place.
 static int giveItem(State& s, uint8_t mat, int n) {
   if (mat >= world::B_COUNT || n <= 0) return 0;
   for (int i = 0; i < SLOT_N; ++i)
@@ -400,11 +392,8 @@ static int giveItem(State& s, uint8_t mat, int n) {
 // An emptied slot has to clear rather than sit there at zero: a bar full of
 // materials you no longer own is a bar with no room for the ones you do.
 //
-// There is no re-let pass any more, and there is nothing left for one to do.
-// While giveItem could take a material with no slot to show it, freeing a slot
-// meant looking for a material that had been waiting in the dark for one. Now
-// stock and slot are the same fact -- inv[m] is non-zero exactly when m has a
-// slot -- so an emptied slot is simply empty.
+// No re-let pass, and nothing for one to do: stock and slot are the same fact --
+// inv[m] is non-zero exactly when m has a slot -- so an emptied slot is empty.
 static void takeItem(State& s, uint8_t mat, int n) {
   if (mat >= world::B_COUNT) return;
   s.inv[mat] = (uint16_t)(s.inv[mat] > n ? s.inv[mat] - n : 0);
@@ -847,11 +836,10 @@ void gridCycle(State& s, int delta) {
 //
 // One surface per cell, not one per run. The surface a cell is FIRST reached at
 // is by construction the one on the shortest route, so a second slot could only
-// ever describe a longer way to the same place. What that gives up is a cell
-// where a ground-level route and a bridge-deck route are both useful — and
-// there the mobs take the ground and mill about, which is what they did before
-// any of this. What it buys is fitting in memory: four surfaces a cell with an
-// exactly-sized queue is 108 KB, and this board has none of that spare.
+// describe a longer way to the same place. It gives up cells where a
+// ground-level route and a bridge-deck route are both useful — there the mobs
+// take the ground and mill about — and it buys fitting in memory: four surfaces
+// a cell with an exactly-sized queue is 108 KB, which this board has not got.
 static uint16_t g_flow[world::W * world::H];
 
 // A ring, not one slot per cell. A breadth-first sweep of a 96x96 grid never
@@ -1025,12 +1013,8 @@ float daylight(const State& s) {
 }
 
 uint32_t score(const State& s) {
-  // Surviving is still worth most. Ore used to be a separate currency counted
-  // here at five apiece; it is an item now, so the two metals are weighted
-  // where the currency was rather than counting as one block each.
-  // Five apiece, which is what the ore currency was worth. The yields were
-  // moved onto the blocks one for one — an iron block gave 3 ore and now gives
-  // 3 iron — so weighting the items the same keeps a run's score comparable
+  // Surviving is worth most. The two metals are weighted above a plain block
+  // rather than counting as one apiece, which keeps a run's score comparable
   // with the ones already in NVS.
   //
   // Diamond is weighted at twenty-five. It drops one to iron's three, sits in
@@ -1076,17 +1060,14 @@ static uint8_t pickKind(State& s) {
   // choose to fight instead.
   if (s.sealedTicks > SEALED_TRIGGER) return MOB_CREEPER;
 
-  // A flat mix from the first night. It used to unlock creepers on night two
-  // and skeletons on night four, which is a wave-game's ramp: the pressure came
-  // from a counter rather than from the dark. Minecraft's night one has all
-  // three in it, and what makes a later night harder is that you are further
-  // from home and deeper in a hole.
-  // Weighted toward the zombie. It was 45/30/25, and the two rarer kinds were
-  // both doing more work than their share: a creeper's mistake compounds --
-  // it takes the floor with it, and the crater is still there at dawn -- and a
-  // skeleton at seven cells is pressure a player often has no answer to at all.
-  // The zombie is the one you can read, the one you can back away from, and
-  // now the only one you meet more often than not.
+  // A flat mix from the first night, with no ramp on the night counter: what
+  // makes a later night harder is that you are further from home and deeper in
+  // a hole, not a difficulty dial.
+  //
+  // Weighted toward the zombie. A creeper's mistake compounds -- it takes the
+  // floor with it, and the crater is still there at dawn -- and a skeleton at
+  // seven cells is pressure a player often has no answer to. The zombie is the
+  // one you can read and back away from, so it is the one you mostly meet.
   const uint32_t r = nextRand(s) % 100u;
   if (r < 60) return MOB_ZOMBIE;
   if (r < 82) return MOB_SKELETON;
@@ -1114,8 +1095,8 @@ static bool spawnMob(State& s) {
     const int y = (int)(nextRand(s) % (uint32_t)world::H);
     if (world::isBorder(x, y)) continue;
     // Somewhere a body can actually stand. The siege path skips the flow-field
-    // check, which is what used to let a creeper be dropped into the gap under
-    // a bridge too shallow to stand in.
+    // check, so without this it can drop a creeper into the gap under a bridge
+    // too shallow to stand in.
     if (!world::standable(x, y)) continue;
     // Nothing spawns on lit ground. This is the whole point of a torch, and
     // the reason building has a use beyond walls.
@@ -1178,10 +1159,10 @@ static bool spawnMob(State& s) {
 // Feet-to-feet height difference between a body and the player, and the true
 // separation including it.
 //
-// Range checks used to be flat: a zombie at the foot of a five-block pillar was
-// "1.2 cells away" from a player standing on top of it and could hit them
-// through the rock. Steering stays two-dimensional — pathing is a grid — but
-// anything that reaches out and touches the player has to measure in three.
+// Steering stays two-dimensional — pathing is a grid — but anything that reaches
+// out and touches the player has to measure in three. Flat, a zombie at the foot
+// of a five-block pillar is "1.2 cells away" from the player on top of it and
+// hits them through the rock.
 // Feet are read from the grid, not inferred from the eye. The eye is eased
 // toward the ground rather than pinned to it, so subtracting EYE from it would
 // make reach wobble by a fraction of a block for a few ticks after every step.
@@ -1208,8 +1189,8 @@ static void kick(State& s, uint8_t amount) {
 }
 
 // Damage from a mob. Swallowed while the player is still reeling from the last
-// one: two mobs landing blows a tick apart used to take two hearts with no
-// window to answer in, and nothing else in the game paced them.
+// one -- nothing else paces two mobs landing blows a tick apart, and without it
+// they take two hearts with no window to answer in.
 static uint32_t hurtPlayer(State& s, int16_t amount) {
   if (s.iframes) return 0;
   s.hp -= amount;
@@ -1337,9 +1318,8 @@ static uint32_t updateArrows(State& s) {
 // bottom of a crater, say -- it stands where it is for the leg, which is a
 // perfectly reasonable thing for a mob in a hole to do.
 //
-// Draws from State::rng, so a wandering night replays identically on the host.
-// It also shifts every downstream random in a seeded run, which is worth
-// knowing before re-baselining a test that used to pass.
+// Draws from State::rng, so a wandering night replays identically on the host --
+// and so it shifts every downstream random in a seeded run.
 static void pickWander(State& s, Mob& m) {
   m.state = MS_WANDER;
   m.repos = (uint8_t)WANDER_LEG;
@@ -1368,9 +1348,8 @@ static uint32_t updateMob(State& s, int idx) {
 
   if (m.timer) --m.timer;
 
-  // Lava burns whatever is standing in it, mob or player. It used to burn only
-  // the player, which made a lava pool a hazard to walk around rather than
-  // something to back a wave into.
+  // Lava burns whatever is standing in it, mob or player -- which is what makes
+  // a pool something to back a wave into rather than a hazard to walk around.
   // What it is standing ON, not what the ground column happens to be topped
   // with. See the player's copy of this below for the bug that distinction
   // fixes; a mob chasing you across your own bridge had exactly the same one.
@@ -1416,10 +1395,9 @@ static uint32_t updateMob(State& s, int idx) {
 
   // -- what it thinks is going on ----------------------------------------------
   //
-  // Mobs used to have exactly one idea, held from the tick they spawned to the
-  // tick they died: the player is over there. Everything below is the machinery
-  // for them to be wrong about that, which is what makes a night something you
-  // can hide from rather than a countdown.
+  // Everything below is the machinery for a mob to be WRONG about where the
+  // player is, which is what makes a night something you can hide from rather
+  // than a countdown.
   const bool siege = s.sealedTicks > SEALED_TRIGGER;
   {
     if (m.los) m.attn = 0;
@@ -1903,9 +1881,8 @@ static uint32_t playerAct(State& s) {
   }
 
   // Nothing in the arc and nothing under the crosshair: the swing still happens.
-  // It used to return silently, so holding the attack button in open air moved
-  // nothing, made no sound, and did not even animate the pickaxe — the one
-  // input the player presses most often did nothing at all when it missed.
+  // Returning silently leaves the one input the player presses most often doing
+  // nothing at all when it misses — no motion, no sound, no animation.
   //
   // Rate-limited by the animation rather than by the swing cooldown: an
   // eighteen-tick lockout for hitting air would make combat sluggish the moment
@@ -1936,9 +1913,8 @@ static uint32_t playerAct(State& s) {
   // even on the ticks that break nothing.
   s.sfxDigMat = world::blockAt(s.aimX, s.aimY, s.aimZ);
 
-  // The block the crosshair is on, not the top of the column it belongs to.
-  // Those used to be different things, and aiming at the foot of a six-high
-  // wall took the block off its top.
+  // The block the crosshair is on, not the top of the column it belongs to --
+  // or aiming at the foot of a six-high wall takes the block off its top.
   switch (world::mine(s.aimX, s.aimY, s.aimZ, effort, dropM, dropB)) {
     case world::MINE_BROKE: {
       // Grass gives dirt, as it does in Minecraft. It is also one material
@@ -2030,9 +2006,9 @@ uint32_t tick(State& s, const Input& in) {
   }
   s.jumpHeld = in.jump;
 
-  // The height every movement test is measured from. On the ground this is
-  // feetZ, as it always was; in the air it is the arc, which is what lets a
-  // jump clear a ledge the walker would have been stopped by.
+  // The height every movement test is measured from. On the ground that is
+  // feetZ; in the air it is the arc, which is what lets a jump clear a ledge
+  // the walker would have been stopped by.
   const int fromH = s.airborne ? (int)floorf(s.footZ) : (int)s.feetZ;
 
   float fwd = 0.0f;

@@ -41,14 +41,10 @@ static void test_border_is_full_height_bedrock(void) {
   TEST_ASSERT_TRUE(isBorder(-1, -1));
 }
 
-// generate() used to be able to drop the player inside a hill. The spawn pad
-// is cleared last, after the structures, precisely so a tree or a ruin cannot
-// land on it.
-//
-// The slab as well as the column. The clear used to reset height and material
-// and leave the second run behind, which put a roof, an eave or a tree crown
-// over the landing pad with nothing underneath holding it — rare while only
-// ruins had slabs, routine now that every tree does.
+// The spawn pad is cleared last, after the structures, so a tree or a ruin
+// cannot land on it — and the slab is cleared as well as the column, or a roof,
+// an eave or a tree crown is left over the landing pad with nothing holding it
+// up.
 static void test_spawn_pad_is_clear(void) {
   for (uint32_t seed = 1; seed <= 25; ++seed) {
     generate(seed);
@@ -74,9 +70,9 @@ static void test_terrain_never_starts_below_ground(void) {
 
 // ---- material profile -------------------------------------------------------
 
-// A tree is a cap of leaves over a trunk over ordinary soil. It used to be
-// leaves sitting on a plug of dirt, because the soil profile was measured from
-// the column top rather than from ground level.
+// A tree is a cap of leaves over a trunk over ordinary soil -- not leaves on a
+// plug of dirt, which is what measuring the soil profile from the column top
+// rather than from ground level produces.
 static void test_tree_is_wood_under_leaves(void) {
   generate(4242);
   int canopies = 0, trunks = 0;
@@ -100,12 +96,10 @@ static void test_tree_is_wood_under_leaves(void) {
   TEST_ASSERT_TRUE(trunks > 0);       // at least one tree was tall enough
 }
 
-// And the trunk you can see is the trunk you get. The leaf band used to be the
-// top *two* layers of the column, measured from a height that mining changes:
-// take the cap off and the block under it became the new top two, so the leaves
-// walked down the trunk ahead of the pick and a whole tree yielded nothing but
-// leaves. B_WOOD was in the material table, described as the trunk, drawn on
-// the side of every tree, and could not be obtained at all.
+// And the trunk you can see is the trunk you get. Measure the leaf band from a
+// height that mining changes and the leaves walk down the trunk ahead of the
+// pick: a whole tree yields nothing but leaves, and B_WOOD cannot be obtained
+// at all.
 static void test_chopping_a_tree_actually_yields_wood(void) {
   generate(4242);
   int tx = -1, ty = -1;
@@ -170,15 +164,11 @@ static void test_a_tree_canopy_hangs_over_walkable_ground(void) {
   TEST_ASSERT_TRUE(canopies > 0);
 }
 
-// Fell the tree and the crown stays exactly where it was.
-//
-// This test used to assert the opposite, and the opposite is what the game
-// did: cutting the last log deleted the whole canopy on the same tick. That is
-// not what Minecraft does — a chopped oak leaves a crown hanging in the air
-// that you can climb into, harvest, or ignore — and it took the leaves out of
-// the player's reach in the process. The sweep that did it still exists and is
-// still correct, but it belongs to worldgen, where a platform cut out from
-// under a tree really would leave a crown over nothing.
+// Fell the tree and the crown stays exactly where it was — a chopped oak leaves
+// a crown hanging in the air that you can climb into, harvest, or ignore.
+// Deleting it on the tick the last log comes out takes the leaves out of the
+// player's reach. The sweep that does that belongs to worldgen, where a platform
+// cut out from under a tree really would leave a crown over nothing.
 static void test_felling_a_tree_leaves_its_canopy_standing(void) {
   generate(4242);
   int tx = -1, ty = -1;
@@ -246,12 +236,8 @@ static void test_a_house_has_posts_walls_and_a_roof(void) {
         // column too, which is exactly why the roof is part of the test.
         //
         // Read as "brick with wood directly under it" rather than "a wood
-        // column carrying a slab". Those used to be different things: a roof
-        // laid at exactly the wall's top height was a separate object floating
-        // at the height the column ended, and hasSlab() found it. A column is
-        // a bitmask now, so a roof resting on a wall is simply the next block
-        // up — which is what it always was in the world, and what the test
-        // should have been asking about.
+        // column carrying a slab": a column is a bitmask, so a roof resting on
+        // a wall is simply the next block up.
         const int h = (int)height(x, y);
         if (h < 2) continue;
         if (blockAt(x, y, h - 1) != B_BRICK) continue;
@@ -331,14 +317,13 @@ static void test_ore_is_below_the_dirt_band(void) {
   TEST_ASSERT_TRUE(sawOre);
 }
 
-// Light is craft-only now, so nothing the generator builds may emit any. The
-// three places that used to -- a house's interior torch, the village path, and
-// the castle brazier -- were free light sitting inside the best shelter on the
-// map, which is exactly the pressure the torch recipe is supposed to create.
+// Light is craft-only, so nothing the generator builds may emit any: a lit
+// house, path or brazier is free light inside the best shelter on the map,
+// which is exactly the pressure the torch recipe exists to create.
 //
 // Swept over seeds rather than checked on one: village, house and castle all
 // have placement tests that fail on some maps, so a single seed could pass by
-// simply not having built the thing that used to carry the torch.
+// simply not having built the thing under test.
 static void test_the_generator_places_no_light(void) {
   for (uint32_t seed = 1; seed <= 25; ++seed) {
     generate(seed);
@@ -598,9 +583,8 @@ static void test_biome_sets_the_surface_material(void) {
 // Light falls off with distance and follows the source when it moves.
 static void test_light_follows_its_source(void) {
   generate(11);
-  // Somewhere dark, found rather than assumed: the generator lights its own
-  // villages and castles now, and one of them can sit near the middle of the
-  // map where this used to just take the centre cell.
+  // Somewhere dark, found rather than assumed: a village or castle can sit near
+  // the middle of the map, so the centre cell is not reliably unlit.
   int x = -1, y = -1;
   for (int j = 3; j < H - 3 && x < 0; ++j)
     for (int i = 3; i < W - 3 && x < 0; ++i)
@@ -636,10 +620,9 @@ static void test_lava_glows_and_is_unbreakable(void) {
   TEST_ASSERT_FALSE(mineTop(x, y, 1000000, m, b));
 }
 
-// place() used to ignore slabs completely, so a column could be raised
-// straight through a bridge deck, and the gap under one could be bricked shut
-// around whatever was standing in it — leaving a body in a cell the movement
-// rules say is impossible to occupy. A soak run found 2504 instances of it.
+// place() must not ignore slabs: a column raised straight through a bridge deck
+// bricks the gap shut around whatever is standing in it, leaving a body in a
+// cell the movement rules say is impossible to occupy.
 static void test_cannot_build_into_a_slab(void) {
   generate(11);
   const int x = W / 2, y = H / 2;
@@ -678,13 +661,11 @@ static void test_degenerate_input(void) {
 }
 
 
-// The bug this locks down: matAt measured soil depth from the column's CURRENT
-// height, and mining is what changes that height — so the layer under the one
-// you just took off was always "one below the top", which is the dirt band.
-// Digging down produced dirt forever and never reached stone, coal or iron.
-// Cliff faces rendered the bands correctly, so you could see ore, mine it, and
-// get dirt. Ore was obtainable only where the generator wrote it onto a
-// surface, which made going underground pointless.
+// The bug this locks down: measure soil depth from the column's CURRENT height
+// and mining changes that height, so the layer under the one you just took off
+// is always "one below the top", which is the dirt band. Digging down produces
+// dirt forever and never reaches stone, coal or iron — while cliff faces render
+// the bands correctly, so you can see ore, mine it, and get dirt.
 static void test_digging_down_reaches_stone_and_ore(void) {
   world::generate(88);
 
@@ -821,13 +802,8 @@ static void test_filling_a_tunnel_merges_the_run_back_in(void) {
 }
 
 // A column is a bitmask, so there is no limit on how many holes it can have.
-//
-// This test used to assert the opposite: a cell could describe three runs and
-// the fourth split was refused with MINE_NO_ROOM, before any effort was banked.
-// That refusal was a real rule the player met -- there were hillsides you were
-// simply not allowed to tunnel through -- and removing it is the point of the
-// change. What is checked now is that the refusal is gone and that every hole
-// is real.
+// Checks that no split is ever refused for want of room, and that every hole is
+// real.
 static void test_a_column_can_be_split_without_limit(void) {
   generate(88);
   const int x = W / 2 + 10, y = H / 2;

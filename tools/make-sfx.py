@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """Generate src/sfxdata.h — the game's sound bank, rendered as 8-bit PCM.
 
-The game used to synthesise on the device: every sound was a short table of
-constant-pitch, constant-volume steps handed to Speaker.tone(), which loops a
-16-sample wavetable at a frequency. That format has no envelope, so nothing
-decays and every impact ends by being cut off; and its "noise" is a 16-sample
-cycle played *at a pitch*, which is a buzz, not noise. An explosion built out of
-it is five beeps in a row. No amount of retuning the frequency tables fixes
-that, because the missing parts — decay, broadband noise, a continuous pitch
-fall — are not expressible in the format.
+Rendered here, once, offline; the device just plays them back through
+Speaker.playRaw(). Synthesising on the device means Speaker.tone(), which loops
+a 16-sample wavetable at a frequency — no envelope, so nothing decays, and its
+"noise" is a short cycle played at a pitch, which is a buzz. An explosion built
+out of that is five beeps in a row, and no retuning fixes it: decay, broadband
+noise and a continuous pitch fall are not expressible in the format.
 
-So the waveforms are rendered here instead, once, offline, and the device just
-plays them back through Speaker.playRaw(). That buys real envelopes, real noise
-and real sweeps for about 85 KB of flash out of a 3.2 MB partition, and costs no
-RAM at all: the arrays live in flash and the speaker task reads them in place.
+Rendering buys all three for about 85 KB of flash out of a 3.2 MB partition, and
+costs no RAM at all: the arrays live in flash and the speaker task reads them in
+place.
 
     ./tools/make-sfx.py                # rewrite src/sfxdata.h + the wav previews
     afplay tools/sfx-preview/explode.wav

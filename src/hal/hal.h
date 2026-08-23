@@ -48,10 +48,8 @@ struct Buttons {
   bool fwdEdge  = false, backEdge  = false;
   bool actEdge  = false;
   // The two keys every card is driven by, alongside the four arrows. Named for
-  // what they mean rather than for where they started: this used to be
-  // startEdge (title only) and pauseEdge (play only), and every screen picked
-  // its own key for "yes" and "get me out of here" -- E confirmed here, W
-  // backed out there, D committed on the craft card. One meaning, one key.
+  // what they mean, and meaning the same thing on every screen: one meaning,
+  // one key.
   bool confirmEdge = false;   // ENTER
   bool cancelEdge  = false;   // ESC -- one level up, whatever level that is
 
@@ -107,10 +105,9 @@ void beep(uint16_t freqHz, uint16_t ms);
 
 // One note on one mixing channel, with a timbre and a volume.
 //
-// beep() cannot layer: it names no channel, and the underlying tone() defaults
-// to cutting whatever is already sounding. That is why the game used to pick a
-// single event per frame and throw away the rest — mining while something bit
-// you was silent about one of the two.
+// beep() cannot layer: it names no channel, and the underlying tone() cuts
+// whatever is already sounding. This can, which is what lets a frame play every
+// event that fired in it rather than picking one.
 //
 // A board whose speaker is a passive buzzer implements this by ignoring channel
 // and wave and calling beep(). It loses the layering and the timbre; it does

@@ -41,9 +41,8 @@ static uint16_t s_prevSlot = 0;
 //
 // D falls just off the square and cycles the hotbar; SPACE, under the thumb,
 // jumps. No key means two things, which is the rule this layout is built on --
-// and it is why ENTER alone confirms now. Confirm used to be aliased onto the
-// act key, which was harmless while act was E and is not harmless at all now
-// that act is W: every card would be confirmed by the mine key.
+// and it is why ENTER alone confirms. Aliasing confirm onto the act key would
+// mean the mine key confirms every card in the game.
 static const Caps s_caps = {
   /*kTurn */ "\x1B\x1A",   // left/right arrows, drawn from the HUD font
   /*kMove */ "\x18\x19",   // up/down
@@ -53,8 +52,7 @@ static const Caps s_caps = {
   // ESC rather than ` -- the HUD font has no backtick, and the Cardputer has
   // no key engraved ESC either, but the one under the player's left thumb at
   // the top-left corner is where ESC lives on every keyboard they have ever
-  // used, and that is what a hint is for. TAB is no longer an alias for it:
-  // TAB opens the crafting card now.
+  // used, and that is what a hint is for.
   /*kBack*/ "ESC",
   /*kCycle*/ "D",
   /*kCraft*/ "TAB",
@@ -125,8 +123,8 @@ void update() {
   // rising edge is latched in the simulation instead, where it is seen once.
   b.jump  = kb.isKeyPressed(' ');
 
-  // ` alone. TAB used to be an alias for it and now opens the craft card, which
-  // is the one place a second key for "back" would have been actively wrong.
+  // ` alone. TAB opens the craft card, which is the one place a second key for
+  // "back" would have been actively wrong.
   const bool pause = kb.isKeyPressed('`');
   // D falls just off the square and steps the hotbar; TAB opens crafting.
   const bool cyc = kb.isKeyPressed('d');
@@ -138,10 +136,8 @@ void update() {
   b.backEdge  = b.back  && !s_prev.back;
   b.actEdge   = b.act   && !s_prev.act;
   b.buildEdge = b.build && !s_prev.build;
-  // ENTER, and only ENTER. The act key used to be aliased onto confirm because
-  // act was E and a hand on E would try it first; act is W now, and leaving the
-  // alias would mean the mine key confirms every card in the game. One meaning,
-  // one key -- which is what the hints have always named anyway.
+  // ENTER, and only ENTER. Aliasing the act key onto confirm would mean the
+  // mine key confirms every card in the game. One meaning, one key.
   b.confirmEdge = st.enter && !s_prevEnter;
   b.cancelEdge  = pause && !s_prevPause;
 

@@ -63,10 +63,9 @@ constexpr int H = render::H;
 // reads against grass as well as against a night sky. 0 is transparent, 1 the
 // outline, 2 the body, 3 the shine.
 //
-// Spelled out as a picture rather than generated from a curve, because at nine
-// pixels a heart is a specific arrangement of about forty of them and there is
-// no formula that gets the notch right. Squares were what this used to draw,
-// and a red square next to a red square is a bar, not a life.
+// Spelled out as a picture rather than generated from a curve: at nine pixels a
+// heart is a specific arrangement of about forty of them and no formula gets
+// the notch right.
 constexpr int HEART_PX = 9;
 static const uint8_t kHeart[HEART_PX][HEART_PX] = {
   { 0,1,1,0,0,0,1,1,0 },
@@ -92,22 +91,11 @@ static void heart(int x, int y, bool full) {
     }
 }
 
-// A block as an item: the block's own art, scaled down. Nothing else.
-//
-// These used to be three flat rectangles off the material's single average
-// colour, while the game had 16x16 art for every one of these blocks sitting in
-// RAM for the walls to sample. Grass on the hotbar was a green square; it is
-// grass now.
-//
-// There was briefly a lit top lip and a shaded right edge over it, carried over
-// from the flat-colour version where they were what made a swatch read as a
-// cube. They do not survive contact with a real texture. The lip stretched all
-// sixteen rows of the top tile into three pixels, which averages the texture
-// away to nothing and then brightens the mush toward white -- so it read as a
-// pale line stuck on top of the block rather than as a face, which is exactly
-// what it looked like. Three pixels is too few to read as a face at any
-// brightness. The texture is the thing worth showing, so it is the only thing
-// shown.
+// A block as an item: the block's own art, scaled down. Nothing else — no lit
+// top lip, no shaded edge. Three pixels is too few to read as a face at any
+// brightness, and stretching sixteen rows of the top tile into them averages
+// the texture away to a pale line stuck on top of the block. The texture is the
+// thing worth showing.
 //
 // mul is a 0..256 fixed-point scale on the whole icon. Greying an icon by
 // darkening it rather than by drawing it in one flat grey is what keeps an
@@ -268,18 +256,8 @@ static void cardGround(int x, int y, int w, int h) {
   render::frameRect(x, y, w, h, 1, C_CARD_ED);
 }
 
-// The line under the logo.
-//
-// It used to read SURVIVE THE NIGHT, which is the kind of slogan that describes
-// the game to someone who is already looking at it. Both of this game's parents
-// solved that the same way and neither of them played it straight: Futurama
-// puts a deadpan caption under its logo every episode, Minecraft puts a splash
-// line next to its own, and in both the joke is that the line is not selling
-// anything. So: a caption, deadpan, about the game or about nothing in
-// particular. There was a third group boasting about the hardware -- clock
-// speeds, byte counts, how little RAM there is -- and it was cut: the player
-// holding the thing does not need telling what it is, and it read as a spec
-// sheet wearing a joke.
+// The line under the logo. A deadpan caption in the Minecraft splash / Futurama
+// subtitle tradition, where the joke is that the line is not selling anything.
 //
 // Constrained by the font, which is uppercase and has no comma, apostrophe,
 // question mark or bracket -- see font5x7.h, where those slots are all zero and
@@ -288,9 +266,8 @@ static void cardGround(int x, int y, int w, int h) {
 // are all real glyphs.
 //
 // 38 characters is the limit. A glyph advances 6px, so 38 comes to 227px and
-// leaves a margin either side of the 240px panel; 40 characters reaches 239 and
-// touches both edges. Four of these were written a word too long and trimmed
-// rather than dropped.
+// leaves a margin either side of the 240px panel; 40 reaches 239 and touches
+// both edges.
 static const char* const kSplash[] = {
   // -- product disclaimer
   "CONTAINS 0% VOXELS BY VOLUME",
@@ -387,9 +364,8 @@ void title(const char* board, uint32_t best, int sel) {
   render::textCentred(W / 2, 58, buf, C_DIM, 1);
 
   // Two stops, driven the way every other card in the game is driven: the
-  // arrows move and ENTER does the thing. The four lines of control hints that
-  // used to be printed here have moved to the card behind CONTROLS, where they
-  // can be laid out properly instead of squeezed into a footer.
+  // arrows move and ENTER does the thing. Control hints live on the card behind
+  // CONTROLS, where they can be laid out properly.
   static const char* kRows[TITLE_ROWS] = { "START", "CONTROLS" };
   const int rowW = 108, rowH = 16, rowX = (W - rowW) / 2;
   for (int i = 0; i < TITLE_ROWS; ++i) {
@@ -540,10 +516,9 @@ void Menu::draw(const char* footer) const {
 // about three characters of a 5x7 font, and "STONE" and "SNOW" both start "S";
 // the block icons are what the hotbar has already taught the player to read.
 void craftCard(const game::State& s, const char* footer) {
-  // Sized and placed to clear the HUD rather than centred on the panel. The
-  // hearts start at H - HUD_H + 4 and the card used to be drawn straight over
-  // them, so crafting hid how close to dead you were -- and the bar underneath
-  // it, which is the one thing you are looking at while you decide what to make.
+  // Sized and placed to clear the HUD rather than centred on the panel: the
+  // hearts start at H - HUD_H + 4, and a card drawn over them hides how close
+  // to dead you are while you decide what to make.
   constexpr int CELL = 22, CGAP = 3;
   constexpr int cardW = 168, cardH = 100;
   const int left = (W - cardW) / 2, top = 2;

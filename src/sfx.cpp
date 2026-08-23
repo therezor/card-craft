@@ -5,14 +5,10 @@
 //  never blocks and never waits on the speaker: it starts a sound and notes when
 //  the channel comes free again.
 //
-//  A cue is a rendered waveform from sfxdata.h. It was not always: the sounds
-//  used to be spelled out as the step tables further down, which the sequencer
-//  walked one constant-pitch tone at a time. That is the format the beeps came
-//  from — it has no envelope, so nothing decays; its noise is a sixteen-sample
-//  cycle played at a pitch, which is a buzz; and it cannot sweep, so an
-//  explosion is five tones in a row rather than one long fall. The tables are
-//  still here as the fallback for a board with no PCM path, which is the same
-//  bargain hal.h makes everywhere else: less sound, never none.
+//  A cue is a rendered waveform from sfxdata.h. The step tables further down
+//  are the fallback for a board with no PCM path — constant-pitch tones, so no
+//  envelope and no sweep. That is the same bargain hal.h makes everywhere else:
+//  less sound, never none.
 // =============================================================================
 #include "sfx.h"
 
@@ -56,8 +52,7 @@ static const Step kNoBlocksS[] = {{ 150, 40, W_SQUARE, 110 }, {   0, 30, W_SQUAR
                                   { 130, 46, W_SQUARE,  90 }};
 
 // The swing itself, and the swing that hits nothing. A whiff is air: quiet,
-// wide, and gone. Before this a miss made no sound at all, so pressing the
-// attack button into empty space did nothing you could hear or see.
+// wide, and gone -- so attacking empty space still answers.
 static const Step kSwingS[] = {{ 900, 22, W_NOISE, 70 }, { 520, 26, W_NOISE, 45 }};
 static const Step kWhiffS[] = {{1400, 26, W_NOISE, 55 }, { 700, 40, W_NOISE, 35 },
                                { 400, 34, W_NOISE, 20 }};
@@ -111,7 +106,7 @@ static const Step kDuskS[] = {{ 330,140, W_TRI, 170 }, { 247,200, W_TRI, 150 }};
 static const Step kDawnS[] = {{ 392,120, W_TRI, 170 }, { 523,120, W_TRI, 170 },
                               { 659,200, W_TRI, 160 }};
 
-// A skeleton loosing an arrow, and the arrow arriving. Both used to be silent.
+// A skeleton loosing an arrow, and the arrow arriving.
 static const Step kArrowFireS[] = {{ 330, 30, W_SAW, 120 }, { 900, 26, W_NOISE, 60 }};
 static const Step kArrowHitS[]  = {{ 700, 22, W_NOISE, 170 }, { 160, 40, W_TRI, 130 }};
 
@@ -287,41 +282,21 @@ struct MusNote {
 // until the harmony is landing under the wrong bar -- see the static_assert
 // below, which is what stops that being found by ear six months from now.
 //
-// TWO WRONG VERSIONS CAME BEFORE THIS ONE, and the second was wrong in the
-// opposite direction from the first, which is worth writing down.
+// Three things keep it calm rather than shrill on a speaker this size, and none
+// of them is silence:
 //
-// The first put a note on every beat of every bar. Sixteen bars of
-// root-rest-fifth-rest is a metronome, and hal::voice has no envelope, so each
-// note is a flat tone starting and stopping at full volume. It became a tick
-// you could not stop hearing.
+//   REGISTER. 174-440 Hz, almost entirely below middle C. Above ~900 Hz is
+//   where a speaker this small is harshest and the ear least willing to look
+//   away; below ~170 it does not really reproduce at all.
 //
-// The fix for that was more silence -- 55% of the loop, one note every two
-// seconds -- and it was the wrong lever. Measuring a calm track from the genre
-// settles it: 1.40 notes a second, almost no silence at all, and it is still
-// calm. Density was never the problem.
+//   TWO NOTES AT ONCE. The voices land together on the downbeats as thirds and
+//   fifths, and the upper one moves alone after. That is what the second
+//   channel is for; a melody over a separate pulse sounds thin.
 //
-// Three things were, and all three are here:
+//   SHORT NOTES. 500 and 1000 ms with a few 1500s. hal::voice has no envelope,
+//   so a three-second tone is a drone rather than a note.
 //
-//   REGISTER. The reference sits at 97-311 Hz, entirely below middle C. This
-//   used to run to 988 Hz, which is the part of the spectrum a small speaker is
-//   harshest in and the ear is least willing to ignore. 174-440 Hz now -- the
-//   bottom is raised off the reference's because a speaker this size does not
-//   really reproduce 97 Hz, so going as low again would trade shrill for
-//   inaudible.
-//
-//   TWO NOTES AT ONCE. Nearly half the reference's attacks are dyads, mostly
-//   major thirds. This had a melody and a separate accompanying pulse and never
-//   struck two notes together at all, which is most of why it sounded thin. The
-//   two voices land together on the downbeats now and the upper one moves alone
-//   after -- that is what the second channel is for.
-//
-//   SHORT NOTES. The reference is built from 500 and 1000 ms with a few 1500s.
-//   This was built from 1500s and 3000s, and a three-second flat tone with no
-//   envelope is a drone rather than a note.
-//
-// The melody is original. What was taken from the measurement is proportion --
-// how low, how dense, how often two notes sound together, how long a note runs
-// -- and none of that is anybody's tune.
+// The melody is original.
 
 // The upper voice. Lands with the lower one on a downbeat, then moves alone.
 static constexpr MusNote kMelody[] = {
