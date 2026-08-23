@@ -797,13 +797,12 @@ TIER_PALETTES = {
 #
 # Three 16x16 cells, mirrored and recoloured into the tier palettes.
 #
-# These three are the reference sheet's own pixels, mirrored and recoloured.
 # Nothing is redrawn, and nothing should be: laying the shape out from geometry
-# or upscaling it with scale2x both drift off the source, because the shading
+# or upscaling it with scale2x both drift off the original, because the shading
 # stops following the form and starts following the curve. Recolouring is the
 # whole job here.
 #
-# Mirrored because the sheet holds tips up-RIGHT with handles off the
+# Mirrored because the cells hold tips up-RIGHT with handles off the
 # bottom-LEFT, and render.cpp anchors held items head-top-left with the handle
 # leaving by the bottom-right corner, which is where the hand is.
 #
@@ -1002,6 +1001,7 @@ MOB_ORDER = ["zombie", "creeper", "skeleton"]
 VIEWS = {"zombie": 3, "creeper": 3, "skeleton": 3}
 WALK  = {"zombie": 2, "creeper": 2, "skeleton": 2}
 
+
 def parse(art, legend, name, idx):
     rows = [r for r in art.strip("\n").split("\n")]
     w = max(len(r) for r in rows)
@@ -1018,6 +1018,7 @@ def parse(art, legend, name, idx):
                 sys.exit(f"{name}[{idx}] row {y} col {x}: unknown glyph {ch!r}")
         out.append(line)
     return out, w, len(rows)
+
 
 def emit(path):
     parts = []
@@ -1137,6 +1138,7 @@ def emit(path):
     path.write_text("".join(parts))
     print(f"wrote {path}")
 
+
 def show():
     for fam, frames in SPRITES.items():
         pal = PALETTES[fam]
@@ -1148,6 +1150,7 @@ def show():
             for row in g:
                 print("  " + "".join(rev.get(v, ".") for v in row))
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--show", action="store_true")
@@ -1157,6 +1160,7 @@ def main():
         show()
     else:
         emit(args.out)
+
 
 if __name__ == "__main__":
     main()
