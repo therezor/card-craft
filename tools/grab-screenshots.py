@@ -2,12 +2,20 @@
 """Pull frames off a Cardputer running the cardputer-dev build and write PNGs.
 
     pio run -e cardputer-dev -t upload
-    ./tools/grab-screenshots.py --out docs/img
+    ./tools/grab-screenshots.py --tour        # the whole README set
+    ./tools/grab-screenshots.py               # one frame of whatever is on screen
 
 Sends 's' and reads back one frame in the wire format screenshot.h documents.
+--tour poses each shot first, using the dev commands main.cpp answers, so the
+set can be regenerated without anyone driving the keyboard.
+
 Standard library only apart from pyserial, and the PNG encoder is right here,
 so regenerating the README images needs nothing installed beyond the serial
 module PlatformIO already ships.
+
+The world is a fresh random one every time, so a --tour run photographs a
+different map than the last. Capture to a scratch directory and pick, rather
+than writing straight over docs/img.
 """
 
 import argparse
@@ -109,25 +117,27 @@ def grab(ser, timeout):
 
 # The README set, as (name, setup commands, frames to grab).
 #
-# Order matters twice. `title` is first because the board boots into the title
-# card and no command returns to it. `mobs` is after the scenery shots because
-# 'm' flattens a 25x25 yard around the player to pose in.
+# Order matters: `mobs` comes after the scenery shot because 'm' flattens a
+# 25x25 yard around the player to pose in. The 'cc' in the first setup opens and
+# closes the craft card, which stocks the bar so the hand is holding something.
+# A space in a setup string is a pause, not a command.
 #
 # More than one frame where the scene is alive: 'm' poses mobs at seven cells
 # and they will land a blow, which paints a red border over the shot. Grab a
 # few and keep the clean one.
 TOUR = [
-    ("title",   "",     1),
-    ("hero",    "ndg",  1),
-    ("world",   "g",    1),
-    ("craft",   "c",    1),
-    ("recipes", "r",    1),
-    ("mobs",    "rcim", 4),
-    ("night",   "k",    4),
+    ("hero",    "ncc dg", 1),
+    ("craft",   "c",      1),
+    ("recipes", "r",      1),
+    ("mobs",    "rcim",   4),
+    ("night",   "k",      4),
 ]
 
 
 def send(ser, cmd, settle=0.6):
+    if cmd == " ":
+        time.sleep(settle)
+        return
     ser.write(cmd.encode())
     ser.flush()
     time.sleep(settle)
