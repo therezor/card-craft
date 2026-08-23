@@ -25,16 +25,11 @@ constexpr int DAY_TICKS    = 180 * TICK_HZ;
 constexpr int NIGHT_TICKS  = 120 * TICK_HZ;
 constexpr int MAX_MOBS     = 24;
 
-// How many mobs the dark holds at once. Nights used to be waves: dusk handed
-// out a budget of 3 + 2 per night, the spawner paid it out and then stopped, so
-// a night was a fixed quantity of monsters you could count down. This is the
-// Minecraft shape instead — the dark keeps producing while there is room for
-// more, and the way a night ends is that the sun comes up.
-//
-// Twelve, not MAX_MOBS: the array has to keep headroom above the cap for the
-// siege, which ignores it. Twelve on screen is also about where the frame
-// budget starts to notice.
-constexpr int MOB_CAP      = 12;
+// How many mobs the dark holds at once. The dark keeps producing while there is
+// room for more, and a night ends when the sun comes up rather than when a
+// budget runs out. Below MAX_MOBS, because the array has to keep headroom for
+// the siege path, which ignores this cap.
+constexpr int MOB_CAP      = 8;
 constexpr int TOOL_ANIM    = 16;   // frames in one pickaxe swing, ~0.27 s
 
 // How long the player stays loud after doing something loud. Mining, building
@@ -62,9 +57,9 @@ enum MobState : uint8_t {
 };
 
 enum MobKind : uint8_t {
-  MOB_ZOMBIE,     // melee, slow, night 1+
-  MOB_CREEPER,    // detonates and destroys blocks, night 2+
-  MOB_SKELETON,   // ranged, keeps its distance, night 4+
+  MOB_ZOMBIE,     // melee, slow
+  MOB_CREEPER,    // detonates and destroys blocks
+  MOB_SKELETON,   // ranged, keeps its distance
   MOB_COUNT
 };
 

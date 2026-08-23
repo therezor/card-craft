@@ -77,7 +77,9 @@ constexpr int   IFRAME_TICKS  = 26;     // immunity after a mob lands a blow
 constexpr int   HIT_FLASH     = 5;      // ticks a struck mob shows white
 constexpr int   WHIFF_FRAME   = 7;      // the strike frame of the swing animation
 constexpr int   HURT_TICKS    = 12;
-constexpr float MIN_SPAWN_DIST= 11.0f;
+// Well past raycast::MAX_DIST, so a mob is always something that walks in out
+// of the dark rather than something that appears at the fog line.
+constexpr float MIN_SPAWN_DIST= 16.0f;
 // Radius of the crater, in cells, and — through detonate() below — the reach of
 // the damage as well, which is CREEPER_BLAST + 1.
 //
@@ -2271,8 +2273,8 @@ uint32_t tick(State& s, const Input& in) {
     } else if (siege ? (creepers < SIEGE_CAP && alive < MAX_MOBS)
                      : (alive < MOB_CAP)) {
       // A fixed cadence, not one that ramps with the night count. What paces a
-      // night now is how fast the player clears the cap, not a difficulty dial.
-      s.spawnTimer = siege ? (uint16_t)(TICK_HZ / 2) : (uint16_t)35;
+      // night is how fast the player clears the cap, not a difficulty dial.
+      s.spawnTimer = siege ? (uint16_t)(TICK_HZ / 2) : (uint16_t)75;
 
       if (spawnMob(s)) {
         s.spawnFails = 0;
