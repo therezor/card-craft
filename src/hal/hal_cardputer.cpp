@@ -100,7 +100,18 @@ void update() {
   auto& kb = M5Cardputer.Keyboard;
   s_prev = s_btn;
 
-  const auto st = kb.keysState();
+  // A reference, and it has to be one. keysState() hands back a reference to the
+  // library's own buffer, but that buffer is a struct with three std::vectors in
+  // it -- `const auto` deduces the value type and copies all three. The copy
+  // allocates only when a vector is non-empty, and the library fills them only
+  // while a key is actually down (Keyboard.cpp guards its reserve() block on
+  // key_count > 0), so this was three mallocs and three frees per frame for as
+  // long as any key was held, and nothing at all otherwise.
+  //
+  // That made keypresses the only place the play loop reached the allocator at
+  // all, on a board with ~35 KB free. Nothing here ever read the vectors: only
+  // the `tab` and `enter` flags are used, and those are plain bools.
+  const auto& st = kb.keysState();
   Buttons b;
   // Right hand: the arrow cluster moves the player and the menu cursor.
   b.left  = kb.isKeyPressed(',');
