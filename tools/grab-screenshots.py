@@ -107,6 +107,73 @@ def grab(ser, timeout):
     return name, rgb565_to_rgb888(bytes(data), w, h, order == "be")
 
 
+# The README set, as (name, setup commands, frames to grab).
+#
+# Order matters twice. `title` is first because the board boots into the title
+# card and no command returns to it. `mobs` is after the scenery shots because
+# 'm' flattens a 25x25 yard around the player to pose in.
+#
+# More than one frame where the scene is alive: 'm' poses mobs at seven cells
+# and they will land a blow, which paints a red border over the shot. Grab a
+# few and keep the clean one.
+TOUR = [
+    ("title",   "",     1),
+    ("hero",    "ndg",  1),
+    ("world",   "g",    1),
+    ("craft",   "c",    1),
+    ("recipes", "r",    1),
+    ("mobs",    "rcim", 4),
+    ("night",   "k",    4),
+]
+
+
+def send(ser, cmd, settle=0.6):
+    ser.write(cmd.encode())
+    ser.flush()
+    time.sleep(settle)
+
+
+def fps_off(ser):
+    """The frame counter is a persisted setting, so it may be on from a previous
+    session. 'f' toggles it and echoes the new state."""
+    for _ in range(2):
+        ser.reset_input_buffer()
+        send(ser, "f", 0.3)
+        for line in ser.read(256).decode("ascii", "replace").splitlines():
+            if line.startswith("showfps="):
+                if line.endswith("0"):
+                    return True
+                break
+    return False
+
+
+def save(rows, path, scale):
+    h, w = len(rows), len(rows[0]) // 3
+    write_png(path, rows, w, h, scale)
+    print(f"  {path}  {w}x{h} x{scale}")
+
+
+def run_tour(ser, args):
+    if not fps_off(ser):
+        print("  could not confirm the frame counter is off", file=sys.stderr)
+
+    saved = 0
+    for name, setup, frames in TOUR:
+        for cmd in setup:
+            send(ser, cmd)
+        for i in range(frames):
+            if i:
+                time.sleep(args.interval)
+            _, rows = grab(ser, args.timeout)
+            if not rows:
+                print(f"  {name}: grab {i + 1} failed", file=sys.stderr)
+                continue
+            stem = name if frames == 1 else f"{name}-{i:02d}"
+            save(rows, args.out / f"{stem}.png", args.scale)
+            saved += 1
+    return saved
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/cu.usbmodem201301")
@@ -115,12 +182,17 @@ def main():
     ap.add_argument("--count", type=int, default=1, help="frames to grab")
     ap.add_argument("--interval", type=float, default=2.0, help="seconds between grabs")
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--tour", action="store_true",
+                    help="pose and capture the whole README set")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    saved = 0
     with serial.Serial(args.port, 115200, timeout=1.0) as ser:
         time.sleep(0.4)
+        if args.tour:
+            return 0 if run_tour(ser, args) else 1
+
+        saved = 0
         for i in range(args.count):
             if i:
                 time.sleep(args.interval)
@@ -128,11 +200,8 @@ def main():
             if not rows:
                 print(f"  grab {i + 1} failed", file=sys.stderr)
                 continue
-            h, w = len(rows), len(rows[0]) // 3
             stem = name if args.count == 1 else f"{name}-{i:02d}"
-            path = args.out / f"{stem}.png"
-            write_png(path, rows, w, h, args.scale)
-            print(f"  {path}  {w}x{h} x{args.scale}")
+            save(rows, args.out / f"{stem}.png", args.scale)
             saved += 1
     return 0 if saved else 1
 
