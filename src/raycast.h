@@ -80,11 +80,12 @@ constexpr float slopeFor(int horizon) {
   return (float)(VIEW_H / 2 - horizon) / PROJ;
 }
 
-// One cell past where the fog shuts. render::fogAt is solid from 8 cells, and a
-// span drawn past that is exactly the fog colour the background already holds.
-// Shorter than this and the walker stops before the fog has finished closing,
-// which reads as a cut-off edge rather than as distance.
-constexpr float MAX_DIST  = 9.0f;
+// One cell past where the fog shuts, which render::BANDS and BAND_CELLS decide
+// between them: the ramp saturates two bands early, so at ten bands of two
+// cells the haze is solid from sixteen. A span drawn past that is exactly the
+// fog colour the background already holds; shorter, and the walker stops before
+// the fog has closed, which reads as a cut-off edge rather than as distance.
+constexpr float MAX_DIST  = 17.0f;
 constexpr int   MAX_STEPS = 72;
 // A column is 135 rows, so this cannot be reached by geometry that tiles the
 // panel — but a stack thirty-two blocks tall seen edge-on emits one span per
@@ -94,12 +95,19 @@ constexpr int   MAX_STEPS = 72;
 constexpr int   MAX_SPANS = 112;
 
 // Distance buckets recorded per column for sprite occlusion. See castColumn.
-// One bucket per cell — the finest resolution that means anything in a world of
-// unit cubes, affordable because MAX_DIST is short enough that twelve of them
-// cover the whole draw distance. A true per-pixel depth buffer would be 31 KB
-// and this board does not have it.
+//
+// The COUNT is expensive and the SPAN is free: render.cpp keeps three
+// [VIEW_W][ZBUCKETS] byte arrays, so every added bucket is 720 bytes of
+// internal RAM, and the DMA framebuffers have nothing like that to spare. So
+// the buckets widen with the draw distance rather than multiplying, the same
+// trade render::BANDS makes. Twelve of one and a half cells reach eighteen.
+//
+// Not much wider than this: at four cells a mob anywhere in the same bucket as
+// the wall in front of it is tested against occlusion that wall has not
+// contributed yet, and it draws straight through. A true per-pixel depth buffer
+// would be 31 KB and this board does not have it.
 constexpr int   ZBUCKETS     = 12;
-constexpr float ZBUCKET_SPAN = 1.0f;
+constexpr float ZBUCKET_SPAN = 1.5f;
 
 enum Face : uint8_t { F_NS = 0, F_EW = 1, F_TOP = 2, F_BOT = 3, F_COUNT = 4 };
 

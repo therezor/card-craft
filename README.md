@@ -79,4 +79,4 @@ pio run -e cardputer -t upload
 
 One build runs on both the Cardputer and the Cardputer ADV.
 
-<p align="center">MIT · made by <b>REZOR</b> · rezor.me</p>
+<p align="center">MIT · made by <b>REZOR</b> · <a href="https://rezor.me">rezor.me</a></p>

@@ -32,14 +32,22 @@
 
 namespace render {
 
-// Distance bands; band = distQ8 >> 8, i.e. one band per cell. This is the fog:
-// a block at BANDS cells is entirely fog colour, and raycast::MAX_DIST is set
-// one cell past it so the walker stops exactly where the haze finishes.
+// Distance bands: the fog ramp, and the rows of every shade table.
 //
-// Short on purpose. RUNGS sizes s_shade, s_edge, s_bevel and s_shadeSel, so
-// every band costs internal RAM — which on this board is margin against the two
-// framebuffers rather than a rounding error.
-constexpr int BANDS   = 10;
+// The count is what costs RAM -- RUNGS sizes s_shade, s_edge, s_bevel and
+// s_shadeSel, and on this board that is margin against the two 64.8 KB DMA
+// framebuffers rather than a rounding error. Two more bands is enough to stop
+// them being allocatable at boot, which fails as "No dma memory" and not as
+// anything the build report will tell you.
+//
+// So the draw distance is bought with the band WIDTH instead, which is free.
+// A band was one cell and is BAND_CELLS of them; the ramp reaches BANDS *
+// BAND_CELLS cells with exactly the tables it always had. What it gives up is
+// shade resolution with distance, and the 2x2 dither between neighbouring
+// bands was already there to hide precisely that.
+constexpr int BANDS      = 10;
+constexpr int BAND_SHIFT = 1;                    // cells per band, as a shift
+constexpr int BAND_CELLS = 1 << BAND_SHIFT;
 
 // Rungs below band 0, where a block is brighter than the ambient light of the
 // hour rather than merely un-fogged.
@@ -70,11 +78,12 @@ constexpr int RUNGS   = LIT + BANDS;
 // serves both ends: a smoothstep is symmetric, so it hazes the block in front of
 // you and only closes on the very last band it has.
 //
-//   cells   0     1     2     3     4     5     6     7     8     9
+//   band     0     1     2     3     4     5     6     7     8     9
 //           0.00  0.02  0.06  0.14  0.25  0.39  0.56  0.77  1.00  1.00
 //
-// Solid two cells before the walker stops, and those two cells of
-// nothing-but-fog are the margin the cut-off hides inside.
+// In bands, not cells -- a band is BAND_CELLS of them, so at ten bands of two
+// the haze is solid from sixteen cells and the walker stops at seventeen. That
+// last cell of nothing-but-fog is the margin the cut-off hides inside.
 //
 // One function, two callers -- the block shade tables and the mob shading. They
 // must not drift: blocks fogging on a different curve from the mobs standing
@@ -765,7 +774,11 @@ static void drawColumns(const raycast::Camera& cam, int selX, int selY, int selZ
       // ambient rungs to reach. Plus a small glow the player carries: the two
       // cells at your feet are readable at any hour, which is the difference
       // between a dark game and a blind one.
-      int bandQ = (int)(s.distQ8 >> 4) - ((int)s.lit << 4) + (LIT << 4);
+      int bandQ = (int)(s.distQ8 >> (4 + BAND_SHIFT)) - ((int)s.lit << 4)
+                + (LIT << 4);
+      // The glow keeps its radius AND its strength in cells and rungs, which is
+      // what leaving it unshifted means: sixteenths of a cell against a
+      // threshold of forty is two and a half cells either way.
       const int glow = (int)(s.distQ8 >> 4) - 40;
       if (glow < 0) bandQ += glow;                       // -40..0, strongest underfoot
       if (bandQ < 0) bandQ = 0;
@@ -1280,7 +1293,7 @@ void drawMobs(const game::State& s, const raycast::Camera& cam) {
     const sprites::MobArt& art = sprites::kMobArt[d.kind];
     const float invD = (float)raycast::PROJ / d.depth;
 
-    int band = (int)d.depth;
+    int band = (int)d.depth >> BAND_SHIFT;
     if (band >= BANDS) band = BANDS - 1;
     if (band < 0) band = 0;
 
@@ -1559,7 +1572,7 @@ void drawParticles(const raycast::Camera& cam) {
     // Shaded like everything else in the world. Emitting a packed colour meant
     // a shower of debris stayed at full daylight brightness after dark and read
     // as sparks of light rather than as pieces of the block it came off.
-    int band = (int)ty;
+    int band = (int)ty >> BAND_SHIFT;
     if (band >= BANDS) band = BANDS - 1;
     if (band < 0) band = 0;
     const uint16_t col = shadeMob(p.r, p.g, p.b, band,
@@ -1645,7 +1658,7 @@ void drawDrops(const game::State& s, const raycast::Camera& cam) {
     if (sz < 2) sz = 2;
     if (sz > 26) sz = 26;
 
-    int band = (int)ty;
+    int band = (int)ty >> BAND_SHIFT;
     if (band >= BANDS) band = BANDS - 1;
     if (band < 0) band = 0;
     const int lit = (int)world::light((int)d.x, (int)d.y);

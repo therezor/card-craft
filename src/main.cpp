@@ -986,6 +986,20 @@ void loop() {
                         && world::height(x, y) >= world::GROUND + 3
                         && (house ? !leafy : leafy);
           if (!hit) continue;
+          // For a tree, prefer one standing near a grass-capped step: a flat
+          // lawn photographs as a green field, and what says "blocks" is a rise
+          // with grass on top of it and the dirt showing down the side.
+          if (!house) {
+            bool hill = false;
+            for (int oy = -6; oy <= 6 && !hill; ++oy)
+              for (int ox = -6; ox <= 6 && !hill; ++ox) {
+                const int hx = x + ox, hy = y + oy;
+                if (world::isBorder(hx, hy)) continue;
+                hill = world::topMat(hx, hy) == world::B_GRASS
+                       && world::height(hx, hy) >= world::height(x, y) + 2;
+              }
+            if (!hill) continue;
+          }
           const int dx = x - world::W / 2, dy = y - world::H / 2;
           if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; bx = x; by = y; }
         }
@@ -994,11 +1008,11 @@ void loop() {
         // A spot to stand: far enough back to get the whole thing in frame,
         // and somewhere a body could actually be.
         int sx = -1, sy = -1;
-        // A tree is photographed from inside the draw distance or it is behind
-        // the fog, and eight blocks at seven cells is taller than the panel --
-        // so the distance cannot fix the framing and the pitch has to. Stand
-        // near the fog line and tilt up; see below.
-        const int rFar = house ? 10 : 8, rNear = house ? 6 : 6;
+        // A tree is photographed from well inside the draw distance or the fog
+        // greys it out, and eight blocks at five cells is taller than the panel
+        // -- so the distance cannot fix the framing and the pitch has to. Stand
+        // close and tilt up; see below.
+        const int rFar = house ? 10 : 6, rNear = house ? 6 : 4;
         for (int r = rFar; r >= rNear && sx < 0; --r)
           for (int a = 0; a < 24 && sx < 0; ++a) {
             const float th = (float)a * 0.2618f;
@@ -1026,7 +1040,7 @@ void loop() {
         raycast::setAngle(s_game.cam, s_game.angle);
         // Tilted up for a tree, level for a house. Part way, not the full stop
         // the look keys reach: 'l' goes to sixty degrees, which is all sky.
-        s_game.pitch = (float)(raycast::HORIZON + (house ? 0 : 44));
+        s_game.pitch = (float)(raycast::HORIZON + (house ? 0 : 34));
         raycast::setPitch(s_game.cam, (int)(s_game.pitch + 0.5f));
         Serial.printf("go: %s at (%d,%d), standing (%d,%d)\n",
                       house ? "house" : "tree", bx, by, sx, sy);

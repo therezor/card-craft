@@ -865,10 +865,9 @@ static bool placeBoulder(int cx, int cy, uint32_t& rng) {
 // A rock needle: one cell wide and five to eight tall. Useless, unmissable,
 // and the cheapest landmark in the generator.
 //
-// It was eight to fourteen, which is the height of a thing you are meant to see
-// from across the map — and the map is ten cells deep now. All that height did
-// at the range it was actually met from was run off the top of the panel, which
-// is the opposite of unmissable.
+// Sized against the draw distance rather than against the map: height a player
+// only meets from close up runs off the top of the panel, which is the opposite
+// of unmissable.
 static bool placeSpire(int x, int y, uint32_t& rng) {
   if (!clearArea(x - 1, y - 1, 3, 3, 2)) return false;
   rng = rng * 1664525u + 1013904223u;
@@ -913,13 +912,13 @@ static bool placeSnag(int x, int y, uint32_t& rng) {
 // Fog pulls every colour toward the same grey, so the three materials are
 // picked from opposite ends of the luminance list at the top of this file —
 // wood 67 for the corner posts, plank 155 for the walls, brick 116 for the
-// roof — and what survives ten cells of haze is a light box with dark posts at
+// roof — and what survives a view's worth of haze is a light box with dark posts at
 // its corners. The eave is what tells a roof from a lid. The torch is why you
 // run for one at dusk: it lights the inside, and the spawner will not put a
 // mob anywhere lit.
 //
 // Five or six cells square and four blocks to the wall top, down from eight and
-// six. The materials are what make it readable at ten cells; the size is what
+// six. The materials are what make it readable at range; the size is what
 // makes it readable at five, where one block is 32 of the panel's 135 rows and
 // the old roofline was off the top of the screen. Four is the floor and not a
 // preference: the sill has to be two blocks or STEP_UP lets a zombie walk in
@@ -1023,7 +1022,7 @@ static bool placeVillage(int cx, int cy, uint32_t& rng) {
 //
 // The gaps are not damage for its own sake. A ruin and the house above it are
 // the same silhouette at the distance either is first seen from, and a broken
-// wall is the one difference that survives being ten cells away and half in
+// wall is the one difference that survives being most of a view away and half in
 // fog. One is shelter you repair; the other is shelter you can just walk into.
 static bool placeRuin(int x0, int y0, int w, int d, uint32_t& rng) {
   if (!clearArea(x0 - 1, y0 - 1, w + 2, d + 2, 4)) return false;
