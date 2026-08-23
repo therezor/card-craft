@@ -933,6 +933,13 @@ static void workerTask(void*) {
   }
 }
 
+#ifdef DEV_SERIAL
+uint32_t workerStackFree() {
+  return s_worker ? (uint32_t)uxTaskGetStackHighWaterMark(s_worker) * sizeof(StackType_t)
+                  : 0u;
+}
+#endif
+
 void startWorker() {
   s_main = xTaskGetCurrentTaskHandle();
   // Core 0 is otherwise idle: the radios are never brought up, and Arduino

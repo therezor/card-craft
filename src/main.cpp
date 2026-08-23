@@ -175,7 +175,8 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
                 // against a total the framebuffers are not counted in, so the
                 // two cannot be subtracted to get this. Every new static array
                 // is spent against this number.
-                "heap=%u heapmax=%u "
+                "heap=%u heapmax=%u heaplow=%u heapok=%d "
+                "loopstack=%u wkrstack=%u marks=%d "
                 "present_us=%u wait_us=%u sfx_us=%u cast_us=%u draw_us=%u "
                 "fspans=%u ftall=%u fpix=%u fseg=%u\n",
                 fps, (unsigned)avgCpu, (unsigned)s_cpuMax, mobs,
@@ -184,6 +185,32 @@ void fpsSample(uint32_t frameUs, uint32_t cpuUs) {
                 (unsigned)render::g_usShade,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                // The low-water mark, and the reason it is here: this line
+                // prints twice a second, so a dip that opens and closes between
+                // two of them is invisible to `heap` above. Allocation in the
+                // play loop is bursty and keypress-shaped -- see the note on
+                // keysState() in hal_cardputer.cpp -- so the worst moment is
+                // exactly the one the sampling misses.
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                // Walks the allocator's own block headers. Zero here means
+                // something has written past the end of a heap block, which is
+                // the failure that does not announce itself: the board carries
+                // on and dies later somewhere unrelated. Printed every 30
+                // frames, so a zero dates the corruption to within half a
+                // second of the frame that caused it.
+                (int)heap_caps_check_integrity_all(true),
+                // Headroom left on the two stacks that run drawColumns. Neither
+                // has a guard page, and a stack that overflows takes out the
+                // heap block under it rather than faulting -- which surfaces as
+                // a hang somewhere unrelated, long after the frame that did it.
+                (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)),
+                (unsigned)render::workerStackFree(),
+                // Markers left in the placement pool. Not RAM pressure -- the
+                // pool is a fixed static array -- but a gameplay budget, and
+                // the only one in the program that a player can run out of by
+                // building. world.cpp says this is on the dev overlay; until
+                // now it was declared, defined, and called by nobody.
+                world::marksFree(),
                 (unsigned)render::g_usPresent, (unsigned)render::g_usWait,
                 (unsigned)s_usSfx,
                 // Cycles over 30 frames at 240 MHz, and both cores fold into the

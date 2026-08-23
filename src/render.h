@@ -146,6 +146,15 @@ extern uint32_t g_usPresent, g_usWait;
 // Walking the world against drawing it, in CPU cycles summed over both cores.
 extern uint32_t g_cyCast, g_cyCols;
 
+// Bytes never touched on the column worker's stack, at its lowest ever. The
+// worker runs drawColumns, whose frame is dominated by a 112-entry Span array
+// and a ColumnResult -- around 1.5 KB -- and there is no guard page on a
+// FreeRTOS task stack: overflowing it corrupts whatever heap block sits below
+// and the board dies somewhere else entirely, minutes later. Reported so the
+// margin is a measured number rather than an assumption about a stack size
+// nobody has checked since it was chosen.
+uint32_t workerStackFree();
+
 // Reads the panel's own memory back and compares it against the frame that was
 // pushed. The bus clock is the one setting whose failure is invisible from a
 // screenshot, which is taken from the framebuffer and so looks perfect however
