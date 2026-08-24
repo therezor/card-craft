@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.1
+
+- The keyboard no longer allocates while a key is held. Reading the key state
+  copied a structure containing three vectors, so holding any key ran three
+  allocations and three frees every frame — and that was the only place the
+  game reached the allocator at all while you were playing.
+- Developer builds report the heap low-water mark, a heap integrity check, the
+  margin left on both task stacks, and how much of the placement-marker pool is
+  spare. A freeze that happens once now leaves something behind to read.
+
+This came out of a report of the game freezing when the craft card was opened.
+That could not be reproduced, and nothing here is proven to be its cause: the
+heap measures 35.5 KB free and does not move when the card opens, and both
+stacks have room to spare. What the keyboard fix removes is the one place in
+the frame where a memory problem could have surfaced, which happens to be a
+keypress — the same keypress that opens the craft card.
+
 ## 1.0.0 — first public release
 
 A first-person survival game for the M5Stack Cardputer. Mine a world made of
